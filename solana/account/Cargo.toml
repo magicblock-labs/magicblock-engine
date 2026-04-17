@@ -1,40 +1,34 @@
 [package]
 name = "solana-account"
-description = "Solana Account type"
-documentation = "https://docs.rs/solana-account"
-version = "4.3.1"
+
 authors = { workspace = true }
-repository = { workspace = true }
+description = "Solana Account type"
+edition = { workspace = true }
 homepage = { workspace = true }
 license = { workspace = true }
-edition = { workspace = true }
-
-[package.metadata.docs.rs]
-targets = ["x86_64-unknown-linux-gnu"]
-all-features = true
-rustdoc-args = ["--cfg=docsrs"]
+readme = "README.md"
+repository = { workspace = true }
+version = "4.3.1"
 
 [features]
 bincode = ["dep:bincode", "dep:solana-sysvar", "serde"]
-wincode = ["dep:wincode", "solana-pubkey/wincode"]
-dev-context-only-utils = ["bincode", "dep:qualifier_attr"]
-frozen-abi = [
-    "dep:solana-frozen-abi",
-    "dep:solana-frozen-abi-macro",
-    "solana-pubkey/frozen-abi",
+serde = [
+    "bitflags/serde",
+    "dep:serde",
+    "dep:serde_bytes",
+    "serde/rc",
+    "solana-pubkey/serde",
 ]
-serde = ["dep:serde", "dep:serde_bytes", "dep:serde_derive", "solana-pubkey/serde"]
+testkit = ["bincode"]
+wincode = ["bincode", "dep:wincode", "solana-pubkey/wincode"]
 
 [dependencies]
 bincode = { workspace = true, optional = true }
-qualifier_attr = { workspace = true, optional = true }
+bitflags = { workspace = true }
 serde = { workspace = true, optional = true }
 serde_bytes = { workspace = true, optional = true }
-serde_derive = { workspace = true, optional = true }
 solana-account-info = { workspace = true }
 solana-clock = { workspace = true }
-solana-frozen-abi = { workspace = true, optional = true, features = ["frozen-abi"] }
-solana-frozen-abi-macro = { workspace = true, optional = true }
 solana-instruction-error = { workspace = true }
 solana-pubkey = { workspace = true }
 solana-sdk-ids = { workspace = true }
@@ -43,5 +37,8 @@ thiserror = { workspace = true }
 wincode = { workspace = true, features = ["alloc"], optional = true }
 
 [dev-dependencies]
-solana-account = { path = ".", features = ["dev-context-only-utils"] }
+solana-account = { path = ".", features = ["testkit"] }
 solana-pubkey = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true

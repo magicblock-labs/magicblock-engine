@@ -1,4 +1,5 @@
 [workspace]
+members = ["solana/account"]
 resolver = "3"
 
 [workspace.package]
@@ -7,8 +8,47 @@ edition = "2024"
 homepage = "https://github.com/magicblock-labs/engine"
 license = "Apache-2.0"
 repository = "https://github.com/magicblock-labs/engine"
-rust-version = "1.94.1"
+rust-version = "1.96.1"
 version = "0.1.0"
+
+[workspace.dependencies]
+magic-root-interface = { path = "programs/magic-root-interface" }
+magic-root-program = { path = "programs/magic-root-program" }
+solana-account = { path = "solana/account" }
+
+ahash = "0.8.12"
+arc-swap = "1.9.1"
+bincode = "1.3.3"
+bitflags = "2.11.1"
+blake3 = "1.8.5"
+qualifier_attr = "0.2.2"
+rand = "0.8.5"
+rustix = { version = "1.1.4" }
+serde = "1.0.228"
+serde_bytes = "0.11.19"
+serde_with = { version = "3.21.0", default-features = false }
+snedfile = "0.1"
+tar = "0.4.45"
+tempfile = "3"
+thiserror = "2.0.17"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+wincode = "0.5.1"
+zstd = { version = "0.13.3", default-features = false }
+
+agave-feature-set = { version = "3.1.14", features = ["agave-unstable-api"] }
+agave-transaction-view = { version = "3.1.13", features = ["agave-unstable-api"] }
+solana-account-info = "3.1.1"
+solana-clock = "3.1.0"
+solana-compute-budget-instruction = "=4.1.1"
+solana-cpi = "3.1.0"
+solana-hash = "4.3.0"
+solana-instruction-error = "2.3.0"
+solana-program-error = "3.0.1"
+solana-pubkey = "4.2.0"
+solana-sdk-ids = "3.1.0"
+solana-sysvar = "4.0.0"
+solana-transaction-error = "3.2.0"
+
 
 [workspace.lints.rust]
 missing_docs = "deny"
