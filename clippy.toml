@@ -1,0 +1,25 @@
+msrv = "1.94.1"
+
+cognitive-complexity-threshold = 20
+
+array-size-threshold = 8192
+enum-variant-size-threshold = 192
+future-size-threshold = 8192
+large-error-threshold = 96
+stack-size-threshold = 131072
+
+allow-expect-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-panic-in-tests = true
+allow-unwrap-in-tests = true
+
+max-fn-params-bools = 1
+max-struct-bools = 2
+
+check-private-items = true
+
+disallowed-methods = [
+    { path = "std::option::Option::unwrap", reason = "Use expect with context or handle the None case explicitly" },
+    { path = "std::result::Result::unwrap", reason = "Use expect with context or propagate the error explicitly" },
+    { path = "std::thread::sleep", reason = "Avoid timing-based flakiness in workspace code; isolate retries/backoff behind abstractions" }
+]
