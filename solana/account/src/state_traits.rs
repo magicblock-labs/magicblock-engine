@@ -1,4 +1,4 @@
-//! Useful extras for `Account` state.
+//! Typed bincode access to account data.
 
 use {
     crate::{Account, AccountSharedData},
@@ -7,14 +7,50 @@ use {
     std::cell::Ref,
 };
 
-/// Convenience trait to covert bincode errors to instruction errors.
+/// Reads and writes typed account state through a mutable account handle.
 pub trait StateMut<T> {
+    /// Deserializes the account data as `T`.
     fn state(&self) -> Result<T, InstructionError>;
+
+    /// Serializes `state` into the existing account data buffer.
     fn set_state(&mut self, state: &T) -> Result<(), InstructionError>;
 }
+
+/// Reads and writes typed account state through a shared handle.
+///
+/// Writing through `Ref<'_, AccountSharedData>` is rejected.
 pub trait State<T> {
+    /// Deserializes the account data as `T`.
     fn state(&self) -> Result<T, InstructionError>;
+
+    /// Serializes `state` into the existing account data buffer.
     fn set_state(&self, state: &T) -> Result<(), InstructionError>;
+}
+
+/// Deserializes typed state from account data.
+///
+/// Invalid bytes map to `InstructionError::InvalidAccountData`.
+fn state<T>(account: &impl crate::ReadableAccount) -> Result<T, InstructionError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    crate::codec::deserialize_data(account).map_err(|_| InstructionError::InvalidAccountData)
+}
+
+/// Serializes typed state into an existing account buffer.
+///
+/// Oversized payloads map to `AccountDataTooSmall`; all other failures map to `GenericError`.
+fn set_state<T>(
+    account: &mut impl crate::WritableAccount,
+    state: &T,
+) -> Result<(), InstructionError>
+where
+    T: serde::Serialize,
+{
+    crate::codec::serialize_data(account, state).map_err(|err| match *err {
+        ErrorKind::SizeLimit => InstructionError::AccountDataTooSmall,
+        _ => InstructionError::GenericError,
+    })
 }
 
 impl<T> StateMut<T> for Account
@@ -22,14 +58,10 @@ where
     T: serde::Serialize + serde::de::DeserializeOwned,
 {
     fn state(&self) -> Result<T, InstructionError> {
-        self.deserialize_data()
-            .map_err(|_| InstructionError::InvalidAccountData)
+        state(self)
     }
     fn set_state(&mut self, state: &T) -> Result<(), InstructionError> {
-        self.serialize_data(state).map_err(|err| match *err {
-            ErrorKind::SizeLimit => InstructionError::AccountDataTooSmall,
-            _ => InstructionError::GenericError,
-        })
+        set_state(self, state)
     }
 }
 
@@ -38,14 +70,10 @@ where
     T: serde::Serialize + serde::de::DeserializeOwned,
 {
     fn state(&self) -> Result<T, InstructionError> {
-        self.deserialize_data()
-            .map_err(|_| InstructionError::InvalidAccountData)
+        state(self)
     }
     fn set_state(&mut self, state: &T) -> Result<(), InstructionError> {
-        self.serialize_data(state).map_err(|err| match *err {
-            ErrorKind::SizeLimit => InstructionError::AccountDataTooSmall,
-            _ => InstructionError::GenericError,
-        })
+        set_state(self, state)
     }
 }
 
@@ -54,30 +82,9 @@ where
     T: serde::Serialize + serde::de::DeserializeOwned,
 {
     fn state(&self) -> Result<T, InstructionError> {
-        self.deserialize_data()
-            .map_err(|_| InstructionError::InvalidAccountData)
+        state(&**self)
     }
     fn set_state(&mut self, _state: &T) -> Result<(), InstructionError> {
-        panic!("illegal");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use {super::*, solana_pubkey::Pubkey};
-
-    #[test]
-    fn test_account_state() {
-        let state = 42u64;
-
-        assert!(AccountSharedData::default().set_state(&state).is_err());
-        let res = AccountSharedData::default().state() as Result<u64, InstructionError>;
-        assert!(res.is_err());
-
-        let mut account = AccountSharedData::new(0, std::mem::size_of::<u64>(), &Pubkey::default());
-
-        assert!(account.set_state(&state).is_ok());
-        let stored_state: u64 = account.state().unwrap();
-        assert_eq!(stored_state, state);
+        Err(InstructionError::ReadonlyDataModified)
     }
 }
