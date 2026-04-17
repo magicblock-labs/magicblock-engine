@@ -1,0 +1,38 @@
+[package]
+name = "solana-account"
+
+authors = { workspace = true }
+description = "Solana Account type"
+edition = { workspace = true }
+homepage = { workspace = true }
+license = { workspace = true }
+readme = "README.md"
+repository = { workspace = true }
+version = "4.2.0"
+
+[features]
+bincode = ["dep:bincode", "dep:solana-sysvar", "serde"]
+dev-context-only-utils = ["bincode", "dep:qualifier_attr"]
+serde = ["dep:serde", "dep:serde_bytes", "serde/rc", "solana-pubkey/serde"]
+wincode = ["dep:wincode", "solana-pubkey/wincode"]
+
+[dependencies]
+bincode = { workspace = true, optional = true }
+bitflags = { workspace = true, features = ["serde"] }
+qualifier_attr = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_bytes = { workspace = true, optional = true }
+solana-account-info = { workspace = true }
+solana-clock = { workspace = true }
+solana-instruction-error = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-sdk-ids = { workspace = true }
+solana-sysvar = { workspace = true, features = ["bincode"], optional = true }
+wincode = { workspace = true, features = ["alloc"], optional = true }
+
+[dev-dependencies]
+solana-account = { path = ".", features = ["dev-context-only-utils"] }
+solana-pubkey = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true

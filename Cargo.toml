@@ -1,4 +1,5 @@
 [workspace]
+members = ["solana/account"]
 resolver = "3"
 
 [workspace.package]
@@ -9,6 +10,31 @@ license = "Apache-2.0"
 repository = "https://github.com/magicblock-labs/engine"
 rust-version = "1.94.1"
 version = "0.1.0"
+
+[workspace.dependencies]
+solana-account = { path = "solana/account" }
+
+ahash = "0.8.12"
+bincode = "1.3.3"
+bitflags = "2.11.1"
+qualifier_attr = "0.2.2"
+rand = "0.8.5"
+serde = "1.0.228"
+serde_bytes = "0.11.19"
+shuttle = "0.7.1"
+static_assertions = "1.1.0"
+test-case = "3.3.1"
+thiserror = "2.0.17"
+wincode = "0.5.1"
+zstd = { version = "0.13.3", default-features = false }
+
+solana-account-info = "3.1.1"
+solana-clock = "3.0.1"
+solana-instruction-error = "2.3.0"
+solana-pubkey = "4.2.0"
+solana-sdk-ids = "3.1.0"
+solana-sysvar = "4.0.0"
+
 
 [workspace.lints.rust]
 missing_docs = "deny"
