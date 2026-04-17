@@ -1,0 +1,42 @@
+[package]
+name = "magicblock-accountsdb"
+
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+name = "accountsdb"
+
+[features]
+testkit = []
+
+[dependencies]
+nucleus = { workspace = true, features = ["heed", "metrics"] }
+
+ahash = { workspace = true }
+bincode = { workspace = true }
+bytemuck = { workspace = true, features = ["derive", "extern_crate_std"] }
+clonetree = { workspace = true }
+derive_more = { workspace = true, features = ["from"] }
+heed = { workspace = true }
+memmap2 = { workspace = true }
+parking_lot = { workspace = true }
+scc = { workspace = true, features = ["serde"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+twox-hash = { workspace = true, features = ["alloc", "xxhash3_64"] }
+
+solana-account = { workspace = true, features = ["serde"] }
+solana-pubkey = { workspace = true, features = ["bytemuck"] }
+
+[dev-dependencies]
+assert_matches = { workspace = true }
+nucleus = { workspace = true, features = ["testkit"] }
+
+[lints]
+workspace = true
