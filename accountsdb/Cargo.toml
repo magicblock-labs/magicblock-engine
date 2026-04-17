@@ -1,0 +1,34 @@
+[package]
+name = "magicblock-accountsdb"
+
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+name = "accountsdb"
+
+[dependencies]
+ahash = { workspace = true }
+bincode = { workspace = true }
+bytemuck = { workspace = true }
+clonetree = { workspace = true }
+heed = { workspace = true }
+memmap2 = { workspace = true }
+parking_lot = { workspace = true }
+scc = { workspace = true, features = ["serde"] }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+twox-hash = { workspace = true, features = ["alloc", "xxhash3_64"] }
+
+solana-account = { workspace = true, features = ["serde"] }
+solana-pubkey = { workspace = true, features = ["bytemuck"] }
+solana-sysvar = { workspace = true }
+
+
+[lints]
+workspace = true
