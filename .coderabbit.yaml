@@ -10,10 +10,15 @@ reviews:
   poem: false
   request_changes_workflow: true
 
+  
+  
   auto_review:
-    enabled: true
+    enabled: true               # Disables automatic reviews on push
     drafts: true
-  auto_incremental_review: true
+    labels: ["coderabbit"]       # Triggers review when this label is added
+    base_branches:
+      - ".*"
+    auto_incremental_review: false
 
   # Never pause after repeated pushes.
   auto_pause_after_reviewed_commits: 0
