@@ -1,0 +1,26 @@
+[package]
+name = "magicblock-ledger"
+
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+name = "ledger"
+
+[dependencies]
+bitcode = { workspace = true }
+bytemuck = { workspace = true }
+heed = { workspace = true }
+memmap2 = { workspace = true }
+parking_lot = { workspace = true }
+scc = { workspace = true }
+thiserror = { workspace = true }
+zstd = { workspace = true }
+
+[lints]
+workspace = true
