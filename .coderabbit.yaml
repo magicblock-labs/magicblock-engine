@@ -1,0 +1,36 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: "en-US"
+
+reviews:
+  profile: "chill"
+  high_level_summary: false
+  review_status: false
+  review_details: false
+  poem: false
+  request_changes_workflow: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+
+  path_instructions:
+    - path: "**/*.rs"
+      instructions: |
+        Review only when there is a meaningful issue in one of these buckets:
+        1. Critical security issues.
+        2. Critical correctness issues.
+        3. Maintenance issues that materially increase long-term complexity, duplication, or unnecessary abstraction. Focus on clear DRY/YAGNI violations only.
+        4. Typos in identifiers, comments, or user-facing strings.
+        5. Documentation inconsistencies between code, comments, examples, and public behavior.
+
+        For Rust workspace code:
+        - Prioritize ownership, borrowing, lifetimes, unsafe usage, panic paths, concurrency, and API contract correctness.
+        - Do not comment on minor style preferences, formatting, naming bikeshedding, speculative refactors, or micro-optimizations.
+        - Do not suggest changes unless the issue is concrete and actionable.
+
+    - path: "{**/*.md,**/*.rs}"
+      instructions: |
+        Check docs and rustdoc for factual consistency with the code.
+        Flag only real mismatches, broken examples, stale comments, or important omissions.
+        Ignore wording nits unless they are genuine typos or change meaning.
