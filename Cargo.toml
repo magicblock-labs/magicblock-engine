@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "accountsdb",
+    "keeper",
     "ledger",
     "nucleus",
     "programs/magic-root-interface",
@@ -27,6 +28,7 @@ version = "0.1.0"
 
 [workspace.dependencies]
 accountsdb = { path = "accountsdb", package = "magicblock-accountsdb" }
+keeper = { path = "keeper", package = "magicblock-keeper" }
 ledger = { path = "ledger", package = "magicblock-ledger" }
 magic-root-interface = { path = "programs/magic-root-interface" }
 magic-root-program = { path = "programs/magic-root-program" }
@@ -140,7 +142,6 @@ solana-transaction-context = { path = "solana/transaction-context" }
 missing_docs = "deny"
 rust_2018_idioms = { level = "warn", priority = -1 }
 unreachable_pub = "warn"
-unsafe_op_in_unsafe_fn = "allow"
 unused_lifetimes = "warn"
 unused_macro_rules = "warn"
 unused_qualifications = "warn"
