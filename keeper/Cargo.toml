@@ -1,0 +1,65 @@
+[package]
+name = "magicblock-keeper"
+
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+name = "keeper"
+
+[features]
+# Exposes `keeper::testkit`, the shared keeper-level test harness, as normal code
+# so downstream crates can import it via a dev-dependency (no new crate needed).
+testkit = ["accountsdb/testkit", "dep:solana-instruction", "ledger/testkit", "nucleus/testkit"]
+
+[dependencies]
+accountsdb = { workspace = true }
+ledger = { workspace = true }
+nucleus = { workspace = true, features = ["config", "notifier", "runtime"] }
+
+ahash = { workspace = true }
+arc-swap = { workspace = true }
+derive_more = { workspace = true, features = ["from"] }
+flume = { workspace = true }
+oneshot = { workspace = true }
+parking_lot = { workspace = true }
+scc = { workspace = true }
+serde = { workspace = true }
+tar = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+tracing = { workspace = true }
+zstd = { workspace = true }
+
+agave-feature-set = { workspace = true, features = ["agave-unstable-api"] }
+solana-account = { workspace = true, features = ["bincode"] }
+solana-feature-gate-interface = { workspace = true, features = ["bincode"] }
+solana-hash = { workspace = true }
+solana-instruction = { workspace = true, optional = true }
+solana-keypair = { workspace = true }
+solana-message = { workspace = true }
+solana-program-runtime = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-sdk-ids = { workspace = true }
+solana-signature = { workspace = true }
+solana-signer = { workspace = true }
+solana-svm = { workspace = true }
+solana-sysvar = { workspace = true }
+solana-transaction-error = { workspace = true }
+
+[dev-dependencies]
+keeper = { workspace = true, features = ["testkit"] }
+nucleus = { workspace = true, features = ["testkit"] }
+
+solana-instruction = { workspace = true }
+solana-keypair = { workspace = true }
+solana-signer = { workspace = true }
+tokio = { workspace = true, features = ["macros"] }
+
+[lints]
+workspace = true
