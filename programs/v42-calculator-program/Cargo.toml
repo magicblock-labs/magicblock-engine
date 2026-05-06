@@ -1,0 +1,32 @@
+[package]
+name = "v42-calculator-program"
+
+authors.workspace = true
+edition = "2021"
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+v42-calculator-interface = { workspace = true }
+
+solana-account-info = { workspace = true }
+solana-cpi = { workspace = true }
+solana-instruction = { workspace = true, features = ["syscalls"] }
+solana-msg = { workspace = true }
+solana-program-entrypoint = { workspace = true }
+solana-program-error = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-sysvar = { workspace = true, features = ["bytemuck"] }
+
+# Compiled to BPF with `cargo build-sbf`; the `rlib` lets it also build on the
+# host so the workspace's `cargo build`/`clippy` stay green.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints.rust]
+# The `entrypoint!` macro emits `target_os = "solana"` and `custom-heap`/
+# `custom-panic` feature gates that only exist under the SBF toolchain; silence
+# the noise they produce on host builds.
+unexpected_cfgs = { level = "allow" }

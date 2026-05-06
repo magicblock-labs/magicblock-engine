@@ -1,0 +1,75 @@
+# `magicblock-keeper`
+
+Keeper opens accountsdb and the ledger as one durable state boundary. It also
+owns startup account seeding, read-side caches, and live subscription fanout.
+Account routing remains in accountsdb and ledger retention remains in ledger.
+
+## Startup and recovery
+
+`KeeperBuilder::build` opens both stores and seeds active feature accounts,
+native builtins, configured loader-v4 programs, caller-provided accounts,
+authority funding, and sysvars.
+
+Accountsdb is restored from the newest retained snapshot when validation finds
+corruption or when its sealed superblock trails the ledger head. The original
+active tree is saved until the restored snapshot validates. Engine replay is
+responsible for advancing restored state from the successor of its sealed
+superblock through the ledger tip.
+
+Replication-staged snapshots carry an explicit marker. After restoring one,
+keeper advances the follower ledger's cumulative transaction count to the
+snapshot baseline before engine replay consumes the retained tail. Local
+recovery snapshots do not rebase the ledger count.
+
+`nucleus::config::BlockstoreParams` supplies the expected block time and
+non-zero superblock interval used by pacing and cache TTL calculation. The
+shared accountsdb, blockstore, and ledger parameters are defined by nucleus;
+keeper consumes them when opening its durable stores and caches.
+
+## Authority
+
+`nucleus::config::Authority::local` is the keypair used for locally signed
+messages. When `Authority::remote` is set, `Keeper::authority` returns that
+immediate upstream identity instead of the local pubkey, while `Keeper::signer`
+continues to return the local signer. Replication followers retain both values
+across restart.
+
+The effective authority also identifies the engine's sponsor account. Keeper
+creates this engine-local account only for an empty ledger, persists its spent
+balance across restarts, and restores its initial balance on reset. Startup
+rejects a non-empty deployment whose configured authority account is absent.
+
+## Superblock finalization
+
+`Keeper::finalize_superblock` snapshots accountsdb at the current ledger head,
+computes the persisted-account checksum, appends the corresponding
+`SuperblockSeal`, and archives the snapshot in the successor superblock
+directory.
+
+Finalization requires exclusive account-store access. Engine obtains that
+exclusivity through the sequencer and simulator barriers before calling it.
+
+## Synchronization
+
+`Keeper::sync(false)` flushes queued appends and accountsdb while keeping ledger
+workers available, as required by replay and replication. `Keeper::sync(true)`
+is the irreversible shutdown fence: it closes every reader after earlier queued
+requests, flushes and closes the appender, then flushes accountsdb.
+
+## Caches and subscriptions
+
+Signature and recent-block caches use slot-based TTLs with lazy eviction on
+insertion. The account cache is an LRU that also coordinates concurrent loads of
+missing accounts. Only non-authoritative modes enter the eviction LRU;
+delegated, ephemeral, and unresolved transient state remains outside it.
+
+Broadcast channels publish account and program updates, signature results, logs,
+processed transactions, blocks, cache evictions, completed snapshots, and
+service messages. They hold no durable state.
+
+## `testkit`
+
+The `testkit` feature exposes a keeper backed by throwaway directories plus v42
+account and transaction helpers. When enabled, Keeper's build script builds the
+v42 SBF artifact consumed by the harness. Downstream tests enable the feature on
+their dev-dependency instead of duplicating the setup.
