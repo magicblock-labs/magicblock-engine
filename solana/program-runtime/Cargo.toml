@@ -1,5 +1,7 @@
 [package]
 name = "solana-program-runtime"
+
+authors = { workspace = true }
 description = "Solana program runtime"
 documentation = "https://docs.rs/solana-program-runtime"
 version = { workspace = true }
@@ -7,7 +9,8 @@ authors = { workspace = true }
 repository = { workspace = true }
 homepage = { workspace = true }
 license = { workspace = true }
-edition = "2024"
+repository = { workspace = true }
+version = "4.1.1"
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]
@@ -17,9 +20,12 @@ crate-type = ["lib"]
 name = "solana_program_runtime"
 
 [features]
+# No-op stub retained only so external (patched-in) crates that reference
+# `solana-program-runtime/agave-unstable-api` still resolve; the lib is no
+# longer gated on it, and the upstream svm-* deps enable their unstable API
+# unconditionally below.
 agave-unstable-api = []
-conf-stack-frame-size = ["solana-sbpf/conf-stack-frame-size"]
-dev-context-only-utils = ["dep:solana-message"]
+dev-context-only-utils = []
 dummy-for-ci-check = ["metrics"]
 # Compatibility stub: this fork does not derive or consume frozen ABI metadata.
 frozen-abi = []
@@ -33,8 +39,8 @@ base64 = { workspace = true }
 bincode = { workspace = true }
 cfg-if = { workspace = true }
 itertools = { workspace = true }
-percentage = { workspace = true }
 qualifier_attr = { workspace = true, optional = true }
+scc = { workspace = true }
 serde = { workspace = true }
 solana-account = { workspace = true, features = ["bincode"] }
 solana-account-info = { workspace = true }
@@ -42,17 +48,10 @@ solana-clock = { workspace = true }
 solana-epoch-rewards = { workspace = true }
 solana-epoch-schedule = { workspace = true }
 solana-fee-structure = { workspace = true }
-solana-frozen-abi = { workspace = true, optional = true, features = [
-    "frozen-abi",
-] }
-solana-frozen-abi-macro = { workspace = true, optional = true, features = [
-    "frozen-abi",
-] }
 solana-hash = { workspace = true }
 solana-instruction = { workspace = true }
 solana-last-restart-slot = { workspace = true }
 solana-loader-v3-interface = { workspace = true }
-solana-message = { workspace = true, optional = true }
 solana-program-entrypoint = { workspace = true }
 solana-pubkey = { workspace = true }
 solana-rent = { workspace = true }
@@ -60,14 +59,13 @@ solana-sbpf = { workspace = true, features = ["jit"] }
 solana-sdk-ids = { workspace = true }
 solana-slot-hashes = { workspace = true }
 solana-stable-layout = { workspace = true }
-solana-stake-interface = { workspace = true, features = ["bincode", "sysvar"] }
-solana-svm-callback = { workspace = true }
-solana-svm-feature-set = { workspace = true }
-solana-svm-log-collector = { workspace = true }
-solana-svm-measure = { workspace = true }
-solana-svm-timings = { workspace = true }
-solana-svm-transaction = { workspace = true }
-solana-svm-type-overrides = { workspace = true }
+solana-svm-callback = { workspace = true, features = ["agave-unstable-api"] }
+solana-svm-feature-set = { workspace = true, features = ["agave-unstable-api"] }
+solana-svm-log-collector = { workspace = true, features = ["agave-unstable-api"] }
+solana-svm-measure = { workspace = true, features = ["agave-unstable-api"] }
+solana-svm-timings = { workspace = true, features = ["agave-unstable-api"] }
+solana-svm-transaction = { workspace = true, features = ["agave-unstable-api"] }
+solana-svm-type-overrides = { workspace = true, features = ["agave-unstable-api"] }
 solana-system-interface = { workspace = true }
 solana-sysvar = { workspace = true, features = ["bincode"] }
 solana-sysvar-id = { workspace = true }
@@ -83,12 +81,11 @@ solana-program-runtime = { path = ".", features = ["dev-context-only-utils"] }
 solana-pubkey = { workspace = true, features = ["rand"] }
 solana-signer = { workspace = true }
 solana-transaction = { workspace = true, features = ["dev-context-only-utils"] }
-solana-transaction-context = { path = "../transaction-context", features = [
-    "agave-unstable-api",
-    "bincode",
-    "dev-context-only-utils",
-] }
-test-case = { workspace = true }
+solana-transaction-context = { workspace = true, features = ["dev-context-only-utils"] }
+test-case = "3.3.1"
 
-[lints]
-workspace = true
+[lints.rust]
+unexpected_cfgs = "allow"
+
+[lints.clippy]
+too_many_arguments = "allow"
