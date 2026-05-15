@@ -17,26 +17,41 @@ fn get_max_instruction_stack_depth(simd_0268_active: bool) -> usize {
     }
 }
 
-//Default CPI invocation cost
-pub const DEFAULT_INVOCATION_COST: u64 = 946;
+/// Default CPI invocation cost.
+pub const DEFAULT_INVOCATION_COST: u64 = 1000;
+/// CPI invocation cost with SIMD-0339 active.
+pub const INVOKE_UNITS_COST_SIMD_0339: u64 = 946;
+
+fn get_invoke_unit_cost(simd_0339_active: bool) -> u64 {
+    if simd_0339_active {
+        INVOKE_UNITS_COST_SIMD_0339
+    } else {
+        DEFAULT_INVOCATION_COST
+    }
+}
 
 /// Max call depth. This is the maximum nesting of SBF to SBF call that can happen within a program.
 pub const MAX_CALL_DEPTH: usize = 64;
 
+/// The size of one SBF stack frame.
+pub const STACK_FRAME_SIZE: usize = 4096;
+
+/// Maximum compute units a transaction may request.
 pub const MAX_COMPUTE_UNIT_LIMIT: u32 = 1_400_000;
 
 /// Roughly 0.5us/page, where page is 32K; given roughly 15CU/us, the
 /// default heap page cost = 0.5 * 15 ~= 8CU/page
 pub const DEFAULT_HEAP_COST: u64 = 8;
+/// Default compute-unit limit for an instruction.
 pub const DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT: u32 = 200_000;
-// SIMD-170 defines max CUs to be allocated for any builtin program instructions, that
-// have not been migrated to sBPF programs.
+/// Maximum compute units allocated to native builtins that have not moved to SBF.
 pub const MAX_BUILTIN_ALLOCATION_COMPUTE_UNIT_LIMIT: u32 = 3_000;
+/// Maximum heap frame size a transaction may request.
 pub const MAX_HEAP_FRAME_BYTES: u32 = 256 * 1024;
+/// Minimum heap frame size.
 pub const MIN_HEAP_FRAME_BYTES: u32 = HEAP_LENGTH as u32;
 
-/// The total accounts data a transaction can load is limited to 64MiB to not break
-/// anyone in Mainnet-beta today. It can be set by set_loaded_accounts_data_size_limit instruction
+/// Default loaded account data limit for one transaction.
 pub const MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES: NonZeroU32 =
     NonZeroU32::new(64 * 1024 * 1024).unwrap();
 
@@ -63,7 +78,6 @@ pub struct SVMTransactionExecutionBudget {
     pub heap_size: u32,
 }
 
-#[cfg(feature = "dev-context-only-utils")]
 impl Default for SVMTransactionExecutionBudget {
     fn default() -> Self {
         Self::new_with_defaults(/* simd_0268_active */ false)
@@ -71,6 +85,7 @@ impl Default for SVMTransactionExecutionBudget {
 }
 
 impl SVMTransactionExecutionBudget {
+    /// Creates the default execution budget for the selected feature state.
     pub fn new_with_defaults(simd_0268_active: bool) -> Self {
         SVMTransactionExecutionBudget {
             compute_unit_limit: u64::from(MAX_COMPUTE_UNIT_LIMIT),
@@ -78,7 +93,7 @@ impl SVMTransactionExecutionBudget {
             max_instruction_trace_length: MAX_INSTRUCTION_TRACE_LENGTH,
             sha256_max_slices: 20_000,
             max_call_depth: MAX_CALL_DEPTH,
-            stack_frame_size: solana_sbpf::vm::get_stack_frame_size(),
+            stack_frame_size: STACK_FRAME_SIZE,
             heap_size: u32::try_from(solana_program_entrypoint::HEAP_LENGTH).unwrap(),
         }
     }
@@ -204,10 +219,16 @@ pub struct SVMTransactionExecutionCost {
 
 impl Default for SVMTransactionExecutionCost {
     fn default() -> Self {
+        Self::new_with_defaults(/* simd_0339_active */ false)
+    }
+}
+
+impl SVMTransactionExecutionCost {
+    pub fn new_with_defaults(simd_0339_active: bool) -> Self {
         SVMTransactionExecutionCost {
             log_64_units: 100,
             create_program_address_units: 1500,
-            invoke_units: DEFAULT_INVOCATION_COST,
+            invoke_units: get_invoke_unit_cost(simd_0339_active),
             sha256_base_cost: 85,
             sha256_byte_cost: 1,
             log_pubkey_units: 100,
@@ -258,9 +279,7 @@ impl Default for SVMTransactionExecutionCost {
             bls12_381_additional_pair_cost: 13_023,
         }
     }
-}
 
-impl SVMTransactionExecutionCost {
     /// Returns cost of the Poseidon hash function for the given number of
     /// inputs is determined by the following quadratic function:
     ///
@@ -282,19 +301,21 @@ impl SVMTransactionExecutionCost {
     /// [0] https://github.com/Lightprotocol/light-poseidon#performance
     pub fn poseidon_cost(&self, nr_inputs: u64) -> Option<u64> {
         let squared_inputs = nr_inputs.checked_pow(2)?;
-        let mul_result = self
-            .poseidon_cost_coefficient_a
-            .checked_mul(squared_inputs)?;
+        let mul_result = self.poseidon_cost_coefficient_a.checked_mul(squared_inputs)?;
         let final_result = mul_result.checked_add(self.poseidon_cost_coefficient_c)?;
 
         Some(final_result)
     }
 }
 
+/// Execution budget, loaded-data limit, and fee metadata for one transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SVMTransactionExecutionAndFeeBudgetLimits {
+    /// Compute and invocation limits.
     pub budget: SVMTransactionExecutionBudget,
+    /// Maximum loaded account data size.
     pub loaded_accounts_data_size_limit: u32,
+    /// Fee metadata carried with the transaction.
     pub fee_details: FeeDetails,
 }
 
@@ -311,6 +332,7 @@ impl Default for SVMTransactionExecutionAndFeeBudgetLimits {
 
 #[cfg(feature = "dev-context-only-utils")]
 impl SVMTransactionExecutionAndFeeBudgetLimits {
+    /// Creates default limits with explicit fee metadata.
     pub fn with_fee(fee_details: FeeDetails) -> Self {
         Self {
             fee_details,
