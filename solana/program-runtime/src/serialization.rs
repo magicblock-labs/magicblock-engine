@@ -1,7 +1,7 @@
 #![allow(clippy::arithmetic_side_effects)]
 
 use {
-    crate::memory_context::SerializedAccountMetadata,
+    crate::invoke_context::SerializedAccountMetadata,
     solana_instruction::error::InstructionError,
     solana_program_entrypoint::{BPF_ALIGN_OF_U128, MAX_PERMITTED_DATA_INCREASE, NON_DUP_MARKER},
     solana_pubkey::Pubkey,
@@ -19,7 +19,7 @@ use {
     std::mem::{self, size_of},
 };
 
-/// Modifies the memory mapping in serialization and CPI return for virtual_address_space_adjustments
+/// Modifies an existing memory mapping region to point at account data.
 pub fn modify_memory_region_of_account(
     account: &mut BorrowedInstructionAccount<'_, '_>,
     region: &mut MemoryRegion,
@@ -34,7 +34,7 @@ pub fn modify_memory_region_of_account(
     }
 }
 
-/// Creates the memory mapping in serialization and CPI return for account_data_direct_mapping
+/// Creates the memory mapping in serialization and CPI return for direct account data.
 pub fn create_memory_region_of_account(
     account: &mut BorrowedInstructionAccount<'_, '_>,
     vaddr: u64,
@@ -51,7 +51,7 @@ pub fn create_memory_region_of_account(
     Ok(memory_region)
 }
 
-#[expect(dead_code)]
+#[allow(dead_code)]
 enum SerializeAccount<'a, 'ix_data> {
     Account(IndexOfAccount, BorrowedInstructionAccount<'a, 'ix_data>),
     Duplicate(IndexOfAccount),
@@ -63,26 +63,16 @@ struct Serializer {
     vaddr: u64,
     region_start: usize,
     is_loader_v1: bool,
-    virtual_address_space_adjustments: bool,
-    account_data_direct_mapping: bool,
 }
 
 impl Serializer {
-    fn new(
-        size: usize,
-        start_addr: u64,
-        is_loader_v1: bool,
-        virtual_address_space_adjustments: bool,
-        account_data_direct_mapping: bool,
-    ) -> Serializer {
+    fn new(size: usize, start_addr: u64, is_loader_v1: bool) -> Serializer {
         Serializer {
             buffer: AlignedMemory::with_capacity(size),
             regions: Vec::new(),
             region_start: 0,
             vaddr: start_addr,
             is_loader_v1,
-            virtual_address_space_adjustments,
-            account_data_direct_mapping,
         }
     }
 
@@ -129,71 +119,38 @@ impl Serializer {
         &mut self,
         account: &mut BorrowedInstructionAccount<'_, '_>,
     ) -> Result<u64, InstructionError> {
-        if !self.virtual_address_space_adjustments {
-            let vm_data_addr = self.vaddr.saturating_add(self.buffer.len() as u64);
-            self.write_all(account.get_data());
-            if !self.is_loader_v1 {
-                let align_offset =
-                    (account.get_data().len() as *const u8).align_offset(BPF_ALIGN_OF_U128);
-                self.fill_write(MAX_PERMITTED_DATA_INCREASE + align_offset, 0)
-                    .map_err(|_| InstructionError::InvalidArgument)?;
-            }
-            Ok(vm_data_addr)
+        self.push_region();
+        let vm_data_addr = self.vaddr;
+        let address_space_reserved_for_account = if !self.is_loader_v1 {
+            account.get_data().len().saturating_add(MAX_PERMITTED_DATA_INCREASE)
         } else {
-            self.push_region();
-            let vm_data_addr = self.vaddr;
-            if !self.account_data_direct_mapping {
-                self.write_all(account.get_data());
-                if !self.is_loader_v1 {
-                    self.fill_write(MAX_PERMITTED_DATA_INCREASE, 0)
-                        .map_err(|_| InstructionError::InvalidArgument)?;
-                }
-            }
-            let address_space_reserved_for_account = if !self.is_loader_v1 {
-                account
-                    .get_data()
-                    .len()
-                    .saturating_add(MAX_PERMITTED_DATA_INCREASE)
-            } else {
-                account.get_data().len()
-            };
-            if address_space_reserved_for_account > 0 {
-                if !self.account_data_direct_mapping {
-                    self.push_region();
-                    let region = self.regions.last_mut().unwrap();
-                    modify_memory_region_of_account(account, region);
-                } else {
-                    let new_region = create_memory_region_of_account(account, self.vaddr)?;
-                    self.vaddr += address_space_reserved_for_account as u64;
-                    self.regions.push(new_region);
-                }
-            }
-            if !self.is_loader_v1 {
-                let align_offset =
-                    (account.get_data().len() as *const u8).align_offset(BPF_ALIGN_OF_U128);
-                if !self.account_data_direct_mapping {
-                    self.fill_write(align_offset, 0)
-                        .map_err(|_| InstructionError::InvalidArgument)?;
-                } else {
-                    // The deserialization code is going to align the vm_addr to
-                    // BPF_ALIGN_OF_U128. Always add one BPF_ALIGN_OF_U128 worth of
-                    // padding and shift the start of the next region, so that once
-                    // vm_addr is aligned, the corresponding host_addr is aligned
-                    // too.
-                    self.fill_write(BPF_ALIGN_OF_U128, 0)
-                        .map_err(|_| InstructionError::InvalidArgument)?;
-                    self.region_start += BPF_ALIGN_OF_U128.saturating_sub(align_offset);
-                }
-            }
-            Ok(vm_data_addr)
+            account.get_data().len()
+        };
+        if address_space_reserved_for_account > 0 {
+            let new_region = create_memory_region_of_account(account, self.vaddr)?;
+            self.vaddr += address_space_reserved_for_account as u64;
+            self.regions.push(new_region);
         }
+        if !self.is_loader_v1 {
+            let align_offset =
+                (account.get_data().len() as *const u8).align_offset(BPF_ALIGN_OF_U128);
+            // The deserialization code is going to align the vm_addr to
+            // BPF_ALIGN_OF_U128. Always add one BPF_ALIGN_OF_U128 worth of
+            // padding and shift the start of the next region, so that once
+            // vm_addr is aligned, the corresponding host_addr is aligned too.
+            self.fill_write(BPF_ALIGN_OF_U128, 0)
+                .map_err(|_| InstructionError::InvalidArgument)?;
+            self.region_start += BPF_ALIGN_OF_U128.saturating_sub(align_offset);
+        }
+        Ok(vm_data_addr)
     }
 
     fn push_region(&mut self) {
         let range = self.region_start..self.buffer.len();
-        let region_slice = self.buffer.as_slice_mut().get_mut(range.clone()).unwrap();
-        self.regions
-            .push(MemoryRegion::new(&raw mut region_slice[..], self.vaddr));
+        self.regions.push(MemoryRegion::new(
+            &raw mut self.buffer.as_slice_mut().get_mut(range.clone()).unwrap()[..],
+            self.vaddr,
+        ));
         self.region_start = range.end;
         self.vaddr += range.len() as u64;
     }
@@ -207,12 +164,7 @@ impl Serializer {
     fn debug_assert_alignment<T>(&self) {
         debug_assert!(
             self.is_loader_v1
-                || self
-                    .buffer
-                    .as_slice()
-                    .as_ptr_range()
-                    .end
-                    .align_offset(mem::align_of::<T>())
+                || self.buffer.as_slice().as_ptr_range().end.align_offset(mem::align_of::<T>())
                     == 0
         );
     }
@@ -220,8 +172,6 @@ impl Serializer {
 
 pub fn serialize_parameters(
     instruction_context: &InstructionContext,
-    virtual_address_space_adjustments: bool,
-    account_data_direct_mapping: bool,
     direct_account_pointers_in_program_input: bool,
 ) -> Result<
     (
@@ -267,8 +217,6 @@ pub fn serialize_parameters(
             accounts,
             instruction_context.get_instruction_data(),
             &program_id,
-            virtual_address_space_adjustments,
-            account_data_direct_mapping,
         )
     } else {
         // Used by loader-v2 (bpf_loader) and loader-v3 (bpf_loader_upgradeable)
@@ -276,8 +224,6 @@ pub fn serialize_parameters(
             accounts,
             instruction_context.get_instruction_data(),
             &program_id,
-            virtual_address_space_adjustments,
-            account_data_direct_mapping,
             // SIMD-0449: only available on ABIv1
             direct_account_pointers_in_program_input,
         )
@@ -286,8 +232,6 @@ pub fn serialize_parameters(
 
 pub fn deserialize_parameters(
     instruction_context: &InstructionContext,
-    virtual_address_space_adjustments: bool,
-    account_data_direct_mapping: bool,
     buffer: &[u8],
     accounts_metadata: &[SerializedAccountMetadata],
 ) -> Result<(), InstructionError> {
@@ -296,22 +240,10 @@ pub fn deserialize_parameters(
     let account_lengths = accounts_metadata.iter().map(|a| a.original_data_len);
     if is_loader_deprecated {
         // Used by loader-v1 (bpf_loader_deprecated)
-        deserialize_parameters_for_abiv0(
-            instruction_context,
-            virtual_address_space_adjustments,
-            account_data_direct_mapping,
-            buffer,
-            account_lengths,
-        )
+        deserialize_parameters_for_abiv0(instruction_context, buffer, account_lengths)
     } else {
         // Used by loader-v2 (bpf_loader) and loader-v3 (bpf_loader_upgradeable)
-        deserialize_parameters_for_abiv1(
-            instruction_context,
-            virtual_address_space_adjustments,
-            account_data_direct_mapping,
-            buffer,
-            account_lengths,
-        )
+        deserialize_parameters_for_abiv1(instruction_context, buffer, account_lengths)
     }
 }
 
@@ -319,8 +251,6 @@ fn serialize_parameters_for_abiv0(
     accounts: Vec<SerializeAccount>,
     instruction_data: &[u8],
     program_id: &Pubkey,
-    virtual_address_space_adjustments: bool,
-    account_data_direct_mapping: bool,
 ) -> Result<
     (
         AlignedMemory<HOST_ALIGN>,
@@ -336,7 +266,7 @@ fn serialize_parameters_for_abiv0(
         size += 1; // dup
         match account {
             SerializeAccount::Duplicate(_) => {}
-            SerializeAccount::Account(_, account) => {
+            SerializeAccount::Account(_, _) => {
                 size += size_of::<u8>() // is_signer
                 + size_of::<u8>() // is_writable
                 + size_of::<Pubkey>() // key
@@ -345,9 +275,6 @@ fn serialize_parameters_for_abiv0(
                 + size_of::<Pubkey>() // owner
                 + size_of::<u8>() // executable
                 + size_of::<u64>(); // rent_epoch
-                if !(virtual_address_space_adjustments && account_data_direct_mapping) {
-                    size += account.get_data().len();
-                }
             }
         }
     }
@@ -355,13 +282,7 @@ fn serialize_parameters_for_abiv0(
          + instruction_data.len() // instruction data
          + size_of::<Pubkey>(); // program id
 
-    let mut s = Serializer::new(
-        size,
-        MM_INPUT_START,
-        true,
-        virtual_address_space_adjustments,
-        account_data_direct_mapping,
-    );
+    let mut s = Serializer::new(size, MM_INPUT_START, true);
 
     let mut accounts_metadata: Vec<SerializedAccountMetadata> = Vec::with_capacity(accounts.len());
     s.write::<u64>((accounts.len() as u64).to_le());
@@ -380,7 +301,7 @@ fn serialize_parameters_for_abiv0(
                 s.write::<u64>((account.get_data().len() as u64).to_le());
                 let vm_data_addr = s.write_account(&mut account)?;
                 let vm_owner_addr = s.write_all(account.get_owner().as_ref());
-                #[expect(deprecated)]
+                #[allow(deprecated)]
                 s.write::<u8>(account.is_executable() as u8);
                 let rent_epoch = u64::MAX;
                 s.write::<u64>(rent_epoch.to_le());
@@ -410,8 +331,6 @@ fn serialize_parameters_for_abiv0(
 
 fn deserialize_parameters_for_abiv0<I: IntoIterator<Item = usize>>(
     instruction_context: &InstructionContext,
-    virtual_address_space_adjustments: bool,
-    account_data_direct_mapping: bool,
     buffer: &[u8],
     account_lengths: I,
 ) -> Result<(), InstructionError> {
@@ -439,27 +358,8 @@ fn deserialize_parameters_for_abiv0<I: IntoIterator<Item = usize>>(
             }
             start += size_of::<u64>() // lamports
                 + size_of::<u64>(); // data length
-            if !virtual_address_space_adjustments {
-                let data = buffer
-                    .get(start..start + pre_len)
-                    .ok_or(InstructionError::InvalidArgument)?;
-                // The redundant check helps to avoid the expensive data comparison if we can
-                match borrowed_account.can_data_be_resized(pre_len) {
-                    Ok(()) => borrowed_account.set_data_from_slice(data)?,
-                    Err(err) if borrowed_account.get_data() != data => return Err(err),
-                    _ => {}
-                }
-            } else if !account_data_direct_mapping && borrowed_account.can_data_be_changed().is_ok()
-            {
-                let data = buffer
-                    .get(start..start + pre_len)
-                    .ok_or(InstructionError::InvalidArgument)?;
-                borrowed_account.set_data_from_slice(data)?;
-            } else if borrowed_account.get_data().len() != pre_len {
+            if borrowed_account.get_data().len() != pre_len {
                 borrowed_account.set_data_length(pre_len)?;
-            }
-            if !(virtual_address_space_adjustments && account_data_direct_mapping) {
-                start += pre_len; // data
             }
             start += size_of::<Pubkey>() // owner
                 + size_of::<u8>() // executable
@@ -473,8 +373,6 @@ fn serialize_parameters_for_abiv1(
     accounts: Vec<SerializeAccount>,
     instruction_data: &[u8],
     program_id: &Pubkey,
-    virtual_address_space_adjustments: bool,
-    account_data_direct_mapping: bool,
     direct_account_pointers_program_input: bool,
 ) -> Result<
     (
@@ -492,8 +390,7 @@ fn serialize_parameters_for_abiv1(
         size += 1; // dup
         match account {
             SerializeAccount::Duplicate(_) => size += 7, // padding to 64-bit aligned
-            SerializeAccount::Account(_, account) => {
-                let data_len = account.get_data().len();
+            SerializeAccount::Account(_, _) => {
                 size += size_of::<u8>() // is_signer
                 + size_of::<u8>() // is_writable
                 + size_of::<u8>() // executable
@@ -503,13 +400,7 @@ fn serialize_parameters_for_abiv1(
                 + size_of::<u64>()  // lamports
                 + size_of::<u64>()  // data len
                 + size_of::<u64>(); // rent epoch
-                if !(virtual_address_space_adjustments && account_data_direct_mapping) {
-                    size += data_len
-                        + MAX_PERMITTED_DATA_INCREASE
-                        + (data_len as *const u8).align_offset(BPF_ALIGN_OF_U128);
-                } else {
-                    size += BPF_ALIGN_OF_U128;
-                }
+                size += BPF_ALIGN_OF_U128;
             }
         }
     }
@@ -526,13 +417,7 @@ fn serialize_parameters_for_abiv1(
         None
     };
 
-    let mut s = Serializer::new(
-        size,
-        MM_INPUT_START,
-        false,
-        virtual_address_space_adjustments,
-        account_data_direct_mapping,
-    );
+    let mut s = Serializer::new(size, MM_INPUT_START, false);
 
     // Serialize into the buffer
     s.write::<u64>((accounts.len() as u64).to_le());
@@ -542,7 +427,7 @@ fn serialize_parameters_for_abiv1(
                 let vm_addr = s.write::<u8>(NON_DUP_MARKER);
                 s.write::<u8>(borrowed_account.is_signer() as u8);
                 s.write::<u8>(borrowed_account.is_writable() as u8);
-                #[expect(deprecated)]
+                #[allow(deprecated)]
                 s.write::<u8>(borrowed_account.is_executable() as u8);
                 s.write_all(&[0u8, 0, 0, 0]);
                 let vm_key_addr = s.write_all(borrowed_account.get_key().as_ref());
@@ -575,8 +460,7 @@ fn serialize_parameters_for_abiv1(
     if let Some(offset) = account_pointers_offset {
         // Add padding before the account pointer array to reach 8-byte alignment
         // (BPF_ALIGN_OF_U128).
-        s.fill_write(offset, 0)
-            .map_err(|_| InstructionError::InvalidArgument)?;
+        s.fill_write(offset, 0).map_err(|_| InstructionError::InvalidArgument)?;
         for entry in accounts_metadata.iter() {
             s.write::<u64>(entry.vm_addr.to_le());
         }
@@ -593,8 +477,6 @@ fn serialize_parameters_for_abiv1(
 
 fn deserialize_parameters_for_abiv1<I: IntoIterator<Item = usize>>(
     instruction_context: &InstructionContext,
-    virtual_address_space_adjustments: bool,
-    account_data_direct_mapping: bool,
     buffer: &[u8],
     account_lengths: I,
 ) -> Result<(), InstructionError> {
@@ -641,34 +523,11 @@ fn deserialize_parameters_for_abiv1<I: IntoIterator<Item = usize>>(
             {
                 return Err(InstructionError::InvalidRealloc);
             }
-            if !virtual_address_space_adjustments {
-                let data = buffer
-                    .get(start..start + post_len)
-                    .ok_or(InstructionError::InvalidArgument)?;
-                // The redundant check helps to avoid the expensive data comparison if we can
-                match borrowed_account.can_data_be_resized(post_len) {
-                    Ok(()) => borrowed_account.set_data_from_slice(data)?,
-                    Err(err) if borrowed_account.get_data() != data => return Err(err),
-                    _ => {}
-                }
-            } else if !account_data_direct_mapping && borrowed_account.can_data_be_changed().is_ok()
-            {
-                let data = buffer
-                    .get(start..start + post_len)
-                    .ok_or(InstructionError::InvalidArgument)?;
-                borrowed_account.set_data_from_slice(data)?;
-            } else if borrowed_account.get_data().len() != post_len {
+            if borrowed_account.get_data().len() != post_len {
                 borrowed_account.set_data_length(post_len)?;
             }
-            start += if !(virtual_address_space_adjustments && account_data_direct_mapping) {
-                let alignment_offset = (pre_len as *const u8).align_offset(BPF_ALIGN_OF_U128);
-                pre_len // data
-                    .saturating_add(MAX_PERMITTED_DATA_INCREASE) // realloc padding
-                    .saturating_add(alignment_offset)
-            } else {
-                // See Serializer::write_account() as to why we have this
-                BPF_ALIGN_OF_U128
-            };
+            // See Serializer::write_account() as to why we have this padding.
+            start += BPF_ALIGN_OF_U128;
             start += size_of::<u64>(); // rent_epoch
             if borrowed_account.get_owner().to_bytes() != owner {
                 // Change the owner at the end so that we are allowed to change the lamports and data before
@@ -685,7 +544,10 @@ mod tests {
     use {
         super::*,
         crate::with_mock_invoke_context,
-        solana_account::{Account, AccountSharedData, ReadableAccount},
+        solana_account::{
+            Account, AccountSharedData, CoWAccount, ReadableAccount,
+            testkit::{active_borrowed_data, borrowed_account_buffer, borrowed_shared_data},
+        },
         solana_account_info::AccountInfo,
         solana_program_entrypoint::deserialize,
         solana_rent::Rent,
@@ -735,295 +597,116 @@ mod tests {
             name: &'static str,
         }
 
-        for virtual_address_space_adjustments in [false, true] {
-            for TestCase {
-                num_ix_accounts,
-                append_dup_account,
-                expected_err,
-                name,
-            } in [
-                TestCase {
-                    name: "serialize max accounts with cap",
-                    num_ix_accounts: MAX_ACCOUNTS_PER_INSTRUCTION,
-                    append_dup_account: false,
-                    expected_err: None,
-                },
-                TestCase {
-                    name: "serialize too many accounts with cap",
-                    num_ix_accounts: MAX_ACCOUNTS_PER_INSTRUCTION + 1,
-                    append_dup_account: false,
-                    expected_err: Some(InstructionError::MaxAccountsExceeded),
-                },
-                TestCase {
-                    name: "serialize too many accounts and append dup with cap",
-                    num_ix_accounts: MAX_ACCOUNTS_PER_INSTRUCTION,
-                    append_dup_account: true,
-                    expected_err: Some(InstructionError::MaxAccountsExceeded),
-                },
-            ] {
-                let program_id = solana_pubkey::new_rand();
-                let mut transaction_accounts = vec![(
-                    program_id,
-                    AccountSharedData::from(Account {
-                        lamports: 0,
-                        data: vec![],
-                        owner: bpf_loader::id(),
-                        executable: true,
-                        rent_epoch: 0,
-                    }),
-                )];
-                for _ in 0..num_ix_accounts {
-                    transaction_accounts.push((
-                        Pubkey::new_unique(),
-                        AccountSharedData::from(Account {
-                            lamports: 0,
-                            data: vec![],
-                            owner: program_id,
-                            executable: false,
-                            rent_epoch: 0,
-                        }),
-                    ));
-                }
-
-                let transaction_accounts_indexes: Vec<IndexOfAccount> =
-                    (0..num_ix_accounts as u16).collect();
-                let mut instruction_accounts =
-                    deduplicated_instruction_accounts(&transaction_accounts_indexes, |_| false);
-                if append_dup_account {
-                    instruction_accounts.push(instruction_accounts.last().cloned().unwrap());
-                }
-                let instruction_data = vec![];
-
-                with_mock_invoke_context!(
-                    invoke_context,
-                    transaction_context,
-                    transaction_accounts
-                );
-                if instruction_accounts.len() > MAX_ACCOUNTS_PER_INSTRUCTION {
-                    // Special case implementation of configure_next_instruction_for_tests()
-                    // which avoids the overflow when constructing the dedup_map
-                    // by simply not filling it.
-                    let dedup_map = vec![u16::MAX; MAX_ACCOUNTS_PER_TRANSACTION];
-                    invoke_context
-                        .transaction_context
-                        .configure_instruction_at_index(
-                            0,
-                            0,
-                            instruction_accounts,
-                            dedup_map,
-                            Cow::Owned(instruction_data.clone()),
-                            Some(0),
-                        )
-                        .unwrap();
-                } else {
-                    invoke_context
-                        .transaction_context
-                        .configure_top_level_instruction_for_tests(
-                            0,
-                            instruction_accounts,
-                            instruction_data.clone(),
-                        )
-                        .unwrap();
-                }
-                invoke_context.push().unwrap();
-                let instruction_context = invoke_context
-                    .transaction_context
-                    .get_current_instruction_context()
-                    .unwrap();
-
-                let serialization_result = serialize_parameters(
-                    &instruction_context,
-                    virtual_address_space_adjustments,
-                    false, // account_data_direct_mapping
-                    direct_account_pointers_in_program_input,
-                );
-                assert_eq!(
-                    serialization_result.as_ref().err(),
-                    expected_err.as_ref(),
-                    "{name} test case failed",
-                );
-                if expected_err.is_some() {
-                    continue;
-                }
-
-                let (mut serialized, regions, _account_lengths, _instruction_data_offset) =
-                    serialization_result.unwrap();
-                let mut serialized_regions = concat_regions(&regions);
-                let (de_program_id, de_accounts, de_instruction_data) = unsafe {
-                    deserialize(
-                        if !virtual_address_space_adjustments {
-                            serialized.as_slice_mut()
-                        } else {
-                            serialized_regions.as_slice_mut()
-                        }
-                        .first_mut()
-                        .unwrap() as *mut u8,
-                    )
-                };
-                assert_eq!(de_program_id, &program_id);
-                assert_eq!(de_instruction_data, &instruction_data);
-                for account_info in de_accounts {
-                    let index_in_transaction = invoke_context
-                        .transaction_context
-                        .find_index_of_account(account_info.key)
-                        .unwrap();
-                    let account = invoke_context
-                        .transaction_context
-                        .accounts()
-                        .try_borrow(index_in_transaction)
-                        .unwrap();
-                    assert_eq!(account.lamports(), account_info.lamports());
-                    assert_eq!(account.data(), &account_info.data.borrow()[..]);
-                    assert_eq!(account.owner(), account_info.owner);
-                    assert_eq!(account.executable(), account_info.executable);
-                    #[allow(deprecated)]
-                    {
-                        // Using the sdk entrypoint, the rent-epoch is skipped
-                        assert_eq!(0, account_info._unused);
-                    }
-                }
-            }
-        }
-    }
-
-    #[test_case(false; "direct_account_pointers_in_program_input disabled")]
-    #[test_case(true; "direct_account_pointers_in_program_input enabled")]
-    fn test_serialize_parameters(direct_account_pointers_in_program_input: bool) {
-        for virtual_address_space_adjustments in [false, true] {
+        for TestCase {
+            num_ix_accounts,
+            append_dup_account,
+            expected_err,
+            name,
+        } in [
+            TestCase {
+                name: "serialize max accounts with cap",
+                num_ix_accounts: MAX_ACCOUNTS_PER_INSTRUCTION,
+                append_dup_account: false,
+                expected_err: None,
+            },
+            TestCase {
+                name: "serialize too many accounts with cap",
+                num_ix_accounts: MAX_ACCOUNTS_PER_INSTRUCTION + 1,
+                append_dup_account: false,
+                expected_err: Some(InstructionError::MaxAccountsExceeded),
+            },
+            TestCase {
+                name: "serialize too many accounts and append dup with cap",
+                num_ix_accounts: MAX_ACCOUNTS_PER_INSTRUCTION,
+                append_dup_account: true,
+                expected_err: Some(InstructionError::MaxAccountsExceeded),
+            },
+        ] {
             let program_id = solana_pubkey::new_rand();
-            let transaction_accounts = vec![
-                (
-                    program_id,
+            let mut transaction_accounts = vec![(
+                program_id,
+                AccountSharedData::from(Account {
+                    lamports: 0,
+                    data: vec![],
+                    owner: bpf_loader::id(),
+                    executable: true,
+                    rent_epoch: 0,
+                }),
+            )];
+            for _ in 0..num_ix_accounts {
+                transaction_accounts.push((
+                    Pubkey::new_unique(),
                     AccountSharedData::from(Account {
                         lamports: 0,
                         data: vec![],
-                        owner: bpf_loader::id(),
-                        executable: true,
+                        owner: program_id,
+                        executable: false,
                         rent_epoch: 0,
                     }),
-                ),
-                (
-                    solana_pubkey::new_rand(),
-                    AccountSharedData::from(Account {
-                        lamports: 1,
-                        data: vec![1u8, 2, 3, 4, 5],
-                        owner: bpf_loader::id(),
-                        executable: false,
-                        rent_epoch: 100,
-                    }),
-                ),
-                (
-                    solana_pubkey::new_rand(),
-                    AccountSharedData::from(Account {
-                        lamports: 2,
-                        data: vec![11u8, 12, 13, 14, 15, 16, 17, 18, 19],
-                        owner: bpf_loader::id(),
-                        executable: true,
-                        rent_epoch: 200,
-                    }),
-                ),
-                (
-                    solana_pubkey::new_rand(),
-                    AccountSharedData::from(Account {
-                        lamports: 3,
-                        data: vec![],
-                        owner: bpf_loader::id(),
-                        executable: false,
-                        rent_epoch: 3100,
-                    }),
-                ),
-                (
-                    solana_pubkey::new_rand(),
-                    AccountSharedData::from(Account {
-                        lamports: 4,
-                        data: vec![1u8, 2, 3, 4, 5],
-                        owner: bpf_loader::id(),
-                        executable: false,
-                        rent_epoch: 100,
-                    }),
-                ),
-                (
-                    solana_pubkey::new_rand(),
-                    AccountSharedData::from(Account {
-                        lamports: 5,
-                        data: vec![11u8, 12, 13, 14, 15, 16, 17, 18, 19],
-                        owner: bpf_loader::id(),
-                        executable: true,
-                        rent_epoch: 200,
-                    }),
-                ),
-                (
-                    solana_pubkey::new_rand(),
-                    AccountSharedData::from(Account {
-                        lamports: 6,
-                        data: vec![],
-                        owner: bpf_loader::id(),
-                        executable: false,
-                        rent_epoch: 3100,
-                    }),
-                ),
-                (
-                    program_id,
-                    AccountSharedData::from(Account {
-                        lamports: 0,
-                        data: vec![],
-                        owner: bpf_loader_deprecated::id(),
-                        executable: true,
-                        rent_epoch: 0,
-                    }),
-                ),
-            ];
-            let instruction_accounts =
-                deduplicated_instruction_accounts(&[1, 1, 2, 3, 4, 4, 5, 6], |index| index >= 4);
-            let instruction_data = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-            let original_accounts = transaction_accounts.clone();
-            with_mock_invoke_context!(invoke_context, transaction_context, transaction_accounts);
-            invoke_context
-                .transaction_context
-                .configure_top_level_instruction_for_tests(
-                    0,
-                    instruction_accounts.clone(),
-                    instruction_data.clone(),
-                )
-                .unwrap();
-            invoke_context.push().unwrap();
-            let instruction_context = invoke_context
-                .transaction_context
-                .get_current_instruction_context()
-                .unwrap();
-
-            // check serialize_parameters_for_abiv1
-            let (mut serialized, regions, accounts_metadata, _instruction_data_offset) =
-                serialize_parameters(
-                    &instruction_context,
-                    virtual_address_space_adjustments,
-                    false, // account_data_direct_mapping
-                    direct_account_pointers_in_program_input,
-                )
-                .unwrap();
-
-            let mut serialized_regions = concat_regions(&regions);
-            if !virtual_address_space_adjustments {
-                assert_eq!(serialized.as_slice(), serialized_regions.as_slice());
+                ));
             }
-            let (de_program_id, de_accounts, de_instruction_data) = unsafe {
-                deserialize(
-                    if !virtual_address_space_adjustments {
-                        serialized.as_slice_mut()
-                    } else {
-                        serialized_regions.as_slice_mut()
-                    }
-                    .first_mut()
-                    .unwrap() as *mut u8,
-                )
-            };
 
-            assert_eq!(&program_id, de_program_id);
-            assert_eq!(instruction_data, de_instruction_data);
-            assert_eq!(
-                (de_instruction_data.first().unwrap() as *const u8).align_offset(BPF_ALIGN_OF_U128),
-                0
+            let transaction_accounts_indexes: Vec<IndexOfAccount> =
+                (0..num_ix_accounts as u16).collect();
+            let mut instruction_accounts =
+                deduplicated_instruction_accounts(&transaction_accounts_indexes, |_| false);
+            if append_dup_account {
+                instruction_accounts.push(instruction_accounts.last().cloned().unwrap());
+            }
+            let instruction_data = vec![];
+
+            with_mock_invoke_context!(invoke_context, transaction_context, transaction_accounts);
+            if instruction_accounts.len() > MAX_ACCOUNTS_PER_INSTRUCTION {
+                // Special case implementation of configure_next_instruction_for_tests()
+                // which avoids the overflow when constructing the dedup_map
+                // by simply not filling it.
+                let dedup_map = vec![u16::MAX; MAX_ACCOUNTS_PER_TRANSACTION];
+                invoke_context
+                    .transaction_context
+                    .configure_instruction_at_index(
+                        0,
+                        0,
+                        instruction_accounts,
+                        dedup_map,
+                        Cow::Owned(instruction_data.clone()),
+                        Some(0),
+                    )
+                    .unwrap();
+            } else {
+                invoke_context
+                    .transaction_context
+                    .configure_top_level_instruction_for_tests(
+                        0,
+                        instruction_accounts,
+                        instruction_data.clone(),
+                    )
+                    .unwrap();
+            }
+            invoke_context.push().unwrap();
+            let instruction_context =
+                invoke_context.transaction_context.get_current_instruction_context().unwrap();
+
+            let serialization_result = serialize_parameters(
+                &instruction_context,
+                direct_account_pointers_in_program_input,
             );
+            assert_eq!(
+                serialization_result.as_ref().err(),
+                expected_err.as_ref(),
+                "{name} test case failed",
+            );
+            if expected_err.is_some() {
+                continue;
+            }
+
+            let (_serialized, regions, _account_lengths, _instruction_data_offset) =
+                serialization_result.unwrap();
+            let mut serialized_regions = concat_regions(&regions);
+            let (de_program_id, de_accounts, de_instruction_data) = unsafe {
+                deserialize(serialized_regions.as_slice_mut().first_mut().unwrap() as *mut u8)
+            };
+            assert_eq!(de_program_id, &program_id);
+            assert_eq!(de_instruction_data, &instruction_data);
             for account_info in de_accounts {
                 let index_in_transaction = invoke_context
                     .transaction_context
@@ -1043,117 +726,239 @@ mod tests {
                     // Using the sdk entrypoint, the rent-epoch is skipped
                     assert_eq!(0, account_info._unused);
                 }
-
-                assert_eq!(
-                    (*account_info.lamports.borrow() as *const u64).align_offset(BPF_ALIGN_OF_U128),
-                    0
-                );
-                assert_eq!(
-                    account_info
-                        .data
-                        .borrow()
-                        .as_ptr()
-                        .align_offset(BPF_ALIGN_OF_U128),
-                    0
-                );
             }
+        }
+    }
 
-            deserialize_parameters(
-                &instruction_context,
-                virtual_address_space_adjustments,
-                false, // account_data_direct_mapping
-                serialized.as_slice(),
-                &accounts_metadata,
+    #[test_case(false; "direct_account_pointers_in_program_input disabled")]
+    #[test_case(true; "direct_account_pointers_in_program_input enabled")]
+    fn test_serialize_parameters(direct_account_pointers_in_program_input: bool) {
+        let program_id = solana_pubkey::new_rand();
+        let transaction_accounts = vec![
+            (
+                program_id,
+                AccountSharedData::from(Account {
+                    lamports: 0,
+                    data: vec![],
+                    owner: bpf_loader::id(),
+                    executable: true,
+                    rent_epoch: 0,
+                }),
+            ),
+            (
+                solana_pubkey::new_rand(),
+                AccountSharedData::from(Account {
+                    lamports: 1,
+                    data: vec![1u8, 2, 3, 4, 5],
+                    owner: bpf_loader::id(),
+                    executable: false,
+                    rent_epoch: 100,
+                }),
+            ),
+            (
+                solana_pubkey::new_rand(),
+                AccountSharedData::from(Account {
+                    lamports: 2,
+                    data: vec![11u8, 12, 13, 14, 15, 16, 17, 18, 19],
+                    owner: bpf_loader::id(),
+                    executable: true,
+                    rent_epoch: 200,
+                }),
+            ),
+            (
+                solana_pubkey::new_rand(),
+                AccountSharedData::from(Account {
+                    lamports: 3,
+                    data: vec![],
+                    owner: bpf_loader::id(),
+                    executable: false,
+                    rent_epoch: 3100,
+                }),
+            ),
+            (
+                solana_pubkey::new_rand(),
+                AccountSharedData::from(Account {
+                    lamports: 4,
+                    data: vec![1u8, 2, 3, 4, 5],
+                    owner: bpf_loader::id(),
+                    executable: false,
+                    rent_epoch: 100,
+                }),
+            ),
+            (
+                solana_pubkey::new_rand(),
+                AccountSharedData::from(Account {
+                    lamports: 5,
+                    data: vec![11u8, 12, 13, 14, 15, 16, 17, 18, 19],
+                    owner: bpf_loader::id(),
+                    executable: true,
+                    rent_epoch: 200,
+                }),
+            ),
+            (
+                solana_pubkey::new_rand(),
+                AccountSharedData::from(Account {
+                    lamports: 6,
+                    data: vec![],
+                    owner: bpf_loader::id(),
+                    executable: false,
+                    rent_epoch: 3100,
+                }),
+            ),
+            (
+                program_id,
+                AccountSharedData::from(Account {
+                    lamports: 0,
+                    data: vec![],
+                    owner: bpf_loader_deprecated::id(),
+                    executable: true,
+                    rent_epoch: 0,
+                }),
+            ),
+        ];
+        let instruction_accounts =
+            deduplicated_instruction_accounts(&[1, 1, 2, 3, 4, 4, 5, 6], |index| index >= 4);
+        let instruction_data = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        let original_accounts = transaction_accounts.clone();
+        with_mock_invoke_context!(invoke_context, transaction_context, transaction_accounts);
+        invoke_context
+            .transaction_context
+            .configure_top_level_instruction_for_tests(
+                0,
+                instruction_accounts.clone(),
+                instruction_data.clone(),
             )
             .unwrap();
-            for (index_in_transaction, (_key, original_account)) in
-                original_accounts.iter().enumerate()
-            {
-                let account = invoke_context
-                    .transaction_context
-                    .accounts()
-                    .try_borrow(index_in_transaction as IndexOfAccount)
-                    .unwrap();
-                assert_eq!(&*account, original_account);
-            }
+        invoke_context.push().unwrap();
+        let instruction_context =
+            invoke_context.transaction_context.get_current_instruction_context().unwrap();
 
-            invoke_context.pop().unwrap();
-            // check serialize_parameters_for_abiv0
-            invoke_context
-                .transaction_context
-                .configure_top_level_instruction_for_tests(
-                    7,
-                    instruction_accounts,
-                    instruction_data.clone(),
-                )
-                .unwrap();
-            invoke_context.push().unwrap();
-            let instruction_context = invoke_context
-                .transaction_context
-                .get_current_instruction_context()
-                .unwrap();
-
-            let (mut serialized, regions, account_lengths, _instruction_data_offset) =
-                serialize_parameters(
-                    &instruction_context,
-                    virtual_address_space_adjustments,
-                    false, // account_data_direct_mapping
-                    direct_account_pointers_in_program_input,
-                )
-                .unwrap();
-            let mut serialized_regions = concat_regions(&regions);
-
-            let (de_program_id, de_accounts, de_instruction_data) = unsafe {
-                deserialize_for_abiv0(
-                    if !virtual_address_space_adjustments {
-                        serialized.as_slice_mut()
-                    } else {
-                        serialized_regions.as_slice_mut()
-                    }
-                    .first_mut()
-                    .unwrap() as *mut u8,
-                )
-            };
-            assert_eq!(&program_id, de_program_id);
-            assert_eq!(instruction_data, de_instruction_data);
-            for account_info in de_accounts {
-                let index_in_transaction = invoke_context
-                    .transaction_context
-                    .find_index_of_account(account_info.key)
-                    .unwrap();
-                let account = invoke_context
-                    .transaction_context
-                    .accounts()
-                    .try_borrow(index_in_transaction)
-                    .unwrap();
-                assert_eq!(account.lamports(), account_info.lamports());
-                assert_eq!(account.data(), &account_info.data.borrow()[..]);
-                assert_eq!(account.owner(), account_info.owner);
-                assert_eq!(account.executable(), account_info.executable);
-                #[allow(deprecated)]
-                {
-                    assert_eq!(u64::MAX, account_info._unused);
-                }
-            }
-
-            deserialize_parameters(
+        // check serialize_parameters_for_abiv1
+        let (serialized, regions, accounts_metadata, _instruction_data_offset) =
+            serialize_parameters(
                 &instruction_context,
-                virtual_address_space_adjustments,
-                false, // account_data_direct_mapping
-                serialized.as_slice(),
-                &account_lengths,
+                direct_account_pointers_in_program_input,
             )
             .unwrap();
-            for (index_in_transaction, (_key, original_account)) in
-                original_accounts.iter().enumerate()
+
+        let mut serialized_regions = concat_regions(&regions);
+        let (de_program_id, de_accounts, de_instruction_data) = unsafe {
+            deserialize(serialized_regions.as_slice_mut().first_mut().unwrap() as *mut u8)
+        };
+
+        assert_eq!(&program_id, de_program_id);
+        assert_eq!(instruction_data, de_instruction_data);
+        assert_eq!(
+            (de_instruction_data.first().unwrap() as *const u8).align_offset(BPF_ALIGN_OF_U128),
+            0
+        );
+        for account_info in de_accounts {
+            let index_in_transaction = invoke_context
+                .transaction_context
+                .find_index_of_account(account_info.key)
+                .unwrap();
+            let account = invoke_context
+                .transaction_context
+                .accounts()
+                .try_borrow(index_in_transaction)
+                .unwrap();
+            assert_eq!(account.lamports(), account_info.lamports());
+            assert_eq!(account.data(), &account_info.data.borrow()[..]);
+            assert_eq!(account.owner(), account_info.owner);
+            assert_eq!(account.executable(), account_info.executable);
+            #[allow(deprecated)]
             {
-                let account = invoke_context
-                    .transaction_context
-                    .accounts()
-                    .try_borrow(index_in_transaction as IndexOfAccount)
-                    .unwrap();
-                assert_eq!(&*account, original_account);
+                // Using the sdk entrypoint, the rent-epoch is skipped
+                assert_eq!(0, account_info._unused);
             }
+
+            assert_eq!(
+                (*account_info.lamports.borrow() as *const u64).align_offset(BPF_ALIGN_OF_U128),
+                0
+            );
+            assert_eq!(
+                account_info.data.borrow().as_ptr().align_offset(BPF_ALIGN_OF_U128),
+                0
+            );
+        }
+
+        deserialize_parameters(
+            &instruction_context,
+            serialized.as_slice(),
+            &accounts_metadata,
+        )
+        .unwrap();
+        for (index_in_transaction, (_key, original_account)) in original_accounts.iter().enumerate()
+        {
+            let account = invoke_context
+                .transaction_context
+                .accounts()
+                .try_borrow(index_in_transaction as IndexOfAccount)
+                .unwrap();
+            assert_eq!(&*account, original_account);
+        }
+
+        invoke_context.pop().unwrap();
+        // check serialize_parameters_for_abiv0
+        invoke_context
+            .transaction_context
+            .configure_top_level_instruction_for_tests(
+                7,
+                instruction_accounts,
+                instruction_data.clone(),
+            )
+            .unwrap();
+        invoke_context.push().unwrap();
+        let instruction_context =
+            invoke_context.transaction_context.get_current_instruction_context().unwrap();
+
+        let (serialized, regions, account_lengths, _instruction_data_offset) =
+            serialize_parameters(
+                &instruction_context,
+                direct_account_pointers_in_program_input,
+            )
+            .unwrap();
+        let mut serialized_regions = concat_regions(&regions);
+
+        let (de_program_id, de_accounts, de_instruction_data) = unsafe {
+            deserialize_for_abiv0(serialized_regions.as_slice_mut().first_mut().unwrap() as *mut u8)
+        };
+        assert_eq!(&program_id, de_program_id);
+        assert_eq!(instruction_data, de_instruction_data);
+        for account_info in de_accounts {
+            let index_in_transaction = invoke_context
+                .transaction_context
+                .find_index_of_account(account_info.key)
+                .unwrap();
+            let account = invoke_context
+                .transaction_context
+                .accounts()
+                .try_borrow(index_in_transaction)
+                .unwrap();
+            assert_eq!(account.lamports(), account_info.lamports());
+            assert_eq!(account.data(), &account_info.data.borrow()[..]);
+            assert_eq!(account.owner(), account_info.owner);
+            assert_eq!(account.executable(), account_info.executable);
+            #[allow(deprecated)]
+            {
+                assert_eq!(u64::MAX, account_info._unused);
+            }
+        }
+
+        deserialize_parameters(
+            &instruction_context,
+            serialized.as_slice(),
+            &account_lengths,
+        )
+        .unwrap();
+        for (index_in_transaction, (_key, original_account)) in original_accounts.iter().enumerate()
+        {
+            let account = invoke_context
+                .transaction_context
+                .accounts()
+                .try_borrow(index_in_transaction as IndexOfAccount)
+                .unwrap();
+            assert_eq!(&*account, original_account);
         }
     }
 
@@ -1252,17 +1057,13 @@ mod tests {
             .configure_top_level_instruction_for_tests(0, instruction_accounts.clone(), vec![])
             .unwrap();
         invoke_context.push().unwrap();
-        let instruction_context = invoke_context
-            .transaction_context
-            .get_current_instruction_context()
-            .unwrap();
+        let instruction_context =
+            invoke_context.transaction_context.get_current_instruction_context().unwrap();
 
         // check serialize_parameters_for_abiv1
         let (_serialized, regions, _accounts_metadata, _instruction_data_offset) =
             serialize_parameters(
                 &instruction_context,
-                true,
-                false, // account_data_direct_mapping
                 direct_account_pointers_in_program_input,
             )
             .unwrap();
@@ -1286,16 +1087,12 @@ mod tests {
             .configure_top_level_instruction_for_tests(7, instruction_accounts, vec![])
             .unwrap();
         invoke_context.push().unwrap();
-        let instruction_context = invoke_context
-            .transaction_context
-            .get_current_instruction_context()
-            .unwrap();
+        let instruction_context =
+            invoke_context.transaction_context.get_current_instruction_context().unwrap();
 
         let (_serialized, regions, _account_lengths, _instruction_data_offset) =
             serialize_parameters(
                 &instruction_context,
-                true,
-                false, // account_data_direct_mapping
                 direct_account_pointers_in_program_input,
             )
             .unwrap();
@@ -1313,6 +1110,12 @@ mod tests {
     }
 
     // the old bpf_loader in-program deserializer bpf_loader::id()
+    ///
+    /// # Safety
+    ///
+    /// `input` must point to a valid ABI-v0 serialized instruction buffer laid
+    /// out exactly as the legacy loader expects for the duration of the returned
+    /// borrows.
     #[deny(unsafe_op_in_unsafe_fn)]
     unsafe fn deserialize_for_abiv0<'a>(
         input: *mut u8,
@@ -1326,11 +1129,7 @@ mod tests {
             fn read_possibly_unaligned(input: *mut u8, offset: usize) -> T {
                 unsafe {
                     let src = input.add(offset) as *const T;
-                    if Self::COULD_BE_UNALIGNED {
-                        src.read_unaligned()
-                    } else {
-                        src.read()
-                    }
+                    if Self::COULD_BE_UNALIGNED { src.read_unaligned() } else { src.read() }
                 }
             }
 
@@ -1450,6 +1249,273 @@ mod tests {
         mem
     }
 
+    fn write_vm_data_len(
+        serialized: &mut AlignedMemory<HOST_ALIGN>,
+        account_metadata: &SerializedAccountMetadata,
+        len: usize,
+    ) {
+        let offset = account_metadata
+            .vm_data_addr
+            .saturating_sub(MM_INPUT_START)
+            .saturating_sub(size_of::<u64>() as u64) as usize;
+        serialized.as_slice_mut()[offset..offset + size_of::<u64>()]
+            .copy_from_slice(&(len as u64).to_le_bytes());
+    }
+
+    #[test]
+    fn test_vas_serialization_direct_maps_account_data_only() {
+        let program_id = Pubkey::new_unique();
+        let account_data = b"direct-account-data-is-not-copied".to_vec();
+        let transaction_accounts = vec![
+            (
+                program_id,
+                AccountSharedData::from(Account {
+                    lamports: 0,
+                    data: vec![],
+                    owner: bpf_loader::id(),
+                    executable: true,
+                    rent_epoch: 0,
+                }),
+            ),
+            (
+                Pubkey::new_unique(),
+                AccountSharedData::from(Account {
+                    lamports: 1,
+                    data: account_data.clone(),
+                    owner: program_id,
+                    executable: false,
+                    rent_epoch: 0,
+                }),
+            ),
+        ];
+        with_mock_invoke_context!(invoke_context, transaction_context, transaction_accounts);
+        invoke_context
+            .transaction_context
+            .configure_top_level_instruction_for_tests(
+                0,
+                deduplicated_instruction_accounts(&[1], |_| true),
+                vec![],
+            )
+            .unwrap();
+        invoke_context.push().unwrap();
+        let instruction_context =
+            invoke_context.transaction_context.get_current_instruction_context().unwrap();
+
+        let (serialized, regions, accounts_metadata, _instruction_data_offset) =
+            serialize_parameters(&instruction_context, false).unwrap();
+
+        assert!(
+            !serialized
+                .as_slice()
+                .windows(account_data.len())
+                .any(|window| window == account_data)
+        );
+        let data_region = regions
+            .iter()
+            .find(|region| region.vm_addr == accounts_metadata[0].vm_data_addr)
+            .unwrap();
+        assert_eq!(data_region.len, account_data.len() as u64);
+        assert!(data_region.writable);
+        let mapped_data = unsafe {
+            slice::from_raw_parts(data_region.host_addr as *const u8, data_region.len as usize)
+        };
+        assert_eq!(mapped_data, account_data);
+    }
+
+    #[test_case(4, 8, Ok(4); "unchanged vm length restores original after transient growth")]
+    #[test_case(7, 8, Ok(7); "vm length grow wins over larger transient backing")]
+    #[test_case(2, 4, Ok(2); "vm length shrink truncates")]
+    #[test_case(
+        4 + MAX_PERMITTED_DATA_INCREASE + 1,
+        4,
+        Err(InstructionError::InvalidRealloc);
+        "invalid realloc limit errors"
+    )]
+    fn test_vas_deserialize_reconciles_direct_mapped_length(
+        vm_len: usize,
+        transient_len: usize,
+        expected: Result<usize, InstructionError>,
+    ) {
+        let program_id = Pubkey::new_unique();
+        let transaction_accounts = vec![
+            (
+                program_id,
+                AccountSharedData::from(Account {
+                    lamports: 0,
+                    data: vec![],
+                    owner: bpf_loader::id(),
+                    executable: true,
+                    rent_epoch: 0,
+                }),
+            ),
+            (
+                Pubkey::new_unique(),
+                AccountSharedData::from(Account {
+                    lamports: 1,
+                    data: vec![1, 2, 3, 4],
+                    owner: program_id,
+                    executable: false,
+                    rent_epoch: 0,
+                }),
+            ),
+        ];
+        with_mock_invoke_context!(invoke_context, transaction_context, transaction_accounts);
+        invoke_context
+            .transaction_context
+            .configure_top_level_instruction_for_tests(
+                0,
+                deduplicated_instruction_accounts(&[1], |_| true),
+                vec![],
+            )
+            .unwrap();
+        invoke_context.push().unwrap();
+        let instruction_context =
+            invoke_context.transaction_context.get_current_instruction_context().unwrap();
+
+        let (mut serialized, _regions, accounts_metadata, _instruction_data_offset) =
+            serialize_parameters(&instruction_context, false).unwrap();
+        write_vm_data_len(&mut serialized, &accounts_metadata[0], vm_len);
+        {
+            let mut account = instruction_context.try_borrow_instruction_account(0).unwrap();
+            account.set_data_length(transient_len).unwrap();
+        }
+
+        let result = deserialize_parameters(
+            &instruction_context,
+            serialized.as_slice(),
+            &accounts_metadata,
+        );
+        assert_eq!(result, expected.clone().map(|_| ()));
+        if let Ok(expected_len) = expected {
+            let account = instruction_context.try_borrow_instruction_account(0).unwrap();
+            assert_eq!(account.get_data().len(), expected_len);
+        }
+    }
+
+    #[test]
+    fn test_vas_borrowed_writable_account_store_uses_shadow_image() {
+        let program_id = Pubkey::new_unique();
+        let initial_data = vec![1, 2, 3];
+        let mut borrowed_buf = borrowed_account_buffer(initial_data.clone(), program_id);
+        let borrowed_account = borrowed_shared_data(&mut borrowed_buf);
+        let mut transaction_context = TransactionContext::new(
+            vec![
+                (Pubkey::new_unique(), borrowed_account),
+                (program_id, AccountSharedData::default()),
+            ],
+            Rent::default(),
+            /* max_instruction_stack_depth */ 1,
+            /* max_instruction_trace_length */ 1,
+            /* number_of_top_level_instructions */ 1,
+        );
+        transaction_context
+            .configure_top_level_instruction_for_tests(
+                1,
+                vec![InstructionAccount::new(0, false, true)],
+                vec![],
+            )
+            .unwrap();
+        transaction_context.push().unwrap();
+        let instruction_context = transaction_context.get_current_instruction_context().unwrap();
+        let account_start_offset = MM_INPUT_START;
+        let region = create_memory_region_of_account(
+            &mut instruction_context.try_borrow_instruction_account(0).unwrap(),
+            account_start_offset,
+        )
+        .unwrap();
+
+        assert_eq!(region.len, initial_data.len() as u64);
+        assert!(!region.writable);
+        assert_eq!(region.access_violation_handler_payload, Some(0));
+
+        let config = Config {
+            aligned_memory_mapping: false,
+            ..Config::default()
+        };
+        let mut memory_mapping = unsafe {
+            MemoryMapping::new_with_access_violation_handler(
+                vec![region],
+                &config,
+                SBPFVersion::V3,
+                transaction_context.access_violation_handler(),
+            )
+        }
+        .unwrap();
+
+        assert_eq!(memory_mapping.load::<u8>(account_start_offset).unwrap(), 1);
+        assert_eq!(active_borrowed_data(&mut borrowed_buf), initial_data);
+
+        memory_mapping.store::<u8>(9, account_start_offset).unwrap();
+        assert_eq!(
+            transaction_context.accounts().try_borrow(0).unwrap().data(),
+            &[9, 2, 3],
+        );
+        assert_eq!(active_borrowed_data(&mut borrowed_buf), initial_data);
+
+        {
+            let account = transaction_context.accounts().try_borrow(0).unwrap();
+            match account.cow() {
+                CoWAccount::Borrowed(account) => account.commit(),
+                CoWAccount::Owned(_) => panic!("borrowed account should stay borrowed"),
+            }
+        }
+        assert_eq!(active_borrowed_data(&mut borrowed_buf), vec![9, 2, 3]);
+    }
+
+    #[test]
+    fn test_vas_borrowed_writable_account_store_without_commit_keeps_active_image() {
+        let program_id = Pubkey::new_unique();
+        let initial_data = vec![4, 5, 6];
+        let mut borrowed_buf = borrowed_account_buffer(initial_data.clone(), program_id);
+        let borrowed_account = borrowed_shared_data(&mut borrowed_buf);
+        let mut transaction_context = TransactionContext::new(
+            vec![
+                (Pubkey::new_unique(), borrowed_account),
+                (program_id, AccountSharedData::default()),
+            ],
+            Rent::default(),
+            /* max_instruction_stack_depth */ 1,
+            /* max_instruction_trace_length */ 1,
+            /* number_of_top_level_instructions */ 1,
+        );
+        transaction_context
+            .configure_top_level_instruction_for_tests(
+                1,
+                vec![InstructionAccount::new(0, false, true)],
+                vec![],
+            )
+            .unwrap();
+        transaction_context.push().unwrap();
+        let instruction_context = transaction_context.get_current_instruction_context().unwrap();
+        let account_start_offset = MM_INPUT_START;
+        let region = create_memory_region_of_account(
+            &mut instruction_context.try_borrow_instruction_account(0).unwrap(),
+            account_start_offset,
+        )
+        .unwrap();
+        let config = Config {
+            aligned_memory_mapping: false,
+            ..Config::default()
+        };
+        let mut memory_mapping = unsafe {
+            MemoryMapping::new_with_access_violation_handler(
+                vec![region],
+                &config,
+                SBPFVersion::V3,
+                transaction_context.access_violation_handler(),
+            )
+        }
+        .unwrap();
+
+        memory_mapping.store::<u8>(7, account_start_offset).unwrap();
+
+        assert_eq!(
+            transaction_context.accounts().try_borrow(0).unwrap().data(),
+            &[7, 5, 6],
+        );
+        assert_eq!(active_borrowed_data(&mut borrowed_buf), initial_data);
+    }
+
     #[test]
     fn test_access_violation_handler() {
         let program_id = Pubkey::new_unique();
@@ -1481,6 +1547,10 @@ mod tests {
                     Pubkey::new_unique(),
                     AccountSharedData::new(0, 0x3000, &program_id),
                 ), // writable dummy to burn accounts_resize_delta
+                (
+                    Pubkey::new_unique(),
+                    AccountSharedData::new(0, 0, &program_id),
+                ), // writable dummy to burn accounts_resize_delta
                 (program_id, AccountSharedData::default()),     // program
             ],
             Rent::default(),
@@ -1488,16 +1558,14 @@ mod tests {
             /* max_instruction_trace_length */ 1,
             /* number_of_top_level_instructions */ 1,
         );
-        let transaction_accounts_indexes = [0, 1, 2, 3, 4, 5];
+        let transaction_accounts_indexes = [0, 1, 2, 3, 4, 5, 6];
         let instruction_accounts =
             deduplicated_instruction_accounts(&transaction_accounts_indexes, |index| index > 0);
         transaction_context
-            .configure_top_level_instruction_for_tests(6, instruction_accounts, vec![])
+            .configure_top_level_instruction_for_tests(7, instruction_accounts, vec![])
             .unwrap();
         transaction_context.push().unwrap();
-        let instruction_context = transaction_context
-            .get_current_instruction_context()
-            .unwrap();
+        let instruction_context = transaction_context.get_current_instruction_context().unwrap();
         let account_start_offsets = [
             MM_INPUT_START,
             MM_INPUT_START + 4 + MAX_PERMITTED_DATA_INCREASE as u64,
@@ -1526,90 +1594,46 @@ mod tests {
                 regions,
                 &config,
                 SBPFVersion::V3,
-                transaction_context.access_violation_handler(true, true),
+                transaction_context.access_violation_handler(),
             )
-            .unwrap()
-        };
+        }
+        .unwrap();
 
         // Reading readonly account is allowed
-        memory_mapping
-            .load::<u32>(account_start_offsets[0])
-            .unwrap();
+        memory_mapping.load::<u32>(account_start_offsets[0]).unwrap();
 
         // Reading writable account is allowed
-        memory_mapping
-            .load::<u32>(account_start_offsets[1])
-            .unwrap();
+        memory_mapping.load::<u32>(account_start_offsets[1]).unwrap();
 
         // Reading beyond readonly accounts current size is denied
-        memory_mapping
-            .load::<u32>(account_start_offsets[0] + 4)
-            .unwrap_err();
+        memory_mapping.load::<u32>(account_start_offsets[0] + 4).unwrap_err();
 
         // Writing to readonly account is denied
-        memory_mapping
-            .store::<u32>(0, account_start_offsets[0])
-            .unwrap_err();
+        memory_mapping.store::<u32>(0, account_start_offsets[0]).unwrap_err();
 
         // Writing to shared writable account makes it unique (CoW logic.)
         // It has been previously been made non-unique at the beginning of
         // the test through a clone.
         let _shared_account_ref = shared_account;
-        assert!(
-            transaction_context
-                .accounts()
-                .try_borrow_mut(1)
-                .unwrap()
-                .is_shared()
-        );
-        memory_mapping
-            .store::<u32>(0, account_start_offsets[1])
-            .unwrap();
-        assert!(
-            !transaction_context
-                .accounts()
-                .try_borrow_mut(1)
-                .unwrap()
-                .is_shared()
-        );
+        assert!(transaction_context.accounts().try_borrow_mut(1).unwrap().is_shared());
+        memory_mapping.store::<u32>(0, account_start_offsets[1]).unwrap();
+        assert!(!transaction_context.accounts().try_borrow_mut(1).unwrap().is_shared());
         assert_eq!(
-            transaction_context
-                .accounts()
-                .try_borrow(1)
-                .unwrap()
-                .data()
-                .len(),
+            transaction_context.accounts().try_borrow(1).unwrap().data().len(),
             4,
         );
 
         // Reading beyond writable accounts current size grows is denied
-        memory_mapping
-            .load::<u32>(account_start_offsets[1] + 4)
-            .unwrap_err();
+        memory_mapping.load::<u32>(account_start_offsets[1] + 4).unwrap_err();
 
-        // Writing beyond writable accounts current size grows it
-        // to original length plus MAX_PERMITTED_DATA_INCREASE
-        memory_mapping
-            .store::<u32>(0, account_start_offsets[1] + 4)
-            .unwrap();
+        // Writing beyond writable accounts current size grows it only to the
+        // requested access length.
+        memory_mapping.store::<u32>(0, account_start_offsets[1] + 4).unwrap();
         assert_eq!(
-            transaction_context
-                .accounts()
-                .try_borrow(1)
-                .unwrap()
-                .data()
-                .len(),
-            4 + MAX_PERMITTED_DATA_INCREASE,
+            transaction_context.accounts().try_borrow(1).unwrap().data().len(),
+            8,
         );
-        assert!(
-            transaction_context
-                .accounts()
-                .try_borrow(1)
-                .unwrap()
-                .data()
-                .len()
-                < 0x3000
-        );
+        assert!(transaction_context.accounts().try_borrow(1).unwrap().data().len() < 0x3000);
 
         // Writing beyond almost max sized writable accounts current size only grows it
         // to MAX_PERMITTED_DATA_LENGTH
@@ -1617,12 +1641,7 @@ mod tests {
             .store::<u32>(0, account_start_offsets[3] + MAX_PERMITTED_DATA_LENGTH - 4)
             .unwrap();
         assert_eq!(
-            transaction_context
-                .accounts()
-                .try_borrow(3)
-                .unwrap()
-                .data()
-                .len(),
+            transaction_context.accounts().try_borrow(3).unwrap().data().len(),
             MAX_PERMITTED_DATA_LENGTH as usize,
         );
 
@@ -1637,33 +1656,41 @@ mod tests {
 
         // Burn through most of the accounts_resize_delta budget
         let remaining_allowed_growth: usize = 0x700;
-        for index_in_instruction in 4..6 {
+        let target_resize_delta = MAX_PERMITTED_ACCOUNTS_DATA_ALLOCATIONS_PER_TRANSACTION
+            - remaining_allowed_growth as i64;
+        for index_in_instruction in 4..7 {
+            let burn = target_resize_delta
+                .saturating_sub(transaction_context.accounts().resize_delta())
+                as usize;
+            if burn == 0 {
+                break;
+            }
             let mut borrowed_account = instruction_context
                 .try_borrow_instruction_account(index_in_instruction)
                 .unwrap();
-            borrowed_account
-                .set_data_from_slice(&vec![0u8; MAX_PERMITTED_DATA_LENGTH as usize])
-                .unwrap();
+            let old_len = borrowed_account.get_data().len();
+            let new_len = old_len.saturating_add(burn).min(MAX_PERMITTED_DATA_LENGTH as usize);
+            borrowed_account.set_data_length(new_len).unwrap();
         }
         assert_eq!(
             transaction_context.accounts().resize_delta(),
-            MAX_PERMITTED_ACCOUNTS_DATA_ALLOCATIONS_PER_TRANSACTION
-                - remaining_allowed_growth as i64,
+            target_resize_delta,
         );
 
-        // Writing beyond empty writable accounts current size
-        // only grows it to fill up MAX_PERMITTED_ACCOUNTS_DATA_ALLOCATIONS_PER_TRANSACTION
-        memory_mapping
-            .store::<u32>(0, account_start_offsets[2] + 0x500)
-            .unwrap();
+        // Writing beyond empty writable accounts current size grows to the
+        // requested access length while it fits in the remaining transaction budget.
+        memory_mapping.store::<u32>(0, account_start_offsets[2] + 0x500).unwrap();
         assert_eq!(
-            transaction_context
-                .accounts()
-                .try_borrow(2)
-                .unwrap()
-                .data()
-                .len(),
-            remaining_allowed_growth,
+            transaction_context.accounts().try_borrow(2).unwrap().data().len(),
+            0x504,
         );
+
+        // A write that would need more than the remaining transaction budget is denied.
+        memory_mapping
+            .store::<u32>(
+                0,
+                account_start_offsets[2] + remaining_allowed_growth as u64,
+            )
+            .unwrap_err();
     }
 }
