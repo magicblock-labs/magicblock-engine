@@ -41,8 +41,7 @@ impl<T> VmSlice<T> {
     }
 
     pub fn end(&self) -> u64 {
-        self.ptr()
-            .saturating_add(self.len().saturating_mul(size_of::<T>() as u64))
+        self.ptr().saturating_add(self.len().saturating_mul(size_of::<T>() as u64))
     }
 
     /// # Safety
