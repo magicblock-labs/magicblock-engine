@@ -1,5 +1,5 @@
 [workspace]
-members = ["solana/account", "solana/transaction-view"]
+members = ["solana/account", "solana/transaction-context", "solana/transaction-view"]
 resolver = "3"
 
 [workspace.package]
@@ -15,6 +15,7 @@ version = "0.1.0"
 magic-root-interface = { path = "programs/magic-root-interface" }
 magic-root-program = { path = "programs/magic-root-program" }
 solana-account = { path = "solana/account" }
+solana-transaction-context = { path = "solana/transaction-context" }
 
 ahash = "0.8.12"
 arc-swap = "1.9.1"
@@ -36,19 +37,28 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 wincode = "0.5.1"
 zstd = { version = "0.13.3", default-features = false }
 
-agave-feature-set = { version = "3.1.14", features = ["agave-unstable-api"] }
-agave-transaction-view = { version = "3.1.13", features = ["agave-unstable-api"] }
+agave-feature-set = "4.1.1"
+agave-precompiles = "4.1.1"
+agave-syscalls = { package = "solana-syscalls", version = "=4.1.1", default-features = false }
+agave-transaction-view = "4.1.1"
 solana-account-info = "3.1.1"
 solana-clock = "3.1.0"
 solana-compute-budget-instruction = "=4.1.1"
 solana-cpi = "3.1.0"
 solana-hash = "4.3.0"
+solana-instruction = "3.4.0"
 solana-instruction-error = "2.3.0"
+solana-instructions-sysvar = "4.0.0"
+solana-program-entrypoint = "3.1.1"
 solana-program-error = "3.0.1"
 solana-pubkey = "4.2.0"
+solana-rent = "4.0.0-rc.1"
+solana-sbpf = "0.13.1"
 solana-sdk-ids = "3.1.0"
-solana-short-vec = "3.2.1"
+solana-short-vec = "=3.2.2"
+solana-signature = "=3.4.1"
 solana-sysvar = "4.0.0"
+solana-system-interface = "3.2.0"
 solana-transaction-error = "3.2.0"
 
 [patch.crates-io]
