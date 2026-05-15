@@ -3,7 +3,7 @@ use {
         IndexOfAccount, MAX_ACCOUNT_DATA_GROWTH_PER_INSTRUCTION, transaction::TransactionContext,
         transaction_accounts::AccountRefMut,
     },
-    solana_account::{ReadableAccount, WritableAccount},
+    solana_account::{CoWAccount, ReadableAccount, WritableAccount},
     solana_instruction::error::InstructionError,
     solana_pubkey::Pubkey,
 };
@@ -133,9 +133,7 @@ impl BorrowedInstructionAccount<'_, '_> {
         }
 
         let lamports_balance = (lamports as i128).saturating_sub(old_lamports as i128);
-        self.transaction_context
-            .accounts
-            .add_lamports_delta(lamports_balance)?;
+        self.transaction_context.accounts.add_lamports_delta(lamports_balance)?;
 
         self.touch()?;
         self.account.set_lamports(lamports);
@@ -225,15 +223,12 @@ impl BorrowedInstructionAccount<'_, '_> {
         Ok(())
     }
 
-    /// Returns whether the underlying AccountSharedData is shared.
+    /// Returns whether account data must be mapped through the CoW handler.
     ///
-    /// The data is shared if the account has been loaded from the accounts database and has never
-    /// been written to. Writing to an account unshares it.
-    ///
-    /// During account serialization, if an account is shared it'll get mapped as CoW, else it'll
-    /// get mapped directly as writable.
+    /// Owned shared buffers and borrowed account images both need first-write
+    /// translation before the VM can mutate them.
     pub fn is_shared(&self) -> bool {
-        self.account.is_shared()
+        self.account.is_shared() || matches!(self.account.cow(), CoWAccount::Borrowed(_))
     }
 
     fn make_data_mut(&mut self) {
@@ -243,8 +238,7 @@ impl BorrowedInstructionAccount<'_, '_> {
         // transaction reallocs, we don't have to copy the whole account data a
         // second time to fullfill the realloc.
         if self.account.is_shared() {
-            self.account
-                .reserve(MAX_ACCOUNT_DATA_GROWTH_PER_INSTRUCTION);
+            self.account.reserve(MAX_ACCOUNT_DATA_GROWTH_PER_INSTRUCTION);
         }
     }
 
@@ -270,15 +264,14 @@ impl BorrowedInstructionAccount<'_, '_> {
     // Returns whether or the lamports currently in the account is sufficient for rent exemption should the
     // data be resized to the given size
     pub fn is_rent_exempt_at_data_length(&self, data_length: usize) -> bool {
-        self.transaction_context
-            .rent
-            .is_exempt(self.get_lamports(), data_length)
+        self.transaction_context.rent.is_exempt(self.get_lamports(), data_length)
     }
 
     /// Returns whether this account is executable (transaction wide)
     #[inline]
     #[deprecated(since = "2.1.0", note = "Use `get_owner` instead")]
     pub fn is_executable(&self) -> bool {
+        #[allow(deprecated)]
         self.account.executable()
     }
 
@@ -301,7 +294,7 @@ impl BorrowedInstructionAccount<'_, '_> {
             return Err(InstructionError::ExecutableModified);
         }
         // don't touch the account if the executable flag does not change
-        #[expect(deprecated)]
+        #[allow(deprecated)]
         if self.is_executable() == is_executable {
             return Ok(());
         }
@@ -350,13 +343,17 @@ impl BorrowedInstructionAccount<'_, '_> {
     /// Returns an error if the account data can not be resized to the given length
     pub fn can_data_be_resized(&self, new_len: usize) -> Result<(), InstructionError> {
         let old_len = self.get_data().len();
-        // Only the owner can change the length of the data
-        if new_len != old_len && !self.is_owned_by_current_program() {
-            return Err(InstructionError::AccountDataSizeChanged);
+        if new_len != old_len {
+            use solana_account::AccountMode;
+            if !self.is_owned_by_current_program() {
+                // Only the owner can change the length of the data
+                return Err(InstructionError::AccountDataSizeChanged);
+            } else if self.account.is(AccountMode::Ephemeral) {
+                // Ephemeral accounts can only be resized with special builtin instruction
+                return Err(InstructionError::InvalidRealloc);
+            }
         }
-        self.transaction_context
-            .accounts
-            .can_data_be_resized(old_len, new_len)?;
+        self.transaction_context.accounts.can_data_be_resized(old_len, new_len)?;
         self.can_data_be_changed()
     }
 
@@ -379,7 +376,7 @@ fn is_zeroed(buf: &[u8]) -> bool {
     const ZEROS: [u8; ZEROS_LEN] = [0; ZEROS_LEN];
     let mut chunks = buf.chunks_exact(ZEROS_LEN);
 
-    #[expect(clippy::indexing_slicing)]
+    #[allow(clippy::indexing_slicing)]
     {
         chunks.all(|chunk| chunk == &ZEROS[..])
             && chunks.remainder() == &ZEROS[..chunks.remainder().len()]
