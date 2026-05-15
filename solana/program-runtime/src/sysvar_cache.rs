@@ -1,124 +1,51 @@
-#[expect(deprecated)]
-use solana_sysvar::{fees::Fees, recent_blockhashes::RecentBlockhashes};
+use solana_epoch_rewards::EpochRewards;
+#[allow(deprecated)]
+use solana_sysvar::fees::Fees;
+#[allow(deprecated)]
+use solana_sysvar::recent_blockhashes::RecentBlockhashes;
 use {
     crate::invoke_context::InvokeContext,
     serde::de::DeserializeOwned,
     solana_clock::Clock,
-    solana_epoch_rewards::EpochRewards,
     solana_epoch_schedule::EpochSchedule,
     solana_instruction::error::InstructionError,
     solana_last_restart_slot::LastRestartSlot,
     solana_pubkey::Pubkey,
     solana_rent::Rent,
-    solana_sdk_ids::sysvar,
     solana_slot_hashes::SlotHashes,
-    solana_stake_interface::stake_history::StakeHistory,
     solana_svm_type_overrides::sync::Arc,
-    solana_sysvar::SysvarSerialize,
     solana_sysvar_id::SysvarId,
     solana_transaction_context::{IndexOfAccount, instruction::InstructionContext},
 };
 
-#[cfg(feature = "frozen-abi")]
-impl ::solana_frozen_abi::abi_example::AbiExample for SysvarCache {
-    fn example() -> Self {
-        // SysvarCache is not Serialize so just rely on Default.
-        SysvarCache::default()
-    }
-}
-
-#[derive(Default, Clone, Debug)]
+/// Serialized sysvars exposed to programs during execution.
+#[derive(Default, Debug)]
 pub struct SysvarCache {
-    // full account data as provided by bank, including any trailing zero bytes
+    // Full account data, including any trailing zero bytes.
     clock: Option<Vec<u8>>,
     epoch_schedule: Option<Vec<u8>>,
-    epoch_rewards: Option<Vec<u8>>,
     rent: Option<Vec<u8>>,
     slot_hashes: Option<Vec<u8>>,
-    stake_history: Option<Vec<u8>>,
     last_restart_slot: Option<Vec<u8>>,
 
-    // object representations of large sysvars for convenience
-    // these are used by the stake and vote builtin programs
-    // these should be removed once those programs are ported to bpf
-    slot_hashes_obj: Option<Arc<SlotHashes>>,
-    stake_history_obj: Option<Arc<StakeHistory>>,
+    // Object representations of large sysvars used by native builtins.
+    slot_hashes_obj: Option<SlotHashes>,
 
-    // deprecated sysvars, these should be removed once practical
-    #[expect(deprecated)]
-    fees: Option<Fees>,
-    #[expect(deprecated)]
+    #[allow(deprecated)]
     recent_blockhashes: Option<RecentBlockhashes>,
 }
 
-// declare_deprecated_sysvar_id doesn't support const.
-// These sysvars are going away anyway.
-const FEES_ID: Pubkey = Pubkey::from_str_const("SysvarFees111111111111111111111111111111111");
-const RECENT_BLOCKHASHES_ID: Pubkey =
-    Pubkey::from_str_const("SysvarRecentB1ockHashes11111111111111111111");
-
 impl SysvarCache {
-    /// Overwrite a sysvar. For testing purposes only.
-    #[expect(deprecated)]
-    pub fn set_sysvar_for_tests<T: SysvarSerialize + SysvarId>(&mut self, sysvar: &T) {
-        let data = bincode::serialize(sysvar).expect("Failed to serialize sysvar.");
-        let sysvar_id = T::id();
-        match sysvar_id {
-            sysvar::clock::ID => {
-                self.clock = Some(data);
-            }
-            sysvar::epoch_rewards::ID => {
-                self.epoch_rewards = Some(data);
-            }
-            sysvar::epoch_schedule::ID => {
-                self.epoch_schedule = Some(data);
-            }
-            FEES_ID => {
-                let fees: Fees =
-                    bincode::deserialize(&data).expect("Failed to deserialize Fees sysvar.");
-                self.fees = Some(fees);
-            }
-            sysvar::last_restart_slot::ID => {
-                self.last_restart_slot = Some(data);
-            }
-            RECENT_BLOCKHASHES_ID => {
-                let recent_blockhashes: RecentBlockhashes = bincode::deserialize(&data)
-                    .expect("Failed to deserialize RecentBlockhashes sysvar.");
-                self.recent_blockhashes = Some(recent_blockhashes);
-            }
-            sysvar::rent::ID => {
-                self.rent = Some(data);
-            }
-            sysvar::slot_hashes::ID => {
-                let slot_hashes: SlotHashes =
-                    bincode::deserialize(&data).expect("Failed to deserialize SlotHashes sysvar.");
-                self.slot_hashes = Some(data);
-                self.slot_hashes_obj = Some(Arc::new(slot_hashes));
-            }
-            sysvar::stake_history::ID => {
-                let stake_history: StakeHistory = bincode::deserialize(&data)
-                    .expect("Failed to deserialize StakeHistory sysvar.");
-                self.stake_history = Some(data);
-                self.stake_history_obj = Some(Arc::new(stake_history));
-            }
-            _ => panic!("Unrecognized Sysvar ID: {sysvar_id}"),
-        }
-    }
-
-    // this is exposed for SyscallGetSysvar and should not otherwise be used
+    /// Returns the serialized sysvar buffer for `SyscallGetSysvar`.
     pub fn sysvar_id_to_buffer(&self, sysvar_id: &Pubkey) -> &Option<Vec<u8>> {
         if Clock::check_id(sysvar_id) {
             &self.clock
         } else if EpochSchedule::check_id(sysvar_id) {
             &self.epoch_schedule
-        } else if EpochRewards::check_id(sysvar_id) {
-            &self.epoch_rewards
         } else if Rent::check_id(sysvar_id) {
             &self.rent
         } else if SlotHashes::check_id(sysvar_id) {
             &self.slot_hashes
-        } else if StakeHistory::check_id(sysvar_id) {
-            &self.stake_history
         } else if LastRestartSlot::check_id(sysvar_id) {
             &self.last_restart_slot
         } else {
@@ -126,8 +53,6 @@ impl SysvarCache {
         }
     }
 
-    // most if not all of the obj getter functions can be removed once builtins transition to bpf
-    // the Arc<T> wrapper is to preserve the existing public interface
     fn get_sysvar_obj<T: DeserializeOwned>(
         &self,
         sysvar_id: &Pubkey,
@@ -141,49 +66,40 @@ impl SysvarCache {
         }
     }
 
+    /// Stores a serialized clock sysvar.
+    pub fn set_clock(&mut self, clock: &Clock) {
+        let buffer = self.clock.get_or_insert_default();
+        buffer.clear();
+        // bincode doesn't fail when writing to a correctly sized sysvar buffer.
+        let _ = bincode::serialize_into(buffer, clock);
+    }
+
+    /// Returns the cached clock sysvar.
     pub fn get_clock(&self) -> Result<Arc<Clock>, InstructionError> {
         self.get_sysvar_obj(&Clock::id())
     }
 
-    pub fn get_epoch_schedule(&self) -> Result<Arc<EpochSchedule>, InstructionError> {
-        self.get_sysvar_obj(&EpochSchedule::id())
-    }
-
-    pub fn get_epoch_rewards(&self) -> Result<Arc<EpochRewards>, InstructionError> {
-        self.get_sysvar_obj(&EpochRewards::id())
-    }
-
+    /// Returns the cached rent sysvar.
     pub fn get_rent(&self) -> Result<Arc<Rent>, InstructionError> {
         self.get_sysvar_obj(&Rent::id())
     }
 
+    /// Returns the cached last-restart-slot sysvar.
     pub fn get_last_restart_slot(&self) -> Result<Arc<LastRestartSlot>, InstructionError> {
         self.get_sysvar_obj(&LastRestartSlot::id())
     }
 
-    pub fn get_stake_history(&self) -> Result<Arc<StakeHistory>, InstructionError> {
-        self.stake_history_obj
-            .clone()
-            .ok_or(InstructionError::UnsupportedSysvar)
-    }
-
+    /// Returns the cached slot hashes sysvar.
     pub fn get_slot_hashes(&self) -> Result<Arc<SlotHashes>, InstructionError> {
         self.slot_hashes_obj
-            .clone()
+            .as_ref()
+            .map(|s| Arc::new(SlotHashes::new(s.slot_hashes())))
             .ok_or(InstructionError::UnsupportedSysvar)
     }
 
     #[deprecated]
-    #[expect(deprecated)]
-    pub fn get_fees(&self) -> Result<Arc<Fees>, InstructionError> {
-        self.fees
-            .clone()
-            .ok_or(InstructionError::UnsupportedSysvar)
-            .map(Arc::new)
-    }
-
-    #[deprecated]
-    #[expect(deprecated)]
+    #[allow(deprecated)]
+    /// Returns the cached recent-blockhashes sysvar.
     pub fn get_recent_blockhashes(&self) -> Result<Arc<RecentBlockhashes>, InstructionError> {
         self.recent_blockhashes
             .clone()
@@ -191,6 +107,23 @@ impl SysvarCache {
             .map(Arc::new)
     }
 
+    /// Returns the (deprecated) fees sysvar; this engine always reports defaults.
+    #[allow(deprecated)]
+    pub fn get_fees(&self) -> Result<Arc<Fees>, InstructionError> {
+        Ok(Arc::new(Default::default()))
+    }
+
+    /// Returns the epoch-schedule sysvar; this engine always reports defaults.
+    pub fn get_epoch_schedule(&self) -> Result<Arc<EpochSchedule>, InstructionError> {
+        Ok(Arc::new(Default::default()))
+    }
+
+    /// Returns the epoch-rewards sysvar; this engine always reports defaults.
+    pub fn get_epoch_rewards(&self) -> Result<Arc<EpochRewards>, InstructionError> {
+        Ok(Arc::new(Default::default()))
+    }
+
+    /// Fills missing sysvars by asking the caller for serialized account data.
     pub fn fill_missing_entries<F: FnMut(&Pubkey, &mut dyn FnMut(&[u8]))>(
         &mut self,
         mut get_account_data: F,
@@ -211,14 +144,6 @@ impl SysvarCache {
             });
         }
 
-        if self.epoch_rewards.is_none() {
-            get_account_data(&EpochRewards::id(), &mut |data: &[u8]| {
-                if bincode::deserialize::<EpochRewards>(data).is_ok() {
-                    self.epoch_rewards = Some(data.to_vec());
-                }
-            });
-        }
-
         if self.rent.is_none() {
             get_account_data(&Rent::id(), &mut |data: &[u8]| {
                 if bincode::deserialize::<Rent>(data).is_ok() {
@@ -231,16 +156,7 @@ impl SysvarCache {
             get_account_data(&SlotHashes::id(), &mut |data: &[u8]| {
                 if let Ok(obj) = bincode::deserialize::<SlotHashes>(data) {
                     self.slot_hashes = Some(data.to_vec());
-                    self.slot_hashes_obj = Some(Arc::new(obj));
-                }
-            });
-        }
-
-        if self.stake_history.is_none() {
-            get_account_data(&StakeHistory::id(), &mut |data: &[u8]| {
-                if let Ok(obj) = bincode::deserialize::<StakeHistory>(data) {
-                    self.stake_history = Some(data.to_vec());
-                    self.stake_history_obj = Some(Arc::new(obj));
+                    self.slot_hashes_obj = Some(obj);
                 }
             });
         }
@@ -253,16 +169,7 @@ impl SysvarCache {
             });
         }
 
-        #[expect(deprecated)]
-        if self.fees.is_none() {
-            get_account_data(&Fees::id(), &mut |data: &[u8]| {
-                if let Ok(fees) = bincode::deserialize(data) {
-                    self.fees = Some(fees);
-                }
-            });
-        }
-
-        #[expect(deprecated)]
+        #[allow(deprecated)]
         if self.recent_blockhashes.is_none() {
             get_account_data(&RecentBlockhashes::id(), &mut |data: &[u8]| {
                 if let Ok(recent_blockhashes) = bincode::deserialize(data) {
@@ -272,15 +179,14 @@ impl SysvarCache {
         }
     }
 
+    /// Clears all cached sysvars.
     pub fn reset(&mut self) {
         *self = Self::default();
     }
 }
 
-/// These methods facilitate a transition from fetching sysvars from keyed
-/// accounts to fetching from the sysvar cache without breaking consensus. In
-/// order to keep consistent behavior, they continue to enforce legacy checks
-/// despite dynamically loading them instead of deserializing from account data.
+/// Sysvar accessors that also verify the instruction account matches the
+/// requested sysvar id.
 pub mod get_sysvar_with_account_check {
     use super::*;
 
@@ -296,59 +202,45 @@ pub mod get_sysvar_with_account_check {
         Ok(())
     }
 
+    /// Returns the clock sysvar after checking the provided instruction account.
     pub fn clock(
         invoke_context: &InvokeContext,
         instruction_context: &InstructionContext,
         instruction_account_index: IndexOfAccount,
     ) -> Result<Arc<Clock>, InstructionError> {
         check_sysvar_account::<Clock>(instruction_context, instruction_account_index)?;
-        invoke_context.environment_config.sysvar_cache().get_clock()
+        invoke_context.get_sysvar_cache().get_clock()
     }
 
+    /// Returns the rent sysvar after checking the provided instruction account.
     pub fn rent(
         invoke_context: &InvokeContext,
         instruction_context: &InstructionContext,
         instruction_account_index: IndexOfAccount,
     ) -> Result<Arc<Rent>, InstructionError> {
         check_sysvar_account::<Rent>(instruction_context, instruction_account_index)?;
-        invoke_context.environment_config.sysvar_cache().get_rent()
+        invoke_context.get_sysvar_cache().get_rent()
     }
 
+    /// Returns slot hashes after checking the provided instruction account.
     pub fn slot_hashes(
         invoke_context: &InvokeContext,
         instruction_context: &InstructionContext,
         instruction_account_index: IndexOfAccount,
     ) -> Result<Arc<SlotHashes>, InstructionError> {
         check_sysvar_account::<SlotHashes>(instruction_context, instruction_account_index)?;
-        invoke_context
-            .environment_config
-            .sysvar_cache()
-            .get_slot_hashes()
+        invoke_context.get_sysvar_cache().get_slot_hashes()
     }
 
-    #[expect(deprecated)]
+    #[allow(deprecated)]
+    /// Returns recent blockhashes after checking the provided instruction account.
     pub fn recent_blockhashes(
         invoke_context: &InvokeContext,
         instruction_context: &InstructionContext,
         instruction_account_index: IndexOfAccount,
     ) -> Result<Arc<RecentBlockhashes>, InstructionError> {
         check_sysvar_account::<RecentBlockhashes>(instruction_context, instruction_account_index)?;
-        invoke_context
-            .environment_config
-            .sysvar_cache()
-            .get_recent_blockhashes()
-    }
-
-    pub fn stake_history(
-        invoke_context: &InvokeContext,
-        instruction_context: &InstructionContext,
-        instruction_account_index: IndexOfAccount,
-    ) -> Result<Arc<StakeHistory>, InstructionError> {
-        check_sysvar_account::<StakeHistory>(instruction_context, instruction_account_index)?;
-        invoke_context
-            .environment_config
-            .sysvar_cache()
-            .get_stake_history()
+        invoke_context.get_sysvar_cache().get_recent_blockhashes()
     }
 
     pub fn last_restart_slot(
@@ -357,16 +249,13 @@ pub mod get_sysvar_with_account_check {
         instruction_account_index: IndexOfAccount,
     ) -> Result<Arc<LastRestartSlot>, InstructionError> {
         check_sysvar_account::<LastRestartSlot>(instruction_context, instruction_account_index)?;
-        invoke_context
-            .environment_config
-            .sysvar_cache()
-            .get_last_restart_slot()
+        invoke_context.get_sysvar_cache().get_last_restart_slot()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use {super::*, test_case::test_case};
+    use {super::*, solana_sysvar::SysvarSerialize, test_case::test_case};
 
     // sysvar cache provides the full account data of a sysvar
     // the setters MUST NOT be changed to serialize an object representation
@@ -376,11 +265,8 @@ mod tests {
     // * vector sysvar has fewer than its maximum entries
     // if at any point the data is roundtripped through bincode, the vector will shrink
     #[test_case(Clock::default(); "clock")]
-    #[test_case(EpochSchedule::default(); "epoch_schedule")]
-    #[test_case(EpochRewards::default(); "epoch_rewards")]
     #[test_case(Rent::default(); "rent")]
     #[test_case(SlotHashes::default(); "slot_hashes")]
-    #[test_case(StakeHistory::default(); "stake_history")]
     #[test_case(LastRestartSlot::default(); "last_restart_slot")]
     fn test_sysvar_cache_preserves_bytes<T: SysvarSerialize>(_: T) {
         let id = T::id();
