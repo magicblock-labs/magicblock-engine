@@ -7,11 +7,11 @@ use {
 };
 
 /// Error types for memory translation operations.
-#[derive(Debug, thiserror::Error, PartialEq, Eq, Clone)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum MemoryTranslationError {
     #[error("Unaligned pointer")]
     UnalignedPointer,
-    #[error("InvalidLength")]
+    #[error("Invalid length")]
     InvalidLength,
 }
 
@@ -27,9 +27,7 @@ pub fn address_is_aligned<T>(address: u64) -> bool {
 macro_rules! translate_inner {
     ($memory_mapping:expr, $map:ident, $access_type:expr, $vm_addr:expr, $len:expr $(,)?) => {
         Result::<u64, Box<dyn std::error::Error>>::from(
-            $memory_mapping
-                .$map($access_type, $vm_addr, $len)
-                .map_err(|err| err.into()),
+            $memory_mapping.$map($access_type, $vm_addr, $len).map_err(|err| err.into()),
         )
     };
 }
