@@ -4,6 +4,7 @@ members = [
     "keeper",
     "ledger",
     "nucleus",
+    "processor",
     "programs/magic-root-interface",
     "programs/v42-calculator-interface",
     "programs/v42-calculator-program",
@@ -31,6 +32,7 @@ ledger = { path = "ledger", package = "magicblock-ledger" }
 magic-root-interface = { path = "programs/magic-root-interface" }
 magic-root-program = { path = "programs/magic-root-program" }
 nucleus = { path = "nucleus", package = "magicblock-engine-nucleus" }
+processor = { path = "processor", package = "magicblock-processor" }
 solana-account = { path = "solana/account" }
 solana-program-runtime = { path = "solana/program-runtime" }
 solana-svm = { path = "solana/svm" }
