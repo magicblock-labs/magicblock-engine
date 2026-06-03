@@ -1,0 +1,53 @@
+[package]
+name = "magicblock-processor"
+
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+name = "processor"
+
+[dependencies]
+accountsdb = { workspace = true }
+keeper = { workspace = true }
+nucleus = { workspace = true, features = ["runtime"] }
+
+ahash = { workspace = true }
+blake3 = { workspace = true }
+derive_more = { workspace = true, features = ["deref", "deref_mut", "from"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tracing = { workspace = true }
+
+agave-feature-set = { workspace = true }
+agave-precompiles = { workspace = true, features = ["agave-unstable-api"] }
+agave-syscalls = { workspace = true, features = ["agave-unstable-api"] }
+agave-transaction-view = { workspace = true }
+solana-account = { workspace = true }
+solana-compute-budget-instruction = { workspace = true, features = ["agave-unstable-api"] }
+solana-hash = { workspace = true }
+solana-precompile-error = { workspace = true }
+solana-program-runtime = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-signature = { workspace = true }
+solana-svm = { workspace = true }
+solana-svm-transaction = { workspace = true }
+solana-sysvar = { workspace = true }
+solana-transaction-error = { workspace = true }
+
+[dev-dependencies]
+keeper = { workspace = true, features = ["testkit"] }
+v42-calculator-interface = { workspace = true, features = ["builder"] }
+
+oneshot = { workspace = true }
+solana-instruction = { workspace = true }
+solana-keypair = { workspace = true }
+solana-sdk-ids = { workspace = true }
+
+[lints]
+workspace = true
