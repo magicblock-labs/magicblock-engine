@@ -217,7 +217,8 @@ let owner = Pubkey::new_unique();
 let account = AccountBuilder::default()
     .lamports(2_000_000)
     .owner(owner)
-    .mode(AccountMode::Delegated)
+    .mode(AccountMode::ReadOnly)
+    .slot(1)
     .data(vec![1, 2, 3, 4])
     .build();
 
@@ -235,7 +236,8 @@ engine
 let replacement = AccountBuilder::default()
     .lamports(2_000_000)
     .owner(owner)
-    .mode(AccountMode::Delegated)
+    .mode(AccountMode::ReadOnly)
+    .slot(2)
     .data(vec![5; 4])
     .build();
 engine.account(key).update(replacement).await?;
@@ -244,7 +246,12 @@ engine.account(key).delete().await?;
 
 Each mutation is one committed transaction. `create` can also run optional
 post-finalize instructions in that transaction; if an instruction fails, the
-creation does not commit.
+creation does not commit. Complete-account patches cover non-flag fields, and
+finalization atomically installs the caller-supplied flags without changing
+lamports. Callers are responsible for supplying current state; later
+replacements remain subject to the account's slot and lifecycle rules. Internal
+create composition places post-finalize instructions immediately after
+finalization.
 
 Missing external accounts can be coordinated with `Engine::accounts().ensure`.
 The first caller receives `MissingAccount::Load`; concurrent callers receive a

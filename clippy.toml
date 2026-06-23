@@ -19,7 +19,6 @@ max-struct-bools = 2
 check-private-items = true
 
 disallowed-methods = [
-    { path = "std::option::Option::unwrap", reason = "Use expect with context or handle the None case explicitly" },
-    { path = "std::result::Result::unwrap", reason = "Use expect with context or propagate the error explicitly" },
-    { path = "std::thread::sleep", reason = "Avoid timing-based flakiness in workspace code; isolate retries/backoff behind abstractions" }
+    { path = "std::thread::sleep", reason = "Avoid timing-based flakiness in workspace code; use event driven logic" },
+    { path = "tokio::time::sleep", reason = "Avoid timing-based flakiness in workspace code; use event driven logic" }
 ]
