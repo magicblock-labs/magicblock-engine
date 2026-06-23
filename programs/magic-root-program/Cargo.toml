@@ -1,0 +1,32 @@
+[package]
+name = "magic-root-program"
+
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+magic-root-interface = { workspace = true }
+
+nucleus = { workspace = true, features = ["tls"] }
+wincode = { workspace = true }
+
+solana-account = { workspace = true }
+solana-instruction = { workspace = true }
+solana-instruction-error = { workspace = true }
+solana-program-runtime = { workspace = true }
+solana-svm-log-collector = { workspace = true }
+solana-transaction-context = { workspace = true }
+
+[dev-dependencies]
+solana-pubkey = { workspace = true }
+solana-sdk-ids = { workspace = true }
+solana-svm-callback = { workspace = true, features = ["agave-unstable-api"] }
+solana-svm-feature-set = { workspace = true, features = ["agave-unstable-api"] }
+
+[lints]
+workspace = true
