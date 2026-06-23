@@ -1,0 +1,22 @@
+[package]
+name = "v42-calculator-interface"
+
+authors.workspace = true
+# Compiled to BPF as the program's opcode dependency, so it stays within the
+# SBF toolchain's rustc: edition 2021 and no elevated workspace MSRV.
+edition = "2021"
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+solana-instruction = { workspace = true, optional = true }
+solana-pubkey = { workspace = true }
+
+[features]
+builder = ["dep:solana-instruction"]
+default = ["builder"]
+
+[lints]
+workspace = true
