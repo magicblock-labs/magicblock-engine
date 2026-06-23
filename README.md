@@ -198,9 +198,9 @@ The engine holds two kinds of accounts and stores each where it makes sense:
 - Accounts that only mirror external chain or system state — read-only,
   placeholders, and sysvars — are kept **in volatile memory**.
 
-An account's `mutable()` flag decides which side it belongs to. When that flips,
-accountsdb moves the account and drops the now-stale copy from the other backend,
-so there is only ever one live copy.
+An account's `authoritative()` classification decides which side it belongs to.
+When that flips, accountsdb moves the account and drops the now-stale copy from
+the other backend, so there is only ever one live copy.
 
 To change accounts directly, use `Engine::account(pubkey)`. `create`, `update`,
 `patch`, and `delete` each run as one signed, committed transaction and require
@@ -215,7 +215,8 @@ let owner = Pubkey::new_unique();
 let account = AccountBuilder::default()
     .lamports(2_000_000)
     .owner(owner)
-    .mode(AccountMode::Delegated)
+    .mode(AccountMode::ReadOnly)
+    .slot(1)
     .data(vec![1, 2, 3, 4])
     .build();
 
@@ -233,7 +234,8 @@ engine
 let replacement = AccountBuilder::default()
     .lamports(2_000_000)
     .owner(owner)
-    .mode(AccountMode::Delegated)
+    .mode(AccountMode::ReadOnly)
+    .slot(2)
     .data(vec![5; 4])
     .build();
 engine.account(key).update(replacement).await?;
@@ -242,7 +244,8 @@ engine.account(key).delete().await?;
 
 Each mutation is one committed transaction. `create` can also run optional
 post-finalize instructions in that transaction; if an instruction fails, the
-creation does not commit.
+creation does not commit. Finalized delegated, ephemeral, and transient accounts
+are authoritative and reject later `update`, `patch`, or `delete` operations.
 
 Missing external accounts can be coordinated with `Engine::accounts().ensure`.
 The first caller receives `MissingAccount::Load`; concurrent callers receive a
