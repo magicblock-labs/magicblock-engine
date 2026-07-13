@@ -40,6 +40,7 @@ solana-signature = { workspace = true, features = ["wincode"] }
 solana-transaction-error = { workspace = true, features = ["wincode"] }
 
 [dev-dependencies]
+ledger = { workspace = true, features = ["testkit"] }
 nucleus = { workspace = true, features = ["testkit"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 
