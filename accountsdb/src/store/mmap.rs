@@ -29,16 +29,16 @@ const DATABASE_META_RESERVATION: usize = 256;
 /// Filename used for the mapped storage file.
 pub const STORAGE_FILE: &str = "storage.db";
 /// Growth block for the mapped storage file.
-#[cfg(any(test, feature = "testkit"))]
+#[cfg(feature = "testkit")]
 pub(crate) const STORAGE_BLOCK: u64 = 16 * MB as u64;
-#[cfg(not(any(test, feature = "testkit")))]
+#[cfg(not(feature = "testkit"))]
 pub(crate) const STORAGE_BLOCK: u64 = 256 * MB as u64;
 /// Initial file size: one storage block plus the metadata reservation.
 const INIT_STORAGE_SIZE: u64 = STORAGE_BLOCK + DATABASE_META_RESERVATION as u64;
 /// Maximum mapped storage size.
-#[cfg(any(test, feature = "testkit"))]
+#[cfg(feature = "testkit")]
 const MMAP_SIZE: usize = 64 * MB;
-#[cfg(not(any(test, feature = "testkit")))]
+#[cfg(not(feature = "testkit"))]
 const MMAP_SIZE: usize = u32::MAX as usize * STORAGE_UNIT + DATABASE_META_RESERVATION;
 
 /// One allocation inside the mapped storage.
