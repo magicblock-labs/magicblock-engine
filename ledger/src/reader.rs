@@ -102,6 +102,7 @@ impl LedgerReader {
                 }
             }
         }
+        // Release ledger ownership before the manager can reopen it.
         drop(self);
         shutdown.terminate(ShutdownReason::Signalled);
     }

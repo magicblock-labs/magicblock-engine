@@ -52,7 +52,7 @@ mod metrics;
 mod subscriptions;
 mod util;
 
-#[cfg(any(test, feature = "testkit"))]
+#[cfg(feature = "testkit")]
 pub mod testkit;
 
 #[cfg(test)]
