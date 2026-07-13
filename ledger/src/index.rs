@@ -20,9 +20,9 @@ use crate::schema::Offset;
 /// Index directory below each superblock directory.
 const INDEX_SUBDIR: &str = "index";
 /// Maximum LMDB map size for ledger indexes.
-#[cfg(any(test, feature = "testkit"))]
+#[cfg(feature = "testkit")]
 const INDEX_MAP_SIZE: usize = 32 * nucleus::MB;
-#[cfg(not(any(test, feature = "testkit")))]
+#[cfg(not(feature = "testkit"))]
 const INDEX_MAP_SIZE: usize = 16 * nucleus::GB;
 /// Number of LMDB named databases in the ledger index.
 const INDEX_DBS: u32 = 4;

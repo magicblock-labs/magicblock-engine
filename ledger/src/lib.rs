@@ -78,9 +78,9 @@ impl Ledger {
             .spawn(|| appender.run(sh))?;
         let (reader_tx, rx) = flume::bounded(SERVICE_QUEUE_CAPACITY);
 
-        #[cfg(not(any(test, feature = "testkit")))]
+        #[cfg(not(feature = "testkit"))]
         let readers = num_cpus::get() as u32;
-        #[cfg(any(test, feature = "testkit"))]
+        #[cfg(feature = "testkit")]
         let readers = 1;
 
         for id in 0..readers {
