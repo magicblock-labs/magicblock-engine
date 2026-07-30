@@ -225,9 +225,7 @@ impl<D: TransactionData> SVMMessage for ResolvedTransactionView<D> {
         let Ok(index) = u8::try_from(key_index) else {
             return false;
         };
-        self.view
-            .instructions_iter()
-            .any(|ix| ix.program_id_index == index)
+        self.view.instructions_iter().any(|ix| ix.program_id_index == index)
     }
 }
 
@@ -243,9 +241,7 @@ impl<D: TransactionData> SVMTransaction for ResolvedTransactionView<D> {
 
 impl<D: TransactionData> Debug for ResolvedTransactionView<D> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ResolvedTransactionView")
-            .field("view", &self.view)
-            .finish()
+        f.debug_struct("ResolvedTransactionView").field("view", &self.view).finish()
     }
 }
 
