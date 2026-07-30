@@ -341,10 +341,7 @@ impl TransactionFrame {
         let account_bytes = &bytes[start..end];
         unsafe {
             core::slice::from_raw_parts(
-                bytes
-                    .as_ptr()
-                    .add(usize::from(self.static_account_keys.offset))
-                    as *const Pubkey,
+                account_bytes.as_ptr() as *const Pubkey,
                 usize::from(self.static_account_keys.num_static_accounts),
             )
         }
@@ -365,11 +362,9 @@ impl TransactionFrame {
         //   is not initialized properly.
         // - Aliasing rules are respected because the lifetime of the returned
         //   reference is the same as the input/source `bytes`.
-        unsafe {
-            &*(bytes
-                .as_ptr()
-                .add(usize::from(self.recent_blockhash_offset)) as *const Hash)
-        }
+        let start = self.recent_blockhash_offset as usize;
+        let hash_bytes = &bytes[start..start + size_of::<Hash>()];
+        unsafe { &*(hash_bytes.as_ptr() as *const Hash) }
     }
 
     /// Return an iterator over the instructions in the transaction.
@@ -457,10 +452,7 @@ mod tests {
         );
         assert_eq!(
             frame.address_table_lookup.num_address_table_lookups,
-            tx.message
-                .address_table_lookups()
-                .map(|x| x.len() as u8)
-                .unwrap_or(0)
+            tx.message.address_table_lookups().map(|x| x.len() as u8).unwrap_or(0)
         );
     }
 
@@ -485,11 +477,7 @@ mod tests {
         VersionedTransaction {
             signatures: vec![Signature::default()], // 1 signature to be valid.
             message: VersionedMessage::Legacy(Message::new(
-                &[system_instruction::transfer(
-                    &payer,
-                    &Pubkey::new_unique(),
-                    1,
-                )],
+                &[system_instruction::transfer(&payer, &Pubkey::new_unique(), 1)],
                 Some(&payer),
             )),
         }
@@ -502,11 +490,7 @@ mod tests {
             message: VersionedMessage::V0(
                 v0::Message::try_compile(
                     &payer,
-                    &[system_instruction::transfer(
-                        &payer,
-                        &Pubkey::new_unique(),
-                        1,
-                    )],
+                    &[system_instruction::transfer(&payer, &Pubkey::new_unique(), 1)],
                     &[],
                     Hash::default(),
                 )

@@ -176,29 +176,23 @@ impl InstructionsFrame {
     #[inline(always)]
     pub(crate) fn num_instructions(&self) -> u16 {
         match self {
-            Self::LegacyAndV0 {
-                num_instructions, ..
-            } => *num_instructions,
-            Self::V1 {
-                num_instructions, ..
-            } => *num_instructions,
+            Self::LegacyAndV0 { num_instructions, .. } => *num_instructions,
+            Self::V1 { num_instructions, .. } => *num_instructions,
         }
     }
 
     #[inline(always)]
     pub(crate) fn iter<'a>(&'a self, bytes: &'a [u8]) -> InstructionsIterator<'a> {
         match self {
-            Self::LegacyAndV0 {
-                num_instructions,
-                offset,
-                frames,
-            } => InstructionsIterator::LegacyAndV0 {
-                bytes,
-                offset: *offset as usize,
-                index: 0,
-                num_instructions: *num_instructions,
-                frames,
-            },
+            Self::LegacyAndV0 { num_instructions, offset, frames } => {
+                InstructionsIterator::LegacyAndV0 {
+                    bytes,
+                    offset: *offset as usize,
+                    index: 0,
+                    num_instructions: *num_instructions,
+                    frames,
+                }
+            }
             Self::V1 {
                 num_instructions,
                 headers_offset,
@@ -352,11 +346,7 @@ unsafe fn for_legacy_and_v0<'a>(
     // - Offset and length checks have been done in the initial parsing.
     let data = unsafe { unchecked_read_slice_data::<u8>(bytes, offset, data_len) };
 
-    SVMInstruction {
-        program_id_index,
-        accounts,
-        data,
-    }
+    SVMInstruction { program_id_index, accounts, data }
 }
 
 /// Builds SMVInstruction from v1 pre-validated frame metadata.
@@ -403,26 +393,18 @@ unsafe fn for_v1<'a>(
     // - Offset and length checks have been done in the initial parsing.
     let data = unsafe { unchecked_read_slice_data::<u8>(bytes, payloads_offset, data_len) };
 
-    SVMInstruction {
-        program_id_index,
-        accounts,
-        data,
-    }
+    SVMInstruction { program_id_index, accounts, data }
 }
 
 impl ExactSizeIterator for InstructionsIterator<'_> {
     fn len(&self) -> usize {
         match self {
-            Self::LegacyAndV0 {
-                num_instructions,
-                index,
-                ..
-            } => usize::from(num_instructions.wrapping_sub(*index)),
-            Self::V1 {
-                num_instructions,
-                index,
-                ..
-            } => usize::from(num_instructions.wrapping_sub(*index)),
+            Self::LegacyAndV0 { num_instructions, index, .. } => {
+                usize::from(num_instructions.wrapping_sub(*index))
+            }
+            Self::V1 { num_instructions, index, .. } => {
+                usize::from(num_instructions.wrapping_sub(*index))
+            }
         }
     }
 }
@@ -564,9 +546,9 @@ mod tests {
             ..solana_message::v1::Message::default()
         };
 
-        let serialized = solana_message::v1::serialize(&message);
+        let serialized = message.serialize();
 
-        let mut offset = 41; // instruction headers starts at offset 41 for no config, 0 addresses, per spec
+        let mut offset = 42; // instruction headers start after the V1 prefix for no config, 0 addresses
         let instructions_frame =
             InstructionsFrame::try_new_for_v1(&serialized, &mut offset, 2).unwrap();
 
@@ -624,11 +606,7 @@ mod tests {
         assert_eq!(offset, bytes.len());
 
         match frame {
-            InstructionsFrame::LegacyAndV0 {
-                num_instructions,
-                offset,
-                frames,
-            } => {
+            InstructionsFrame::LegacyAndV0 { num_instructions, offset, frames } => {
                 assert_eq!(num_instructions, 1);
                 assert_eq!(offset, 1);
                 assert_eq!(frames.len(), 1);
@@ -661,11 +639,7 @@ mod tests {
         assert_eq!(offset, bytes.len());
 
         match frame {
-            InstructionsFrame::LegacyAndV0 {
-                num_instructions,
-                offset,
-                frames,
-            } => {
+            InstructionsFrame::LegacyAndV0 { num_instructions, offset, frames } => {
                 assert_eq!(num_instructions, 1);
                 assert_eq!(offset, 1);
                 assert_eq!(frames.len(), 1);
@@ -832,9 +806,7 @@ mod tests {
         let bytes = vec![1, 1, 0xff, 0xff];
         let mut offset = 0;
         assert_eq!(
-            InstructionsFrame::try_new_for_v1(&bytes, &mut offset, 1)
-                .err()
-                .unwrap(),
+            InstructionsFrame::try_new_for_v1(&bytes, &mut offset, 1).err().unwrap(),
             TransactionViewError::ParseError
         );
     }
@@ -848,11 +820,7 @@ mod tests {
         assert_eq!(offset, 1);
 
         match frame {
-            InstructionsFrame::LegacyAndV0 {
-                num_instructions,
-                offset,
-                frames,
-            } => {
+            InstructionsFrame::LegacyAndV0 { num_instructions, offset, frames } => {
                 assert_eq!(num_instructions, 0);
                 assert_eq!(offset, 1);
                 assert!(frames.is_empty());
