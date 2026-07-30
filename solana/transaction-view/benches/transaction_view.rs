@@ -95,11 +95,7 @@ fn simple_transfers() -> Vec<VersionedTransaction> {
             let keypair = Keypair::new();
             VersionedTransaction::try_new(
                 VersionedMessage::Legacy(Message::new_with_blockhash(
-                    &[system_instruction::transfer(
-                        &keypair.pubkey(),
-                        &Pubkey::new_unique(),
-                        1,
-                    )],
+                    &[system_instruction::transfer(&keypair.pubkey(), &Pubkey::new_unique(), 1)],
                     Some(&keypair.pubkey()),
                     &Hash::default(),
                 )),
