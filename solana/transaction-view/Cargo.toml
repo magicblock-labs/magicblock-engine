@@ -1,13 +1,14 @@
 [package]
-name = "agave-transaction-view"
+authors = { workspace = true }
 description = "Zero-copy parser and sanitizer for serialized Solana transactions"
 documentation = "https://docs.rs/agave-transaction-view"
-version = { workspace = true }
-authors = { workspace = true }
-repository = { workspace = true }
+edition = "2024"
 homepage = { workspace = true }
 license = { workspace = true }
-edition = "2024"
+name = "agave-transaction-view"
+readme = "README.md"
+repository = { workspace = true }
+version = "4.1.1"
 
 [features]
 agave-unstable-api = []
@@ -41,9 +42,9 @@ solana-transaction = { workspace = true, features = ["serde", "wincode"] }
 wincode = { workspace = true }
 
 [[bench]]
-name = "bytes"
 harness = false
+name = "bytes"
 
 [[bench]]
-name = "transaction_view"
 harness = false
+name = "transaction_view"
