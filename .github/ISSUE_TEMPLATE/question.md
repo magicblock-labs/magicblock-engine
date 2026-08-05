@@ -1,14 +1,15 @@
 ---
 name: Spike / question
 about: Ask a design question or request an investigation
-title: "[question] "
+title: ""
+labels: question
 ---
 
 ## Question
-What do you want to decide or understand?
+<!-- What needs to be decided or understood? -->
 
 ## Context
-What led to this?
+<!-- What led to this question, and what is already known? -->
 
 ## Desired output
-What answer or artifact would be useful?
+<!-- What answer, recommendation, prototype, or other artifact would be useful? -->

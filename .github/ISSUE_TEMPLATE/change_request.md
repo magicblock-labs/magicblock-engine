@@ -1,17 +1,16 @@
 ---
 name: Change request
 about: Request a product, API, storage, or behavior change
-title: "[change] "
+title: ""
+type: Feature
+labels: ["enhancement"]
 ---
 
 ## Goal
-What outcome do you want?
+<!-- What outcome should this change produce? -->
 
 ## Why
-What pain does this solve?
+<!-- What problem or limitation does this address? -->
 
 ## Scope
-What should change, and what should stay the same?
-
-## Notes
-Any constraints or alternatives considered?
+<!-- What should change, and what should remain unchanged? -->

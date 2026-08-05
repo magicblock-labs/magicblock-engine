@@ -1,14 +1,14 @@
 ## What changed
-What did you change?
+<!-- Summarize the change at the immediate-parent diff boundary. -->
 
-## Why
-Why is this needed?
+<!-- Replace ISSUE with the dedicated issue number. -->
+Closes #ISSUE
 
 ## Impact
-What behavior, APIs, storage, or performance changes should reviewers care about?
+<!-- Note behavior, API, storage, compatibility, security, or performance effects. -->
+
+## Validation
+<!-- List the exact checks run and their outcomes. If none were run, say why. -->
 
 ## Reviewer notes
-Anything you want reviewers to look at closely?
-
-## Follow-up
-Anything intentionally left for later?
+<!-- Point reviewers to invariants, sharp edges, or the highest-risk part of the diff. -->

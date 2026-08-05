@@ -1,17 +1,19 @@
 ---
 name: Bug report
 about: Report something broken, surprising, or regressed
-title: "[bug] "
+title: ""
+type: Bug
+labels: ["bug"]
 ---
 
 ## Problem
-What is wrong or surprising?
+<!-- What happened? Include the relevant error or diagnostic evidence. -->
+
+## Reproduction
+<!-- Give the smallest steps or input that reproduces it. If it is intermittent, say so. -->
 
 ## Expected
-What should happen instead?
+<!-- What should happen instead? -->
 
 ## Context
-Where did this show up? Include the crate, file, or path if known.
-
-## Notes
-Anything else that helps explain or reproduce it?
+<!-- Include the revision and crate or path. Add environment details only when relevant. -->
