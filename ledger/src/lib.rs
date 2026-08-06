@@ -131,6 +131,9 @@ impl Ledger {
     fn new(directory: PathBuf, size_limit: u64) -> Result<Self> {
         fs::create_dir_all(&directory)?;
         let meta = directory.join(LEDGER_META);
+        // SAFETY: `LedgerMeta` and its nested headers have stable C layouts,
+        // and all fields that can change while mapped are atomic. This process
+        // exclusively creates and updates the metadata file at `meta`.
         let meta = unsafe { MetaMap::<LedgerMeta>::new(&meta) }?;
         let mut superblocks = BTreeMap::new();
         for id in meta.superblocks() {

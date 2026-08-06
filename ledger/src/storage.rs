@@ -22,7 +22,7 @@ use rustix::fs::{self, FallocateFlags};
 use tracing::debug;
 use zstd::bulk::Compressor;
 
-use crate::{Result, schema::MAX_ENTRY_SIZE};
+use crate::{Result, index::Span, schema::MAX_ENTRY_SIZE};
 
 /// Initial buffer size for append-heavy files.
 const FILE_BUFFER_SIZE: usize = 64 * MB;
@@ -105,6 +105,9 @@ impl AppendFile {
     /// Extends the physical file without changing the logical append cursor.
     fn preallocate(&mut self) -> Result<()> {
         let offset = self.len;
+        if (offset + PREALLOCATION_SIZE) > Span::MAX_FILE_SIZE {
+            Err(io::Error::from(io::ErrorKind::FileTooLarge))?;
+        }
         fs::fallocate(
             self.file.as_fd(),
             FallocateFlags::empty(),
@@ -252,7 +255,7 @@ impl LedgerMeta {
     #[inline]
     pub(crate) fn superblocks(&self) -> Range<u64> {
         let head = self.head();
-        let start = head - self.superblocks.load(Acquire).saturating_sub(1);
+        let start = head.saturating_sub(self.superblocks.load(Acquire).saturating_sub(1));
         start..head + 1
     }
 }
@@ -281,6 +284,7 @@ pub(crate) struct FileCursors {
 
 /// Inclusive slot range covered by a superblock.
 #[derive(Default)]
+#[repr(C)]
 pub(crate) struct BlockRange {
     /// First slot in the segment.
     pub(crate) start: AtomicU64,

@@ -30,7 +30,7 @@ next superblock.
 
 Reader requests run on a worker pool. Each worker owns its decode buffers and
 reads only through published cursors. The optional `testkit` feature reduces
-LMDB map sizes without changing the on-disk format.
+LMDB map sizes and uses one reader worker without changing the on-disk format.
 
 During coordinated shutdown, one queue marker per reader closes the pool after
 earlier requests. A final appender sync flushes every preceding event, reports

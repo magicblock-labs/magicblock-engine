@@ -25,7 +25,7 @@ const INDEX_MAP_SIZE: usize = 32 * nucleus::MB;
 #[cfg(not(any(test, feature = "testkit")))]
 const INDEX_MAP_SIZE: usize = 16 * nucleus::GB;
 /// Number of LMDB named databases in the ledger index.
-const INDEX_DBS: u32 = 4;
+const INDEX_DBS: u32 = 3;
 /// Transaction signature index name.
 const TRANSACTIONS_INDEX: &str = "transactions";
 /// Slot-to-offset index name.
@@ -74,11 +74,11 @@ impl Span {
     const SIZE_MASK: u64 = (1 << Self::SIZE_BITS) - 1;
     /// Largest blockstore entry size that can be packed into an index value.
     pub(crate) const MAX_SIZE: u64 = Self::SIZE_MASK;
+    /// Largest file size addressable by the packed offset.
+    pub(crate) const MAX_FILE_SIZE: u64 = (u64::MAX >> Self::SIZE_BITS) + 1;
 
     /// Packs an `offset` and `size` into one integer.
     pub(crate) fn new(offset: Offset, size: u64) -> Self {
-        debug_assert!(offset <= u64::MAX >> Self::SIZE_BITS);
-        debug_assert!(size <= Self::MAX_SIZE);
         Self(offset << Self::SIZE_BITS | size)
     }
 
