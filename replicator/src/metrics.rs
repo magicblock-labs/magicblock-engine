@@ -124,26 +124,13 @@ struct Metrics {
 
 impl Default for Metrics {
     fn default() -> Self {
-        let metrics = Self {
+        Self {
             operations: OperationCounters::new(OPERATION_TIME),
             client_stream_connected: metric::gauge(CLIENT_STREAM_CONNECTED, 0),
             server_connections: metric::gauge(SERVER_CONNECTIONS, 0),
             client_connection_attempts: metric::counter(CLIENT_CONNECTION_ATTEMPTS, 0),
             client_state_mismatches: metric::counter(CLIENT_STATE_MISMATCHES, 0),
             server_cursor_updates_skipped: metric::counter(SERVER_CURSOR_UPDATES_SKIPPED, 0),
-        };
-        metrics.register();
-        metrics
-    }
-}
-
-impl Metrics {
-    fn register(&self) {
-        self.operations.register("replicator");
-        metric::register("replicator", self.client_stream_connected.clone());
-        metric::register("replicator", self.server_connections.clone());
-        metric::register("replicator", self.client_connection_attempts.clone());
-        metric::register("replicator", self.client_state_mismatches.clone());
-        metric::register("replicator", self.server_cursor_updates_skipped.clone());
+        }
     }
 }

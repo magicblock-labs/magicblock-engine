@@ -10,6 +10,7 @@ members = [
     "programs/magic-root-program",
     "programs/v42-calculator-interface",
     "programs/v42-calculator-program",
+    "replicator",
     "solana/account",
     "solana/program-runtime",
     "solana/svm",
