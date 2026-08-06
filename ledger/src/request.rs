@@ -20,7 +20,7 @@ use tokio::{sync::mpsc, time};
 use crate::{
     Result,
     error::RequestResult,
-    schema::{Block, Execution, OwnedBlockestoreEntry},
+    schema::{Block, Execution, OwnedBlockstoreEntry},
 };
 
 /// Result returned by a full transaction lookup.
@@ -52,7 +52,7 @@ pub type ReaderSender = RequestSender<ReadRequest>;
 /// Handle for consuming a ledger replay stream.
 pub struct ReplayHandle {
     /// Entries streamed from retained blockstore data in on-disk order.
-    pub rx: mpsc::Receiver<OwnedBlockestoreEntry>,
+    pub rx: mpsc::Receiver<OwnedBlockstoreEntry>,
     /// Completion result sent after the reader finishes streaming entries.
     pub response: RequestHandle<Result<()>>,
 }
@@ -103,7 +103,7 @@ pub struct ReplayParams {
     /// Last sealed superblock already reflected in the consumer's state.
     pub superblock: u64,
     /// Channel receiving blockstore entries in on-disk order.
-    pub tx: mpsc::Sender<OwnedBlockestoreEntry>,
+    pub tx: mpsc::Sender<OwnedBlockstoreEntry>,
 }
 
 /// Read request sent to a ledger reader service.
