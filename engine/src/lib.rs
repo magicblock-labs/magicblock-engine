@@ -10,7 +10,7 @@ use std::{
 
 use derive_more::Deref;
 use keeper::{Keeper, builder::KeeperBuilder, error::KeeperError};
-use ledger::schema::OwnedBlockestoreEntry;
+use ledger::schema::OwnedBlockstoreEntry;
 use magic_root_program::entrypoint::MagicRootEntrypoint;
 use nucleus::{
     runtime::{self, BarrierHandle, SequencerHandle},
@@ -137,13 +137,13 @@ impl Engine {
     /// Seal and reset entries quiesce execution before touching shared state;
     /// a reconstructed seal whose checksum differs returns
     /// [`ReplayError::StateMismatch`].
-    pub async fn replay(&self, entry: OwnedBlockestoreEntry) -> Result<()> {
+    pub async fn replay(&self, entry: OwnedBlockstoreEntry) -> Result<()> {
         match entry {
-            OwnedBlockestoreEntry::Transaction(txn) => self.transaction(txn)?.schedule().await?,
-            OwnedBlockestoreEntry::Block(block) => {
+            OwnedBlockstoreEntry::Transaction(txn) => self.transaction(txn)?.schedule().await?,
+            OwnedBlockstoreEntry::Block(block) => {
                 self.sequencer.send(SequencerMessage::Block(block)).await?;
             }
-            OwnedBlockestoreEntry::Superblock(expected) => {
+            OwnedBlockstoreEntry::Superblock(expected) => {
                 let _guard = self.barrier().await?;
                 self.accounts().set_superblock(expected.id);
                 self.sync(false)?;
@@ -153,7 +153,7 @@ impl Engine {
                     Err(ReplayError::StateMismatch)?;
                 }
             }
-            OwnedBlockestoreEntry::Reset(slot) => {
+            OwnedBlockstoreEntry::Reset(slot) => {
                 let _guard = self.barrier().await?;
                 self.reset(slot)?;
             }
