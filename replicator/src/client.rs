@@ -9,7 +9,7 @@ use derive_more::Deref;
 use engine::{Engine, EngineError, pacemaker::ExternalBlock};
 use ledger::{
     Superblock,
-    schema::{Block, OwnedBlockestoreEntry, blockstore},
+    schema::{Block, OwnedBlockstoreEntry, blockstore},
 };
 use nucleus::{
     KB,
@@ -111,9 +111,9 @@ impl ReplicationClient {
 
     /// Applies one blockstore entry to the follower engine, holding block-boundary
     /// ordering through the pacemaker and flagging superblock seal mismatches.
-    async fn process(&mut self, entry: OwnedBlockestoreEntry) -> Result<()> {
+    async fn process(&mut self, entry: OwnedBlockstoreEntry) -> Result<()> {
         match entry {
-            OwnedBlockestoreEntry::Block(block) => {
+            OwnedBlockstoreEntry::Block(block) => {
                 let (external, guard) = ExternalBlock::new(block);
                 self.pacer.send(external).await.map_err(EngineError::from)?;
                 let pending = time::timeout(IO_TIMEOUT, self.blocks.recv());
@@ -124,7 +124,7 @@ impl ReplicationClient {
                 }
                 guard.await.map_err(EngineError::from)?;
             }
-            OwnedBlockestoreEntry::Superblock(expected) => {
+            OwnedBlockstoreEntry::Superblock(expected) => {
                 // The preceding boundary finalized local state; this seal only validates it.
                 let observed = self.superblocks().sealed();
                 if observed != expected {
