@@ -27,8 +27,8 @@ use crate::{
     index::{Index, Span, TxSpan},
     metrics::{self, Operation},
     schema::{
-        Block, BlockstoreEntry, Event, Execution, ExecutionDetails, MAX_ENTRY_SIZE, SuperblockSeal,
-        TransactionEntry, blockstore,
+        Block, BlockstoreEntry, Event, Execution, ExecutionDetails, MAX_EXECUTION_DETAILS_SIZE,
+        SuperblockSeal, TransactionEntry, blockstore,
     },
     storage::{AppendFile, MetaMap, SuperblockMeta},
 };
@@ -265,9 +265,9 @@ struct SuperblockWriter {
 impl SuperblockWriter {
     /// Opens writable files and metadata under `directory`.
     fn new(directory: &Path) -> Result<Self> {
-        // SAFETY: `SuperblockMeta` is a fixed-layout header whose shared fields are
-        // atomics, satisfying `MetaMap::new`'s contract. `directory` is created by
-        // the caller (`init_dir`/`Superblock::open`) before this runs.
+        // SAFETY: `SuperblockMeta` and its nested headers have stable C layouts,
+        // and all fields that can change while mapped are atomic. The ledger
+        // exclusively creates and updates this superblock metadata file.
         let metadata = unsafe { MetaMap::<SuperblockMeta>::new(&directory.join(SUPERBLOCK_META)) }?;
 
         Ok(Self {
@@ -299,7 +299,7 @@ impl SuperblockWriter {
         wincode::serialize_into(&mut self.executions, &execution.header)
             .map_err(Into::<Error>::into)?;
         let mut details = self.buffer.encode(&execution.details);
-        if details.len() >= MAX_ENTRY_SIZE {
+        if details.len() > MAX_EXECUTION_DETAILS_SIZE {
             // Omit oversized details but retain the fixed execution header and status.
             details = self.buffer.encode(&None::<ExecutionDetails>);
         }
@@ -342,7 +342,3 @@ impl SuperblockWriter {
         Ok(())
     }
 }
-
-// SAFETY: `LedgerAppender` is moved into one background thread. Its LMDB
-// write transaction is created and consumed on that same thread.
-unsafe impl Send for LedgerAppender {}
