@@ -13,7 +13,7 @@ use agave_transaction_view::transaction_view::SanitizedTransactionView;
 use bitcode::Buffer;
 use flume::Receiver;
 use nucleus::{
-    MB, Slot,
+    Slot,
     heed::OptRoTxn,
     shutdown::{ShutdownHandle, ShutdownReason},
 };
@@ -35,7 +35,8 @@ use crate::{
         TransactionStatusReadResult,
     },
     schema::{
-        Block, BlockstoreEntry, Execution, ExecutionHeader, OwnedBlockestoreEntry, blockstore,
+        Block, BlockstoreEntry, Execution, ExecutionHeader, MAX_EXECUTION_DETAILS_SIZE,
+        OwnedBlockstoreEntry, blockstore,
     },
 };
 
@@ -55,7 +56,7 @@ impl LedgerReader {
     /// Creates a reader over `ledger`.
     pub(crate) fn new(ledger: Arc<Ledger>, rx: Receiver<ReadRequest>) -> Result<Self> {
         let mut buffers = ReadBuffers::default();
-        buffers.details.reserve(4 * MB);
+        buffers.details.resize(MAX_EXECUTION_DETAILS_SIZE, 0);
         Ok(Self {
             rx,
             ledger,
@@ -270,10 +271,16 @@ impl LedgerReader {
         for superblock in self.ledger.iter_after(*superblock) {
             let limit = superblock.meta.cursors.blockstore.load(Acquire);
             let mut reader = BufReader::new((&superblock.blockstore).take(limit));
-            while !reader.fill_buf()?.is_empty() {
+            loop {
+                if request.cancelled() || tx.is_closed() {
+                    return Ok(());
+                }
+                if reader.fill_buf()?.is_empty() {
+                    break;
+                }
                 let entry = blockstore::decode(&mut reader).map_err(Into::<Error>::into)?;
                 if tx.blocking_send(entry).is_err() {
-                    break;
+                    return Ok(());
                 }
             }
         }
@@ -302,9 +309,10 @@ impl LedgerReader {
         let header_size = wincode::serialized_size(&header).map_err(Into::<Error>::into)? as usize;
 
         let compressed = &self.buffers.executions[header_size..];
-        self.buffers.details.clear();
-        self.decompressor.decompress_to_buffer(compressed, &mut self.buffers.details)?;
-        let details = self.buffers.decoder.decode(&self.buffers.details)?;
+        let size = self
+            .decompressor
+            .decompress_to_buffer(compressed, self.buffers.details.as_mut_slice())?;
+        let details = self.buffers.decoder.decode(&self.buffers.details[..size])?;
         Ok(Execution { header, details })
     }
 
@@ -313,7 +321,7 @@ impl LedgerReader {
         &mut self,
         superblock: &Superblock,
         span: Span,
-    ) -> Result<OwnedBlockestoreEntry> {
+    ) -> Result<OwnedBlockstoreEntry> {
         self.buffers.read_blockstore(superblock, span)?;
         let bytes = self.buffers.blockstore.as_slice();
         let entry = blockstore::decode(bytes).map_err(Into::<Error>::into)?;
@@ -348,37 +356,43 @@ impl LedgerReader {
             None => 0,
         };
         self.buffers.read_blockstore_range(superblock, start..span.offset())?;
-        let len = self.buffers.blockstore.len();
-        let mut cursor = Cursor::new(self.buffers.blockstore.clone());
-        let mut full = Vec::new();
-        let mut transactions = Vec::new();
-        let mut signatures = Vec::new();
-        while cursor.position() < len && !request.cancelled() {
-            let entry = blockstore::decode(&mut cursor).map_err(Into::<Error>::into)?;
-            let BlockstoreEntry::Transaction(transaction) = entry else {
-                error!(
-                    superblock = superblock.id,
-                    slot, "ledger blockstore includes invalid block entries"
-                );
-                return Err(LedgerError::Corruption(
-                    "blockstore includes invalid block entries",
-                ));
-            };
-            if matches!(details, BlockDetails::Transactions) {
-                transactions.push(transaction);
-                continue;
+        let blockstore = mem::take(&mut self.buffers.blockstore);
+        let len = blockstore.len();
+        let mut cursor = Cursor::new(blockstore);
+        let result = (|| {
+            let mut full = Vec::new();
+            let mut transactions = Vec::new();
+            let mut signatures = Vec::new();
+            while cursor.position() < len && !request.cancelled() {
+                let entry = blockstore::decode(&mut cursor).map_err(Into::<Error>::into)?;
+                let BlockstoreEntry::Transaction(transaction) = entry else {
+                    error!(
+                        superblock = superblock.id,
+                        slot, "ledger blockstore includes invalid block entries"
+                    );
+                    return Err(LedgerError::Corruption(
+                        "blockstore includes invalid block entries",
+                    ));
+                };
+                if matches!(details, BlockDetails::Transactions) {
+                    transactions.push(transaction);
+                    continue;
+                }
+                let signature = signature(&transaction)?;
+                if matches!(details, BlockDetails::Signatures) {
+                    signatures.push(signature);
+                    continue;
+                }
+                let Some(spans) = superblock.index.transaction(&signature, &mut txn)? else {
+                    continue;
+                };
+                let execution = self.execution(superblock, spans.execution)?;
+                full.push(TransactionResponse { transaction, execution });
             }
-            let signature = signature(&transaction)?;
-            if matches!(details, BlockDetails::Signatures) {
-                signatures.push(signature);
-                continue;
-            }
-            let Some(spans) = superblock.index.transaction(&signature, &mut txn)? else {
-                continue;
-            };
-            let execution = self.execution(superblock, spans.execution)?;
-            full.push(TransactionResponse { transaction, execution });
-        }
+            Ok((full, transactions, signatures))
+        })();
+        self.buffers.blockstore = cursor.into_inner();
+        let (full, transactions, signatures) = result?;
 
         let response = match details {
             BlockDetails::Full => BlockResponse::Full(FullBlockInfo { block, transactions: full }),
