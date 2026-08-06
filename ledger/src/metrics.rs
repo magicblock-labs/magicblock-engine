@@ -91,7 +91,9 @@ pub(crate) fn time(op: Operation) -> metric::OperationTimer<'static> {
 
 /// Refreshes the current pending transaction count.
 pub(crate) fn pending_transactions(count: usize) {
-    metric::with_metrics(&METRICS, |m| m.pending_transactions.set(count as i64));
+    metric::with_metrics(&METRICS, |m| {
+        m.pending_transactions.set(metric::gauge_value(count))
+    });
 }
 
 /// Refreshes ledger-wide count gauges from metadata.
@@ -116,33 +118,26 @@ struct Metrics {
 impl Metrics {
     /// Builds collectors and registers them in the default Prometheus registry.
     fn new(ledger: &Ledger) -> Self {
-        let metrics = Self {
+        Self {
             operations: OperationCounters::new(OPERATION_TIME),
             pending_transactions: metric::gauge(PENDING_TRANSACTIONS, 0),
             transactions: metric::gauge(
                 TRANSACTIONS,
-                ledger.meta.transactions.load(Relaxed) as i64,
+                metric::gauge_value(ledger.meta.transactions.load(Relaxed)),
             ),
-            blocks: metric::gauge(BLOCKS, ledger.meta.blocks.load(Relaxed) as i64),
-            superblocks: metric::gauge(SUPERBLOCKS, ledger.meta.head() as i64),
-        };
-        metrics.register();
-        metrics
+            blocks: metric::gauge(
+                BLOCKS,
+                metric::gauge_value(ledger.meta.blocks.load(Relaxed)),
+            ),
+            superblocks: metric::gauge(SUPERBLOCKS, metric::gauge_value(ledger.meta.head())),
+        }
     }
 
     /// Refreshes count gauges from ledger metadata.
     fn ledger_counts(&self, ledger: &Ledger) {
-        self.transactions.set(ledger.meta.transactions.load(Relaxed) as i64);
-        self.blocks.set(ledger.meta.blocks.load(Relaxed) as i64);
-        self.superblocks.set(ledger.meta.head() as i64);
-    }
-
-    /// Registers all collectors in the default Prometheus registry.
-    fn register(&self) {
-        self.operations.register("ledger");
-        metric::register("ledger", self.pending_transactions.clone());
-        metric::register("ledger", self.transactions.clone());
-        metric::register("ledger", self.blocks.clone());
-        metric::register("ledger", self.superblocks.clone());
+        self.transactions
+            .set(metric::gauge_value(ledger.meta.transactions.load(Relaxed)));
+        self.blocks.set(metric::gauge_value(ledger.meta.blocks.load(Relaxed)));
+        self.superblocks.set(metric::gauge_value(ledger.meta.head()));
     }
 }

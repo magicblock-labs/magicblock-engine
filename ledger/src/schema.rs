@@ -22,10 +22,16 @@ use crate::{error::Result, index::Span};
 pub(crate) type Offset = u64;
 
 /// Owned blockstore entry used when replaying persisted ledger data.
-pub type OwnedBlockestoreEntry = BlockstoreEntry<Vec<u8>>;
+pub type OwnedBlockstoreEntry = BlockstoreEntry<Vec<u8>>;
 
 /// Largest encoded ledger entry representable by an index span.
 pub const MAX_ENTRY_SIZE: usize = Span::MAX_SIZE as usize;
+
+/// Largest decoded execution-details payload retained by the ledger.
+///
+/// Compressed execution records are normally only a few KiB, so 4 MiB leaves
+/// substantial headroom while bounding decompression and bitcode decoding.
+pub(crate) const MAX_EXECUTION_DETAILS_SIZE: usize = 4 * nucleus::MB;
 
 /// Codec for entries in the blockstore stream.
 ///
@@ -33,7 +39,7 @@ pub const MAX_ENTRY_SIZE: usize = Span::MAX_SIZE as usize;
 /// smaller default. Writers enforce the encoded-size bound before reaching this
 /// codec.
 pub mod blockstore {
-    use super::{BlockstoreEntry, MAX_ENTRY_SIZE, OwnedBlockestoreEntry};
+    use super::{BlockstoreEntry, MAX_ENTRY_SIZE, OwnedBlockstoreEntry};
     use wincode::{
         ReadResult, WriteResult,
         config::Configuration,
@@ -41,7 +47,7 @@ pub mod blockstore {
     };
 
     /// Decodes the next entry without consuming bytes belonging to a following entry.
-    pub fn decode<'de>(src: impl Reader<'de>) -> ReadResult<OwnedBlockestoreEntry> {
+    pub fn decode<'de>(src: impl Reader<'de>) -> ReadResult<OwnedBlockstoreEntry> {
         let config = Configuration::default().with_preallocation_size_limit::<MAX_ENTRY_SIZE>();
         wincode::config::deserialize_from(src, config)
     }
@@ -136,7 +142,7 @@ pub struct ExecutionDetails {
 /// One cross-program invocation group.
 #[derive(Encode, Decode)]
 pub struct Cpis(
-    /// Inner instructions executed at from outer instruction level.
+    /// Inner instructions invoked by one transaction-level instruction.
     pub Vec<Instruction>,
 );
 
@@ -145,7 +151,7 @@ pub struct Cpis(
 pub struct Instruction {
     /// Compiled Solana instruction.
     pub compiled: CompiledInstruction,
-    /// Optional invocation stack height.
+    /// Invocation stack height; transaction-level instructions start at 1.
     pub stack_height: u8,
 }
 

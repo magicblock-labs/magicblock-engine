@@ -37,7 +37,7 @@ use crate::{
         ReadRequest, ReplayParams, RequestPayload, TransactionResponse,
     },
     schema::{
-        Balances, Event, Execution, ExecutionDetails, ExecutionHeader, OwnedBlockestoreEntry,
+        Balances, Event, Execution, ExecutionDetails, ExecutionHeader, OwnedBlockstoreEntry,
         TransactionEntry,
     },
 };
@@ -149,7 +149,7 @@ async fn block_signatures(ledger: &Arc<Ledger>, slot: Slot) -> Vec<Signature> {
 ///
 /// The reader runs on its own thread while the test drains the channel, so a
 /// small mpsc buffer never deadlocks the `blocking_send` in the replay loop.
-async fn replay(ledger: &Arc<Ledger>, superblock: u64) -> Vec<OwnedBlockestoreEntry> {
+async fn replay(ledger: &Arc<Ledger>, superblock: u64) -> Vec<OwnedBlockstoreEntry> {
     let (tx, mut rx) = mpsc::channel(4);
     let (payload, handle) = RequestPayload::new(ReplayParams { superblock, tx });
     let (reader_tx, reader_rx) = flume::bounded(1);
@@ -266,7 +266,7 @@ async fn test_large_transaction_roundtrip() {
 
     let entries = replay(&ledger, 0).await;
     match entries.first() {
-        Some(OwnedBlockestoreEntry::Transaction(transaction)) => {
+        Some(OwnedBlockstoreEntry::Transaction(transaction)) => {
             assert_eq!(transaction, payload.as_ref());
         }
         _ => panic!("expected replayed transaction entry"),
