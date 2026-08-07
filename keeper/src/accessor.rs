@@ -247,22 +247,19 @@ impl<'a> TransactionsAccessor<'a> {
         Ok(())
     }
 
-    /// Writes the dirty accounts of a successful execution back to accountsdb,
-    /// returning the execution (for downstream fanout) or `None` if it failed.
+    /// Commits one accepted transaction to accountsdb, writing dirty accounts
+    /// only for successful execution and returning it for downstream fanout.
     pub fn commit_state_transitions<'t>(
         &self,
         result: &'t TransactionProcessingResult,
     ) -> Result<Option<&'t ExecutedTransaction>> {
-        let Some(execution) = result.as_ref().ok().filter(|e| e.was_successful()) else {
-            return Ok(None);
-        };
+        let execution = result.as_ref().ok().filter(|e| e.was_successful());
         let accounts = execution
-            .loaded_transaction
-            .accounts
-            .iter()
+            .into_iter()
+            .flat_map(|execution| execution.loaded_transaction.accounts.iter())
             .filter(|(id, a)| a.dirty() && !sysvar::instructions::check_id(id));
-        self.keeper.accountsdb.store(accounts)?;
-        Ok(Some(&**execution))
+        self.keeper.accountsdb.commit(accounts)?;
+        Ok(execution.map(|execution| &**execution))
     }
 }
 
