@@ -120,11 +120,13 @@ impl Keeper {
 
     /// Streams retained ledger entries after accountsdb's sealed superblock up to
     /// the ledger tip, used to rebuild state after snapshot restoration. Returns
-    /// `None` when accountsdb is already current by slot.
+    /// `None` when accountsdb is already current by slot and transaction count.
     pub async fn replay(&self) -> Result<Option<ReplayHandle>> {
-        let ledger = self.ledger.tip().unwrap_or_default();
-        let accountsdb = self.accountsdb.slot();
-        if accountsdb >= ledger {
+        let ledger_slot = self.ledger.tip().unwrap_or_default();
+        let accountsdb_slot = self.accountsdb.slot();
+        let ledger_txns = self.ledger.transactions();
+        let accountsdb_txns = self.accountsdb.transactions();
+        if accountsdb_slot >= ledger_slot && accountsdb_txns == ledger_txns {
             return Ok(None);
         };
         let (tx, rx) = mpsc::channel(16);
@@ -135,7 +137,10 @@ impl Keeper {
         let (payload, response) = RequestPayload::new(params);
         let handle = ReplayHandle { rx, response };
         self.ledger.reader.send_async(ReadRequest::Replay(payload)).await?;
-        warn!(accountsdb, ledger, "starting ledger replay (slot lag)");
+        warn!(
+            accountsdb_slot,
+            ledger_slot, accountsdb_txns, ledger_txns, "starting ledger replay"
+        );
         Ok(Some(handle))
     }
 

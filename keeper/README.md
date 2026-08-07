@@ -11,10 +11,11 @@ native builtins, configured loader-v4 programs, caller-provided accounts,
 authority funding, and sysvars.
 
 Accountsdb is restored from the newest retained snapshot when validation finds
-corruption or when its sealed superblock trails the ledger head. The original
-active tree is saved until the restored snapshot validates. Engine replay is
-responsible for advancing restored state from the successor of its sealed
-superblock through the ledger tip.
+corruption, its sealed superblock trails the ledger head, or its committed
+transaction count differs from the ledger's durable count. The original active
+tree is saved until the restored snapshot validates. Engine replay is responsible
+for advancing restored state from the successor of its sealed superblock through
+the ledger tip and must finish with matching transaction counts.
 
 Replication-staged snapshots carry an explicit marker. After restoring one,
 keeper advances the follower ledger's cumulative transaction count to the
