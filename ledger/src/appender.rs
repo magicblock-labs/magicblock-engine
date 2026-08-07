@@ -52,7 +52,7 @@ pub(crate) struct LedgerAppender {
     index: Arc<Index>,
     /// Event stream from the execution pipeline.
     rx: Receiver<Event>,
-    /// Transactions written since the last committed block boundary.
+    /// Transactions written since the last durable sync.
     transactions: u64,
     /// Broadcasts the blockstore write position after each committed block.
     position: Sender<BlockstorePosition>,
@@ -193,16 +193,10 @@ impl LedgerAppender {
         let span = self.writer.write_blockstore(&BlockstoreEntry::Block(block))?;
         self.index.insert_block(txn, &block.slot, &span)?;
         self.sync(Some(block.slot), txn)?;
-        self.index.flush()?;
-        self.ledger.meta.transactions.fetch_add(self.transactions, Release);
-        self.ledger.meta.blocks.fetch_add(1, Release);
-        self.ledger.meta.range.end.store(block.slot, Release);
-        self.ledger.meta.flush()?;
         if self.ledger.size_exceeded()? {
             self.ledger.truncate()?;
         }
         metrics::ledger_counts(&self.ledger);
-        self.transactions = 0;
         Ok(())
     }
 
@@ -223,14 +217,23 @@ impl LedgerAppender {
         Ok(())
     }
 
-    /// Syncs data files, republishes durable cursors (extending the segment slot
-    /// range when `slot` is given), and broadcasts the new blockstore position.
+    /// Makes files and indexes durable, publishes their cursors and accumulated
+    /// transaction count, and broadcasts the new blockstore position. When
+    /// `slot` is supplied, the same boundary also publishes block metadata.
     fn sync(&mut self, slot: Option<Slot>, txn: OptRwTxn<'_, '_>) -> Result<()> {
         let cursors = self.writer.sync()?;
-        self.writer.publish(cursors, slot)?;
         if let Some(txn) = txn.take() {
             txn.commit()?;
         }
+        self.index.flush()?;
+        self.writer.publish(cursors, slot)?;
+        self.ledger.meta.transactions.fetch_add(self.transactions, Release);
+        if let Some(slot) = slot {
+            self.ledger.meta.blocks.fetch_add(1, Release);
+            self.ledger.meta.range.end.store(slot, Release);
+        }
+        self.ledger.meta.flush()?;
+        self.transactions = 0;
         let position = BlockstorePosition {
             superblock: self.ledger.meta.head(),
             offset: cursors.0,
