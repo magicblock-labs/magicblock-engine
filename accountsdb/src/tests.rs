@@ -18,7 +18,7 @@ use solana_account::{
 use solana_pubkey::Pubkey;
 
 use super::*;
-use crate::snapshot::VOLATILE_DB_FILE;
+use crate::{snapshot::VOLATILE_DB_FILE, store::MIN_REMAINDER};
 
 /// Fresh database on a throwaway directory; the `TempDir` must outlive the db.
 fn db() -> (TempDir, AccountsDB) {
@@ -123,9 +123,16 @@ fn defrag_to_stable(db: &AccountsDB) -> u32 {
 
 /// Builds a mutable account with an exact persisted span.
 fn mutable_units(lamports: u64, units: u32, owner: &Pubkey) -> AccountSharedData {
-    (0..1024)
+    let account = mutable_at_least(lamports, units, owner);
+    assert_eq!(account.owned().units(), units);
+    account
+}
+
+/// Builds the smallest mutable account spanning at least `units` storage units.
+fn mutable_at_least(lamports: u64, units: u32, owner: &Pubkey) -> AccountSharedData {
+    (0..=units as usize * solana_account::STORAGE_UNIT)
         .map(|len| mutable_data(lamports, vec![0; len], owner))
-        .find(|account| account.owned().units() == units)
+        .find(|account| account.owned().units() >= units)
         .unwrap()
 }
 
@@ -410,10 +417,12 @@ fn test_defragment_preserves_live_accounts() {
 fn test_defragment_best_fit_and_deferred_holes() {
     let owner = Pubkey::new_unique();
     let small = mutable_units(1, 21, &owner);
-    let medium = mutable_units(2, 33, &owner);
+    let small_units = small.owned().units();
+    let medium = mutable_at_least(2, MIN_REMAINDER, &owner);
+    let medium_units = medium.owned().units();
 
     // Two adjacent component holes form one run. The small tail account leaves
-    // an exact medium remainder, which the following account consumes.
+    // a useful remainder, which the following account consumes exactly.
     {
         let (_dir, db) = db();
         let (small_hole, medium_hole, anchor, medium_key, small_key) = (
@@ -435,7 +444,7 @@ fn test_defragment_best_fit_and_deferred_holes() {
 
         let pass = unsafe { db.persisted.defragment() }.unwrap();
         assert_eq!(pass.moved, 2);
-        assert_eq!(pass.reclaimed, 54);
+        assert_eq!(pass.reclaimed, small_units + medium_units);
         assert!(offset(&db, &medium_key) == medium_dst);
         assert!(offset(&db, &small_key) == small_dst);
         assert_eq!(lamports(&db, &medium_key), 2);
@@ -444,16 +453,18 @@ fn test_defragment_best_fit_and_deferred_holes() {
 
         let before = cursor(&db);
         store(&db, Pubkey::new_unique(), small.clone());
-        assert_eq!(cursor(&db), before + 21);
+        assert_eq!(cursor(&db), before + small_units);
     }
 
-    // Exact fit wins first. The next account skips a 23-unit hole that would
-    // leave two units. Two accounts instead use a 75-unit hole and publish its
-    // reusable 33-unit suffix.
+    // Exact fit wins first. The next account skips a hole whose remainder is
+    // just below the threshold. Two accounts instead use a wider hole and
+    // publish a useful suffix.
     {
         let (_dir, db) = db();
-        let near = mutable_units(3, 23, &owner);
-        let wide = mutable_units(4, 75, &owner);
+        let short_remainder = (MIN_REMAINDER - 1) & !1;
+        let near_units = small_units + short_remainder;
+        let near = mutable_units(3, near_units, &owner);
+        let wide = mutable_units(4, 2 * small_units + medium_units, &owner);
         let (
             near_hole,
             anchor_a,
@@ -501,7 +512,7 @@ fn test_defragment_best_fit_and_deferred_holes() {
         store(&db, Pubkey::new_unique(), medium.clone());
         assert_eq!(cursor(&db), before);
         let near_key = Pubkey::new_unique();
-        store(&db, near_key, mutable_units(5, 23, &owner));
+        store(&db, near_key, mutable_units(5, near_units, &owner));
         assert_eq!(cursor(&db), before);
         assert!(offset(&db, &near_key) == near_dst);
     }
@@ -510,7 +521,7 @@ fn test_defragment_best_fit_and_deferred_holes() {
     // hole after commit, and public startup compaction exhausts later passes.
     {
         let (_dir, mut db) = db();
-        let second = mutable_units(3, 45, &owner);
+        let second = mutable_units(3, 2 * medium_units - small_units, &owner);
         let (first_hole, middle, second_hole, tail) = (
             Pubkey::new_unique(),
             Pubkey::new_unique(),
@@ -532,14 +543,14 @@ fn test_defragment_best_fit_and_deferred_holes() {
         assert_eq!(cursor(&db), before);
         assert!(offset(&db, &middle) == middle_dst);
 
-        assert_eq!(db.compact().unwrap(), 66);
+        assert_eq!(db.compact().unwrap(), 2 * medium_units);
         assert!(offset(&db, &tail) == tail_dst);
         assert_eq!(lamports(&db, &middle), 1);
         assert_eq!(lamports(&db, &tail), 2);
 
         let before = cursor(&db);
         store(&db, Pubkey::new_unique(), small.clone());
-        assert_eq!(cursor(&db), before + 21);
+        assert_eq!(cursor(&db), before + small_units);
     }
 }
 
