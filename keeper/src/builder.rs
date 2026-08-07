@@ -256,7 +256,7 @@ impl KeeperBuilder {
     fn accountsdb(&self, ledger: &LedgerHandle) -> Result<AccountsDB> {
         let mut backup = None;
         loop {
-            let accountsdb = AccountsDB::new(&self.accountsdb.directory)?;
+            let mut accountsdb = AccountsDB::new(&self.accountsdb.directory)?;
             // Seal N opens ledger head N+1, so accountsdb is current at head-1.
             let expected = ledger.head().saturating_sub(1);
             let restored = backup.is_some();
@@ -264,7 +264,11 @@ impl KeeperBuilder {
             let count_mismatch = accountsdb.transactions() != ledger.transactions();
             match accountsdb.validate() {
                 Ok(()) if restored || (!lagging && !count_mismatch) => {
-                    info!(lagging, count_mismatch, "accountsdb validation succeeded");
+                    let reclaimed = accountsdb.compact()?;
+                    info!(
+                        lagging,
+                        count_mismatch, reclaimed, "accountsdb validation succeeded"
+                    );
                     backup.map(fs::remove_dir_all).transpose()?;
                     return Ok(accountsdb);
                 }
