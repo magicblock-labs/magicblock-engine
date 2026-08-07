@@ -12,15 +12,12 @@ authority funding, and sysvars.
 
 Accountsdb is restored from the newest retained snapshot when validation finds
 corruption, its sealed superblock trails the ledger head, or its committed
-transaction count differs from the ledger's durable count. The original active
-tree is saved until the restored snapshot validates. Engine replay is responsible
-for advancing restored state from the successor of its sealed superblock through
-the ledger tip and must finish with matching transaction counts.
-
-Replication-staged snapshots carry an explicit marker. After restoring one,
-keeper advances the follower ledger's cumulative transaction count to the
-snapshot baseline before engine replay consumes the retained tail. Local
-recovery snapshots do not rebase the ledger count.
+transaction count trails the ledger's durable count. The accountsdb count is a
+checkpoint high-water mark and may exceed the locally retained ledger count,
+including after replication snapshot bootstrap. The original active tree is
+saved until the restored snapshot validates. Engine replay is responsible for
+advancing restored state from the successor of its sealed superblock through the
+ledger tip and must finish with matching transaction counts when replay runs.
 
 `nucleus::config::BlockstoreParams` supplies the expected block time and
 non-zero superblock interval used by pacing and cache TTL calculation. The
@@ -71,6 +68,7 @@ service messages. They hold no durable state.
 ## `testkit`
 
 The `testkit` feature exposes a keeper backed by throwaway directories plus v42
-account and transaction helpers. When enabled, Keeper's build script builds the
-v42 SBF artifact consumed by the harness. Downstream tests enable the feature on
-their dev-dependency instead of duplicating the setup.
+account and transaction helpers, including persisted-metadata fault injection.
+When enabled, Keeper's build script builds the v42 SBF artifact consumed by the
+harness. Downstream tests enable the feature on their dev-dependency instead of
+duplicating the setup.

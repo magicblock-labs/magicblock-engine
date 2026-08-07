@@ -112,7 +112,7 @@ async fn recovers_the_newest_snapshot() {
 
     // Corruption must follow the close, whose flush would otherwise republish a
     // valid checksum over the poisoned word.
-    corrupt(dirs.accounts.path());
+    corrupt(dirs.accounts.path(), 8, 0xABAB_ABAB_ABAB_ABAB);
 
     let keeper = TestKeeper::from_builder(dirs, builder).await;
     keeper.accounts().validate().expect("restored store validates");

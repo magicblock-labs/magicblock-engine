@@ -126,7 +126,7 @@ impl Keeper {
         let accountsdb_slot = self.accountsdb.slot();
         let ledger_txns = self.ledger.transactions();
         let accountsdb_txns = self.accountsdb.transactions();
-        if accountsdb_slot >= ledger_slot && accountsdb_txns == ledger_txns {
+        if accountsdb_slot >= ledger_slot && accountsdb_txns >= ledger_txns {
             return Ok(None);
         };
         let (tx, rx) = mpsc::channel(16);
