@@ -11,7 +11,6 @@
 use std::{
     collections::HashMap,
     fs::{self, File},
-    iter,
     num::NonZeroU64,
     path::{Path, PathBuf},
     sync::Arc,
@@ -212,11 +211,6 @@ pub fn store_v42(keeper: &Keeper, value: i64, mode: AccountMode) -> Pubkey {
     key
 }
 
-/// Advances only accountsdb's committed-transaction counter for recovery fault injection.
-pub fn advance_transactions(keeper: &Keeper) {
-    keeper.accountsdb.commit(iter::empty()).unwrap();
-}
-
 /// Reads the little-endian `i64` payload of a v42 account, or `None` if absent.
 pub fn load_v42_data(keeper: &Keeper, key: Pubkey) -> Option<i64> {
     keeper.accounts().loader().read(&key, decode_v42).unwrap()
@@ -256,24 +250,20 @@ pub async fn await_archive(keeper: &Keeper) -> PathBuf {
         .unwrap()
 }
 
-/// Poisons the persisted checksum under `root` so the next open reports corruption.
+/// Overwrites one `u64` metadata word in the closed persisted store.
 ///
-/// The mmap-backed persisted store keeps its `DatabaseMeta` at the front of
-/// `CURRENT/storage.db`; the `u64` format version sits at offset 0 and the
-/// recorded checksum immediately after it at offset 8. Overwriting the checksum
-/// word (leaving the version intact) makes it disagree with the recomputed value
-/// on reopen — the exact `AccountsDBError::Corruption` the recovery path keys on,
-/// rather than an `UnsupportedVersion` it does not handle.
+/// `DatabaseMeta` starts with version at offset 0, checksum at 8, slot at 16,
+/// superblock at 24, and committed transaction count at 32.
 ///
 /// This must be the last write to the store: `flush(true)` recomputes and
 /// republishes the checksum, so this must run *after* the keeper is closed, never
 /// against a live one.
-pub fn corrupt(root: &Path) {
+pub fn corrupt(root: &Path, offset: u64, value: u64) {
     use std::io::{Seek, SeekFrom, Write};
     let path = AccountsDB::directory(root).join(STORAGE_FILE);
     let mut file = File::options().write(true).open(&path).unwrap();
-    file.seek(SeekFrom::Start(8)).unwrap();
-    file.write_all(&[0xAB; 8]).unwrap();
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.write_all(&value.to_ne_bytes()).unwrap();
     file.flush().unwrap();
 }
 
