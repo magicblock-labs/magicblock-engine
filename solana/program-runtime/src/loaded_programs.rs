@@ -281,7 +281,7 @@ impl ProgramCache {
     }
 
     pub fn get(&self, key: &Pubkey) -> Option<Arc<ProgramCacheEntry>> {
-        self.index.get_sync(key).map(|e| e.get().clone())
+        self.index.read_sync(key, |_, entry| entry.clone())
     }
 
     pub fn merge(&self, modified_entries: &HashMap<Pubkey, Arc<ProgramCacheEntry>>) {

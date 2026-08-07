@@ -953,12 +953,15 @@ pub fn mock_process_instruction_with_feature_set<
         ));
     }
 
-    let program_index = if let Some(index) = program_index {
-        index
+    let (program_index, pop_loader_account) = if let Some(index) = program_index {
+        (index, false)
     } else {
         let processor_account = AccountSharedData::new(0, 0, &native_loader::id());
         transaction_accounts.push((*loader_id, processor_account));
-        transaction_accounts.len().saturating_sub(1) as IndexOfAccount
+        (
+            transaction_accounts.len().saturating_sub(1) as IndexOfAccount,
+            true,
+        )
     };
     let pop_epoch_schedule_account =
         if !transaction_accounts.iter().any(|(key, _)| *key == sysvar::epoch_schedule::id()) {
@@ -1005,7 +1008,9 @@ pub fn mock_process_instruction_with_feature_set<
     if pop_epoch_schedule_account {
         transaction_accounts.pop();
     }
-    transaction_accounts.pop();
+    if pop_loader_account {
+        transaction_accounts.pop();
+    }
     transaction_accounts
 }
 
@@ -1265,29 +1270,6 @@ mod tests {
             MAX_INSTRUCTIONS,
             1,
         );
-
-        // To be uncommented when we reorder the trace
-        // transaction_context
-        //     .configure_instruction_at_index(
-        //         0,
-        //         0,
-        //         vec![InstructionAccount::new(0, false, false)],
-        //         vec![u16::MAX; 256],
-        //         Cow::Owned(Vec::new()),
-        //         None,
-        //     )
-        //     .unwrap();
-        //
-        // transaction_context
-        //     .configure_instruction_at_index(
-        //         1,
-        //         0,
-        //         vec![InstructionAccount::new(0, false, false)],
-        //         vec![u16::MAX; 256],
-        //         Cow::Owned(Vec::new()),
-        //         None,
-        //     )
-        //     .unwrap();
 
         for _ in 0..MAX_INSTRUCTIONS {
             transaction_context.push().unwrap();
