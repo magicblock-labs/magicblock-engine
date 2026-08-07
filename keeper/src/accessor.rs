@@ -202,6 +202,27 @@ impl<'a> TransactionsAccessor<'a> {
         Ok(true)
     }
 
+    /// Serves waiters on `signature` the outcome of the submission that already
+    /// owns it, after a duplicate of it was dropped.
+    ///
+    /// A duplicate is not a failure — it *is* the transaction already in flight
+    /// or already settled, and its submitter is entitled to that transaction's
+    /// result. Which is what it gets while the original is in flight: the
+    /// signature's channel still exists, so both submitters share it and
+    /// `commit_execution` reaches both. Once the original settles, that channel
+    /// is gone; a duplicate arriving afterwards subscribes to a freshly created
+    /// one that nothing will ever write to, and blocks until its caller's own
+    /// deadline. Replaying the cached status closes that case.
+    pub fn notify_duplicate(&self, signature: Signature) {
+        // A cached `None` means still in flight, so the original's own commit
+        // will serve both. Absent entirely means it has aged out of the dedup
+        // window, in which case `append` would not have rejected this one.
+        let Some(Some(status)) = self.keeper.caches.signatures.get(&signature) else {
+            return;
+        };
+        self.keeper.subscriptions.signatures.send(&signature, &status, true);
+    }
+
     /// Commits execution metadata and publishes resulting account changes.
     pub fn commit_execution(&self, mut txn: FullTransaction) -> Result<()> {
         let subs = &self.keeper.subscriptions;
@@ -242,8 +263,16 @@ impl<'a> TransactionsAccessor<'a> {
         }
         // Clear TLS unconditionally so unsent messages cannot leak into the next transaction.
         TlsManager::clear();
+        // Cache before broadcasting, not after. The broadcast is terminal: it
+        // drops the signature's channel, so from that instant onwards the cache
+        // is the only way to learn this outcome. Updating it second leaves a
+        // window in which a late subscriber finds neither — a fresh channel
+        // nobody will ever write to, and a cache entry still reading `None`.
+        self.keeper
+            .caches
+            .signatures
+            .update(&commit.signature, Some(commit.status.clone()));
         subs.signatures.send(&commit.signature, &commit.status, true);
-        self.keeper.caches.signatures.update(&commit.signature, Some(commit.status));
         Ok(())
     }
 
