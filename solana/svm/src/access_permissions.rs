@@ -78,7 +78,7 @@ mod tests {
         std::collections::HashSet,
     };
 
-    /// A dirtied account in the engine-exclusive `Delegated` (mutable) mode.
+    /// A dirtied account in the requested mode.
     fn account(mode: AccountMode) -> AccountSharedData {
         let mut acc: AccountSharedData = AccountBuilder::default().mode(mode).build();
         acc.set_data_from_slice(&[1]);
@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn fee_payer_guard() {
-        // A dirty immutable fee payer is rejected unless privileged; a mutable
+        // A dirty immutable fee payer is rejected; a mutable
         // payer is always accepted.
         let cases = [
             // (payer, privileged, accepted)

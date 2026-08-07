@@ -151,11 +151,9 @@ impl Default for TransactionBatchProcessor {
 }
 
 impl TransactionBatchProcessor {
-    /// Create a new, uninitialized `TransactionBatchProcessor`.
+    /// Create a `TransactionBatchProcessor` using the supplied program cache.
     ///
-    /// In this context, uninitialized means that the `TransactionBatchProcessor`
-    /// has been initialized with an empty program cache. The cache contains no
-    /// programs, including builtins.
+    /// The processor preserves the cache contents and does not add builtins.
     pub fn new_uninitialized(slot: Slot, cache: Arc<ProgramCache>) -> Self {
         Self {
             slot,
@@ -166,8 +164,8 @@ impl TransactionBatchProcessor {
 
     /// Create a new `TransactionBatchProcessor`.
     ///
-    /// Missing runtime environments are replaced with empty loaders. The
-    /// program cache is used as provided and does not receive builtins here.
+    /// Runtime environments are supplied per execution through
+    /// [`TransactionProcessingEnvironment::program_runtime_environments_for_execution`].
     pub fn new(slot: Slot, cache: Arc<ProgramCache>) -> Self {
         Self::new_uninitialized(slot, cache)
     }

@@ -69,6 +69,9 @@ pub fn check_rent_state_with_account(
 }
 
 /// Determines the rent state of an account from lamports and data size.
+///
+/// A nonzero-lamport ephemeral account is rent-exempt even below the normal
+/// minimum. An account with zero lamports remains uninitialized.
 pub fn get_account_rent_state(rent: &Rent, acc: &AccountSharedData) -> RentState {
     let (lamports, len) = (acc.lamports(), acc.data().len());
     if lamports == 0 {
