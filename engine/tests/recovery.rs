@@ -1,5 +1,5 @@
 //! Full-engine replay recovery — the engine's most distinctive orchestration.
-//! After an accountsdb corruption the keeper restores an older archived snapshot,
+//! After an accountsdb inconsistency the keeper restores an older archived snapshot,
 //! leaving durable state behind the ledger tip; the engine then spins a temporary
 //! replay sequencer to re-execute the retained ledger entries and rebuild the
 //! missing state, checksum-verified at each sealed superblock. Nothing below the
@@ -11,7 +11,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use engine::{EngineError, ReplayError, testkit::TestEngine};
-use keeper::testkit::{corrupt, load_v42_data, store_v42};
+use keeper::testkit::{advance_transactions, corrupt, load_v42_data, store_v42};
 use nucleus::ledger::ACCOUNTSDB_SNAPSHOT_FILE;
 use solana_account::AccountMode;
 use solana_pubkey::Pubkey;
@@ -30,7 +30,7 @@ async fn commit_and_seal(te: &mut TestEngine, key: Pubkey, value: i64) -> PathBu
 // so re-executing B crosses superblock 2's sealed checksum (the verification
 // arm's happy path) before C is rebuilt from the unsealed head.
 #[tokio::test(flavor = "multi_thread")]
-async fn replay_rebuilds_state_after_corruption() {
+async fn replay_rebuilds_state_after_counter_mismatch() {
     let mut te = TestEngine::new().await;
     let key = store_v42(&te, 0, AccountMode::Delegated);
 
@@ -46,12 +46,13 @@ async fn replay_rebuilds_state_after_corruption() {
     let s2 = commit_and_seal(&mut te, key, 20).await;
     te.execute(&[E::lit(30).compose(key, &[])]).await.expect("C commits");
     te.advance(2).await;
+    // Advance only accountsdb's count. The mismatch must restore a snapshot even
+    // though account content and its checksum remain valid.
+    advance_transactions(&te);
     let (dirs, authority) = te.close().await;
 
-    // Corrupt the closed accountsdb and drop the newest archive: the reopen falls
-    // back to snapshot 1 (K = 10) and replays everything after it. Corruption must
-    // follow the close, whose flush would otherwise republish a valid checksum.
-    corrupt(dirs.accounts.path());
+    // Drop the newest archive so recovery falls back to snapshot 1 (K = 10) and
+    // replays both a sealed successor and the unsealed ledger head.
     std::fs::remove_file(&s2).unwrap();
 
     // Guarded by a timeout so a replay regression fails fast instead of hanging.
@@ -100,15 +101,26 @@ async fn replay_aborts_on_checksum_mismatch() {
 }
 
 // A healthy restart opens persisted state as-is and restores the clean-shutdown
-// volatile dump. The direct-stored delegated account exists in neither snapshots
-// nor ledger, while the read-only account exists only in the volatile dump; the
-// post-seal transaction write pins the persisted tip alongside both probes.
+// volatile dump. A failed execution still counts on both durable sides without
+// writing accounts. The direct-stored delegated account exists in neither
+// snapshots nor ledger, while the read-only account exists only in the volatile
+// dump; the post-seal transaction write pins the persisted tip alongside them.
 #[tokio::test(flavor = "multi_thread")]
 async fn clean_restart_reopens_persisted_and_volatile_state() {
     let mut te = TestEngine::new().await;
     let key = store_v42(&te, 0, AccountMode::Delegated);
     commit_and_seal(&mut te, key, 10).await;
     te.execute(&[E::lit(20).compose(key, &[])]).await.unwrap();
+    let failed = (E::lit(i64::MIN) - E::lit(1)).compose(key, &[]);
+    assert!(
+        te.execute(&[failed]).await.is_err(),
+        "overflow execution fails"
+    );
+    assert_eq!(
+        load_v42_data(&te, key),
+        Some(20),
+        "failed execution writes no state"
+    );
     let direct = store_v42(&te, 7, AccountMode::Delegated);
     let volatile = store_v42(&te, 8, AccountMode::ReadOnly);
     let (dirs, authority) = te.close().await;
