@@ -11,7 +11,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use engine::{EngineError, ReplayError, testkit::TestEngine};
-use keeper::testkit::{advance_transactions, corrupt, load_v42_data, store_v42};
+use keeper::testkit::{corrupt, load_v42_data, store_v42};
 use nucleus::ledger::ACCOUNTSDB_SNAPSHOT_FILE;
 use solana_account::AccountMode;
 use solana_pubkey::Pubkey;
@@ -30,7 +30,7 @@ async fn commit_and_seal(te: &mut TestEngine, key: Pubkey, value: i64) -> PathBu
 // so re-executing B crosses superblock 2's sealed checksum (the verification
 // arm's happy path) before C is rebuilt from the unsealed head.
 #[tokio::test(flavor = "multi_thread")]
-async fn replay_rebuilds_state_after_counter_mismatch() {
+async fn replay_rebuilds_state_after_counter_lag() {
     let mut te = TestEngine::new().await;
     let key = store_v42(&te, 0, AccountMode::Delegated);
 
@@ -46,10 +46,11 @@ async fn replay_rebuilds_state_after_counter_mismatch() {
     let s2 = commit_and_seal(&mut te, key, 20).await;
     te.execute(&[E::lit(30).compose(key, &[])]).await.expect("C commits");
     te.advance(2).await;
-    // Advance only accountsdb's count. The mismatch must restore a snapshot even
-    // though account content and its checksum remain valid.
-    advance_transactions(&te);
     let (dirs, authority) = te.close().await;
+
+    // Lag only accountsdb's durable checkpoint in the closed store, preserving
+    // valid account content and its checksum.
+    corrupt(dirs.accounts.path(), 32, 2);
 
     // Drop the newest archive so recovery falls back to snapshot 1 (K = 10) and
     // replays both a sealed successor and the unsealed ledger head.
@@ -84,7 +85,7 @@ async fn replay_aborts_on_checksum_mismatch() {
     let s2 = commit_and_seal(&mut te, key, 20).await;
     let (dirs, authority) = te.close().await;
 
-    corrupt(dirs.accounts.path());
+    corrupt(dirs.accounts.path(), 8, 0xABAB_ABAB_ABAB_ABAB);
     std::fs::remove_file(&s2).unwrap();
 
     let result = time::timeout(
