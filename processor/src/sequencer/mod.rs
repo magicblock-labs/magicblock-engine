@@ -168,6 +168,12 @@ impl Sequencer {
         };
         if !self.replay {
             if !self.state.transactions().append(&txn).await? {
+                // Dropping a duplicate is right — it must not execute twice —
+                // but dropping it *silently* strands whoever submitted it,
+                // because waiters are keyed by signature and no further status
+                // will ever be published for one that has already settled. Hand
+                // them the original's result instead.
+                self.state.transactions().notify_duplicate(txn.signatures()[0]);
                 metrics::failed_transaction(FailureKind::SequencerDrop);
                 return Ok(());
             }

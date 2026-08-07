@@ -1,5 +1,7 @@
 //! Subscription fanout primitives, transaction-append dedup
 
+use ledger::request::TransactionStatus;
+
 use super::{TestKeeper, signed_tx};
 use crate::subscriptions::Subscribers;
 
@@ -58,6 +60,71 @@ async fn append_dedup_and_status_sentinel() {
 
     // The sentinel makes status() return None from the cache.
     assert!(keeper.transactions().status(signature).await.unwrap().is_none());
+
+    keeper.close().await;
+}
+
+// A duplicate submitted after the original settled must still be told the
+// original's outcome.
+//
+// Waiters are keyed by signature and the settling broadcast is terminal, so it
+// takes the channel with it. A duplicate arriving afterwards subscribes to a
+// freshly created channel that nothing will ever write to again, and without
+// `notify_duplicate` it simply blocks until its caller's own deadline — which is
+// how a transaction that executed perfectly well gets reported upstream as a
+// timeout.
+#[tokio::test]
+async fn duplicate_after_settlement_is_served_the_original_status() {
+    let keeper = TestKeeper::new().await;
+    let (signature, txn) = signed_tx();
+    assert!(keeper.transactions().append(&txn).await.unwrap());
+
+    // Settle it the way `commit_execution` does: cache first, then the terminal
+    // broadcast that drops the channel.
+    let settled = TransactionStatus {
+        result: Ok(()),
+        slot: 7,
+    };
+    keeper.caches.signatures.update(&signature, Some(settled.clone()));
+    keeper.subscriptions.signatures.send(&signature, &settled, true);
+
+    // The late duplicate: subscribes to a channel created after the fact, so
+    // only the cache can serve it.
+    let mut rx = keeper.transactions().subscribe_signature(signature).await;
+    assert!(
+        !keeper.transactions().append(&txn).await.unwrap(),
+        "duplicate is still deduplicated"
+    );
+    keeper.transactions().notify_duplicate(signature);
+
+    let received = rx.try_recv().expect("late duplicate is served the settled status");
+    assert_eq!(received.slot, settled.slot);
+    assert!(received.result.is_ok());
+
+    keeper.close().await;
+}
+
+// While the original is still in flight there is nothing to replay, and
+// replaying a sentinel would settle the waiter on a status that does not exist
+// yet. The shared channel is what serves both submitters in that case.
+#[tokio::test]
+async fn duplicate_while_in_flight_is_left_to_the_shared_channel() {
+    let keeper = TestKeeper::new().await;
+    let (signature, txn) = signed_tx();
+    assert!(keeper.transactions().append(&txn).await.unwrap());
+
+    let mut rx = keeper.transactions().subscribe_signature(signature).await;
+    keeper.transactions().notify_duplicate(signature);
+    assert!(rx.try_recv().is_err(), "nothing is published for an unsettled signature");
+
+    // ...and when it does settle, that same channel delivers.
+    let settled = TransactionStatus {
+        result: Ok(()),
+        slot: 9,
+    };
+    keeper.caches.signatures.update(&signature, Some(settled.clone()));
+    keeper.subscriptions.signatures.send(&signature, &settled, true);
+    assert_eq!(rx.try_recv().expect("in-flight waiter is served").slot, 9);
 
     keeper.close().await;
 }
