@@ -211,6 +211,11 @@ pub struct LedgerHandle {
 }
 
 impl LedgerHandle {
+    /// Returns the number of transactions published at durable sync boundaries.
+    pub fn transactions(&self) -> u64 {
+        self.ledger.meta.transactions.load(Acquire)
+    }
+
     /// Returns the active superblock id.
     pub fn head(&self) -> u64 {
         self.ledger.meta.head()
