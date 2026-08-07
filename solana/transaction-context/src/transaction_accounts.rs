@@ -184,18 +184,18 @@ impl TransactionAccounts {
         self.lamports_delta.get()
     }
 
-    fn deconstruct_into_keyed_account_shared_data(&mut self) -> Vec<KeyedAccountSharedData> {
+    fn drain_accounts(&mut self) -> Box<[UnsafeCell<KeyedAccountSharedData>]> {
+        debug_assert_eq!(self.accounts.len(), self.borrow_counters.len());
+        debug_assert_eq!(self.accounts.len(), self.touched_flags.len());
         std::mem::take(&mut self.accounts)
-            .into_iter()
-            .map(UnsafeCell::into_inner)
-            .collect()
+    }
+
+    fn deconstruct_into_keyed_account_shared_data(&mut self) -> Vec<KeyedAccountSharedData> {
+        self.drain_accounts().into_iter().map(UnsafeCell::into_inner).collect()
     }
 
     pub(crate) fn deconstruct_into_account_shared_data(&mut self) -> Vec<AccountSharedData> {
-        std::mem::take(&mut self.accounts)
-            .into_iter()
-            .map(|cell| cell.into_inner().1)
-            .collect()
+        self.drain_accounts().into_iter().map(|cell| cell.into_inner().1).collect()
     }
 
     pub(crate) fn take(mut self) -> DeconstructedTransactionAccounts {

@@ -232,12 +232,9 @@ impl BorrowedInstructionAccount<'_, '_> {
     }
 
     fn make_data_mut(&mut self) {
-        // if the account is still shared, it means this is the first time we're
-        // about to write into it. Make the account mutable by copying it in a
-        // buffer with MAX_ACCOUNT_DATA_GROWTH_PER_INSTRUCTION capacity so that if the
-        // transaction reallocs, we don't have to copy the whole account data a
-        // second time to fullfill the realloc.
-        if self.account.is_shared() {
+        // Reserve the maximum per-instruction growth before mutating shared buffers or borrowed
+        // account images. Borrowed images with enough spare capacity can remain borrowed.
+        if self.is_shared() {
             self.account.reserve(MAX_ACCOUNT_DATA_GROWTH_PER_INSTRUCTION);
         }
     }
