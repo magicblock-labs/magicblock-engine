@@ -145,6 +145,30 @@ impl AccountsDB {
         self.persisted.validate()
     }
 
+    /// Compacts persisted storage to a non-overlapping packing fixed point.
+    ///
+    /// This must run only after validation and before loaders or iterators are
+    /// created. Vacated sources become eligible on the following pass, and all
+    /// successful passes are flushed synchronously before returning.
+    pub fn compact(&mut self) -> Result<u32> {
+        let mut reclaimed = 0;
+        let mut changed = false;
+        loop {
+            // SAFETY: `&mut self` excludes readers and writers through this handle;
+            // the store owns its LMDB environment and mapped storage.
+            let pass = unsafe { self.persisted.defragment() }?;
+            reclaimed += pass.reclaimed;
+            changed |= pass.changed();
+            if !pass.changed() {
+                break;
+            }
+        }
+        if changed {
+            self.flush(true)?;
+        }
+        Ok(reclaimed)
+    }
+
     /// Returns the last checksum published on superblock boundary.
     pub fn checksum(&self) -> u64 {
         self.persisted.meta().checksum.load(Acquire)

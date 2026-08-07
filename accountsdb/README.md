@@ -42,15 +42,22 @@ A persisted batch commits its LMDB transaction once. If applying or committing
 the batch fails, already committed borrowed images are rolled back so indexed
 state remains authoritative. Freed image spans enter the freelist.
 
-Defragmentation requires exclusive access. It sorts free spans, compacts the
-tail half, updates indexes before moving live bytes, and shrinks the mapped file.
-Repeated passes reduce the remaining hole set geometrically.
+Defragmentation requires exclusive access. Snapshot export packs tail accounts
+into exact holes or the smallest fitting holes that retain at least 33 storage
+units. It copies only between non-overlapping spans and publishes all
+relocations in one index transaction. Vacated source spans are deferred to the
+next pass, so some fragmented layouts may stall.
+
+After validation, keeper startup repeats committed packing passes to a fixed
+point before exposing the database to readers. Snapshot export runs one pass.
+Both paths synchronously flush successful changes.
 
 ## Snapshots and volatile state
 
 `AccountsDB::snapshot` requires exclusive write access. It records the
-superblock id, defragments and flushes persisted state, clones the active tree,
-and serializes the current volatile map into the clone's `volatile.db`.
+superblock id, runs one packing pass and flushes persisted state, clones the
+active tree, and serializes the current volatile map into the clone's
+`volatile.db`.
 
 `dump(None)` writes `CURRENT/volatile.db` for a clean externally paced shutdown.
 The next open restores that file into memory and removes it. `reset` instead

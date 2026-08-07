@@ -118,9 +118,9 @@ pub(crate) fn realloc() {
     metric::with_metrics(&METRICS, |m| m.reallocs.inc());
 }
 
-/// Records one persisted account relocation during defragmentation.
-pub(crate) fn compaction() {
-    metric::with_metrics(&METRICS, |m| m.compactions.inc());
+/// Records persisted account relocations during defragmentation.
+pub(crate) fn compaction(count: u64) {
+    metric::with_metrics(&METRICS, |m| m.compactions.inc_by(count));
 }
 
 /// Records one persisted account removal.
