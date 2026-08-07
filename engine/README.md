@@ -28,15 +28,18 @@ and instruction-data lengths that cannot be represented by the V1 wire fields.
 
 Keeper restores an accountsdb snapshot when the active store is corrupt, its
 sealed superblock trails the retained ledger, or its committed transaction count
-differs from the ledger's durable count. Superblock lag also covers snapshots
-staged by a replication follower.
+trails the ledger's durable count. Accountsdb's count is a checkpoint high-water
+mark, so a count ahead of the locally retained ledger is current, including for
+snapshots staged by a replication follower. Superblock lag remains recoverable
+independently of the counters.
 
 If accountsdb then trails the ledger tip, `Engine::new` replays retained entries
 from the successor of its sealed snapshot through a temporary sequencer. Replay
 quiesces at superblock seals and compares the reconstructed checksum with the
 recorded seal. A mismatch returns `ReplayError::StateMismatch`. Current state
-opens without replay. After the final replay sync, persistent transaction-count
-divergence also returns `ReplayError::StateMismatch`.
+opens without replay when its slot and transaction count are each at least the
+ledger values. After replay actually runs, the final transaction counts must be
+equal or startup returns `ReplayError::StateMismatch`.
 
 Internal pacing appends one reset marker at the upcoming slot and clears
 chain-mirrored volatile accounts before the pacemaker task starts. Internal
