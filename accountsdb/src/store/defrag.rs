@@ -14,7 +14,7 @@ use crate::{
 use super::PersistedStore;
 
 /// Smallest useful destination remainder, in 8-byte storage units.
-const MIN_REMAINDER: u32 = 33;
+pub(crate) const MIN_REMAINDER: u32 = 43;
 type Fit = (u32, Offset, usize);
 
 /// Result of one committed packing pass.
@@ -92,10 +92,10 @@ impl PersistedStore {
     /// Packs tail accounts into holes that existed at the start of this pass.
     ///
     /// Adjacent freelist entries form logical runs. An account uses an exact
-    /// fit when available, otherwise the smallest run that leaves at least 33
-    /// units. Destination remainders may accept more accounts in this pass;
-    /// vacated source spans are deferred until a later pass. Some fragmented
-    /// layouts therefore cannot progress.
+    /// fit when available, otherwise the smallest run that leaves at least
+    /// [`MIN_REMAINDER`] units. Destination remainders may accept more accounts
+    /// in this pass; vacated source spans are deferred until a later pass. Some
+    /// fragmented layouts therefore cannot progress.
     ///
     /// This operation is not crash-safe: interruption after publishing moved
     /// offsets can leave the active tree inconsistent and require a backup.
