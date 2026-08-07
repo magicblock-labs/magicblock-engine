@@ -106,10 +106,11 @@ impl Stats {
         metrics::realloc();
     }
 
-    /// Counts one relocation during defragmentation.
-    pub(crate) fn compact(&self) {
-        self.compactions.fetch_add(1, Relaxed);
-        metrics::compaction();
+    /// Counts relocations during defragmentation.
+    pub(crate) fn compact(&self, count: usize) {
+        let count = count as u64;
+        self.compactions.fetch_add(count, Relaxed);
+        metrics::compaction(count);
     }
 
     /// Counts one persisted removal.
