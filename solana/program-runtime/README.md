@@ -2,7 +2,7 @@
 
 This Agave fork implements invocation state, CPI translation, SBF VM setup,
 sysvar access, logging, serialization, and program-cache primitives. Workspace
-`[patch.crates-io]` entries force the dependency graph to use this copy.
+dependencies that select `solana-program-runtime` use this workspace copy.
 
 Account loading and transaction-level policy belong to `solana-svm`. The
 engine-specific direct account mapping, access-violation growth, and CPI
