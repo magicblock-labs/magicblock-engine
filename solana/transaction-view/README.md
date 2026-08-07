@@ -26,8 +26,9 @@ prefix.
 
 Legacy, v0, and V1 transactions may be at most `u16::MAX` bytes, inclusive.
 Magicblock transactions may be at most 16 MiB and may use an instruction trace
-length of 255. Other structural limits, including the standard signature and
-account-index limits, remain enforced by sanitization.
+length of 255. Legacy and v0 framing requires between 1 and 12 signatures; V1
+and Magicblock enforce the signature limit during sanitization. Other structural
+limits, including account-index limits, are also enforced by sanitization.
 
 Compact-u16 values are parsed in their complete canonical one-, two-, or
 three-byte form. Absolute offsets and transaction lengths are stored as `u32`.
