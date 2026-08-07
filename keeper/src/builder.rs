@@ -261,9 +261,10 @@ impl KeeperBuilder {
             let expected = ledger.head().saturating_sub(1);
             let restored = backup.is_some();
             let lagging = accountsdb.superblock() < expected;
+            let count_mismatch = accountsdb.transactions() != ledger.transactions();
             match accountsdb.validate() {
-                Ok(()) if restored || !lagging => {
-                    info!(lagging, "accountsdb validation succeeded");
+                Ok(()) if restored || (!lagging && !count_mismatch) => {
+                    info!(lagging, count_mismatch, "accountsdb validation succeeded");
                     backup.map(fs::remove_dir_all).transpose()?;
                     return Ok(accountsdb);
                 }
@@ -273,7 +274,10 @@ impl KeeperBuilder {
                         accountsdb.backup(BackupOp::Restore)?;
                         return Err(SnapshotError::Missing.into());
                     }
-                    warn!(?validation, lagging, "state inconsistency detected");
+                    warn!(
+                        ?validation,
+                        lagging, count_mismatch, "state inconsistency detected"
+                    );
                     backup.replace(accountsdb.backup(BackupOp::Save)?);
                     if let Err(error) = self.unarchive(ledger) {
                         accountsdb.backup(BackupOp::Restore)?;

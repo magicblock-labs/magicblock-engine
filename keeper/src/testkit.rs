@@ -11,6 +11,7 @@
 use std::{
     collections::HashMap,
     fs::{self, File},
+    iter,
     num::NonZeroU64,
     path::{Path, PathBuf},
     sync::Arc,
@@ -209,6 +210,11 @@ pub fn store_v42(keeper: &Keeper, value: i64, mode: AccountMode) -> Pubkey {
     let key = Pubkey::new_unique();
     keeper.accounts().store(&[(key, v42_builder(value, mode).build())]).unwrap();
     key
+}
+
+/// Advances only accountsdb's committed-transaction counter for recovery fault injection.
+pub fn advance_transactions(keeper: &Keeper) {
+    keeper.accountsdb.commit(iter::empty()).unwrap();
 }
 
 /// Reads the little-endian `i64` payload of a v42 account, or `None` if absent.
