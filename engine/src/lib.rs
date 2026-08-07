@@ -190,6 +190,15 @@ impl Engine {
 
         drop(engine.barrier().await?);
         engine.sync(false)?;
+        let accountsdb = state.accounts().transactions();
+        let ledger = state.ledger().transactions();
+        if accountsdb != ledger {
+            error!(
+                accountsdb,
+                ledger, "transaction count mismatch; aborting replay"
+            );
+            Err(ReplayError::StateMismatch)?;
+        }
 
         let slot = state.blocks().latest().slot;
         info!(slot, duration = ?timer.elapsed(), "ledger replay complete");
