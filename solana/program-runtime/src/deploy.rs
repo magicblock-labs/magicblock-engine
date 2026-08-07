@@ -85,29 +85,20 @@ pub fn deploy_program(
 
 #[macro_export]
 macro_rules! deploy_program {
-    ($invoke_context:expr, $program_id:expr, $loader_key:expr, $account_size:expr, $programdata:expr, $deployment_slot:expr $(,)?) => {
+    ($invoke_context:expr, $program_id:expr, $_loader_key:expr, $_account_size:expr, $programdata:expr, $deployment_slot:expr $(,)?) => {
         assert_eq!(
             $deployment_slot,
             $invoke_context.program_cache_for_tx_batch.slot()
         );
-        #[cfg(feature = "metrics")]
-        let mut load_program_metrics = $crate::loaded_programs::LoadProgramMetrics::default();
         $crate::deploy::deploy_program(
             $invoke_context.get_log_collector(),
-            #[cfg(feature = "metrics")]
-            &mut load_program_metrics,
             $invoke_context.program_cache_for_tx_batch,
             $invoke_context
                 .get_program_runtime_environments_for_deployment()
                 .get_env_for_deployment()
                 .clone(),
             $program_id,
-            $loader_key,
-            $account_size,
             $programdata,
-            $deployment_slot,
         )?;
-        #[cfg(feature = "metrics")]
-        load_program_metrics.submit_datapoint(&mut $invoke_context.timings);
     };
 }

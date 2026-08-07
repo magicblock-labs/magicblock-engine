@@ -72,6 +72,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 assert_matches = { workspace = true }
+solana-account = { workspace = true, features = ["testkit"] }
 solana-account-info = { workspace = true }
 solana-instruction = { workspace = true, features = ["bincode"] }
 solana-keypair = { workspace = true }

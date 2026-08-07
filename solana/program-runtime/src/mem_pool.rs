@@ -3,7 +3,7 @@ use {
         MAX_CALL_DEPTH, MAX_HEAP_FRAME_BYTES, MAX_INSTRUCTION_STACK_DEPTH, MIN_HEAP_FRAME_BYTES,
         STACK_FRAME_SIZE,
     },
-    solana_sbpf::{aligned_memory::AlignedMemory, ebpf::HOST_ALIGN},
+    solana_sbpf::{aligned_memory::AlignedMemory, ebpf::HOST_ALIGN, vm::CallFrame},
     std::array,
 };
 
@@ -55,10 +55,17 @@ impl Reset for AlignedMemory<{ HOST_ALIGN }> {
     }
 }
 
-/// Fixed-size reusable stack and heap buffers for SBF VMs.
+impl Reset for Vec<CallFrame> {
+    fn reset(&mut self) {
+        self.fill(CallFrame::default())
+    }
+}
+
+/// Fixed-size pools of reusable SBF VM buffers.
 pub struct VmMemoryPool {
     stack: Pool<AlignedMemory<{ HOST_ALIGN }>, MAX_INSTRUCTION_STACK_DEPTH>,
     heap: Pool<AlignedMemory<{ HOST_ALIGN }>, MAX_INSTRUCTION_STACK_DEPTH>,
+    call_frames: Pool<Vec<CallFrame>, MAX_INSTRUCTION_STACK_DEPTH>,
 }
 
 impl VmMemoryPool {
@@ -70,6 +77,9 @@ impl VmMemoryPool {
             })),
             heap: Pool::new(array::from_fn(|_| {
                 AlignedMemory::zero_filled(MAX_HEAP_FRAME_BYTES as usize)
+            })),
+            call_frames: Pool::new(array::from_fn(|_| {
+                std::iter::repeat_with(CallFrame::default).take(MAX_CALL_DEPTH).collect()
             })),
         }
     }
@@ -95,7 +105,7 @@ impl VmMemoryPool {
         self.stack.put(stack)
     }
 
-    /// Returns a zeroed heap buffer, allocating one if the pool is empty.
+    /// Returns a maximum-sized zeroed heap buffer; callers slice it to `heap_size`.
     pub fn get_heap(&mut self, heap_size: u32) -> AlignedMemory<{ HOST_ALIGN }> {
         debug_assert!((MIN_HEAP_FRAME_BYTES..=MAX_HEAP_FRAME_BYTES).contains(&heap_size));
         self.heap
@@ -111,6 +121,19 @@ impl VmMemoryPool {
                 && heap_size <= MAX_HEAP_FRAME_BYTES as usize
         );
         self.heap.put(heap)
+    }
+
+    /// Returns a zeroed call-frame buffer sized for the executable.
+    pub(crate) fn get_call_frames(&mut self, max_call_depth: usize) -> Vec<CallFrame> {
+        let mut call_frames = self.call_frames.get().unwrap_or_default();
+        call_frames.resize_with(max_call_depth, CallFrame::default);
+        call_frames.truncate(max_call_depth);
+        call_frames
+    }
+
+    /// Returns a call-frame buffer to the pool after clearing it.
+    pub(crate) fn put_call_frames(&mut self, call_frames: Vec<CallFrame>) -> bool {
+        self.call_frames.put(call_frames)
     }
 }
 
