@@ -137,6 +137,8 @@ pub(crate) struct DatabaseMeta {
     pub(crate) slot: AtomicU64,
     /// Id of the last sealed superblock; folded into the checksum fingerprint.
     pub(crate) superblock: AtomicU64,
+    /// Transactions whose account-state commit completed successfully.
+    pub(crate) transactions: AtomicU64,
     /// Current backing file length in bytes.
     len: AtomicU64,
     /// Database statistics.

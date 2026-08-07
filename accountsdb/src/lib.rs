@@ -10,7 +10,7 @@ use std::{
 use derive_more::From;
 use nucleus::Slot;
 use nucleus::heed::RoTxnTls;
-use solana_account::{AccountSharedData, CoWAccount};
+use solana_account::{AccountSeqLock, AccountSharedData, CoWAccount};
 use solana_pubkey::Pubkey;
 use tracing::{info, warn};
 
@@ -81,6 +81,21 @@ impl AccountsDB {
         Ok(())
     }
 
+    /// Commits one ledger transaction's account transitions.
+    ///
+    /// The transaction count advances only after every supplied transition is
+    /// stored successfully. Empty transitions count, including failed SVM
+    /// executions that reached the commit path without account writes.
+    pub fn commit<'a, AC>(&self, accounts: AC) -> Result<()>
+    where
+        AC: IntoIterator<Item = &'a AccountEntry> + Clone,
+        <AC as IntoIterator>::IntoIter: Clone,
+    {
+        self.store(accounts)?;
+        self.persisted.meta().transactions.fetch_add(1, Release);
+        Ok(())
+    }
+
     /// Creates a loader that reuses a read transaction for persisted lookups.
     pub fn loader(&self) -> AccountLoader<'_> {
         AccountLoader::new(self)
@@ -107,6 +122,11 @@ impl AccountsDB {
     /// Returns the id of the last sealed superblock recorded in the database metadata.
     pub fn superblock(&self) -> Slot {
         self.persisted.meta().superblock.load(Acquire)
+    }
+
+    /// Returns the number of successfully committed ledger transactions.
+    pub fn transactions(&self) -> u64 {
+        self.persisted.meta().transactions.load(Acquire)
     }
 
     /// Records the last sealed superblock id. Set on snapshot, and on replay
@@ -156,7 +176,10 @@ impl<'a> AccountLoader<'a> {
         Self { txn: Default::default(), db }
     }
 
-    /// Loads one account, checking both backends in turn
+    /// Loads one account, reusing the persisted read transaction across calls.
+    ///
+    /// Reuse the loader for batch lookups to keep them on the same persisted
+    /// index snapshot. Persisted accounts take precedence over volatile ones.
     pub fn load(&self, pubkey: &Pubkey) -> Result<Option<AccountSharedData>> {
         let txn = &mut self.txn.borrow_mut();
         if let Some(acc) = self.db.persisted.load(txn, pubkey)? {
@@ -170,6 +193,22 @@ impl<'a> AccountLoader<'a> {
             metrics::load(StoreKind::Absent);
         }
         Ok(account)
+    }
+
+    /// Applies `reader` to an account image stable across a concurrent publish.
+    ///
+    /// Prefer this over [`Self::load`] when reading fields from persisted
+    /// accounts that may be updated concurrently. The reader may be called more
+    /// than once when the borrowed image changes, so it should have no side
+    /// effects.
+    pub fn read<F, R>(&self, pubkey: &Pubkey, reader: F) -> Result<Option<R>>
+    where
+        F: Fn(&AccountSharedData) -> R,
+    {
+        let Some(account) = self.load(pubkey)? else {
+            return Ok(None);
+        };
+        Ok(Some(AccountSeqLock::new(account).read(reader)))
     }
 
     /// Returns whether an account exists in either backend.
