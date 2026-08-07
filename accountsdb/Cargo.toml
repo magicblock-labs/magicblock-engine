@@ -35,6 +35,7 @@ solana-account = { workspace = true, features = ["serde"] }
 solana-pubkey = { workspace = true, features = ["bytemuck"] }
 
 [dev-dependencies]
+accountsdb = { workspace = true, features = ["testkit"] }
 assert_matches = { workspace = true }
 nucleus = { workspace = true, features = ["testkit"] }
 
