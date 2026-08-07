@@ -43,8 +43,8 @@ the batch fails, already committed borrowed images are rolled back so indexed
 state remains authoritative. Freed image spans enter the freelist.
 
 Defragmentation requires exclusive access. Snapshot export packs tail accounts
-into exact holes or the smallest fitting holes that retain at least 33 storage
-units. It copies only between non-overlapping spans and publishes all
+into exact holes or the smallest fitting holes that leave a minimum useful
+remainder. It copies only between non-overlapping spans and publishes all
 relocations in one index transaction. Vacated source spans are deferred to the
 next pass, so some fragmented layouts may stall.
 
