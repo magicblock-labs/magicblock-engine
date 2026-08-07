@@ -8,7 +8,10 @@
 use std::sync::atomic::Ordering::{Relaxed, Release};
 
 use assert_matches::assert_matches;
-use nucleus::testkit::{TempDir, init_tracing, tempdir};
+use nucleus::{
+    heed::DatabaseIndex,
+    testkit::{TempDir, init_tracing, tempdir},
+};
 use solana_account::{
     AccountBuilder, AccountMode, AccountSharedData, ReadableAccount, WritableAccount,
 };
@@ -98,19 +101,32 @@ fn cursor(db: &AccountsDB) -> u32 {
     db.persisted.storage.cursor()
 }
 
-/// Defragments the persisted store until the cursor stops moving.
-///
-/// A single pass sweeps only the tail half of the hole list, so full compaction
-/// needs repeated passes.
-fn defrag_to_stable(db: &AccountsDB) {
+/// Current persisted offset for one live account.
+fn offset(db: &AccountsDB, pubkey: &Pubkey) -> impl Copy + PartialEq + use<> {
+    let mut txn = None;
+    let txn = db.persisted.index.read_txn(&mut txn).unwrap();
+    db.persisted.index.offset(pubkey, txn).unwrap().unwrap()
+}
+
+/// Defragments until a pass makes no change and returns the reclaimed total.
+fn defrag_to_stable(db: &AccountsDB) -> u32 {
+    let mut total = 0;
     loop {
-        let before = cursor(db);
         // SAFETY: the test is the sole owner of the store during defrag.
-        unsafe { db.persisted.defragment() }.unwrap();
-        if cursor(db) == before {
-            break;
+        let pass = unsafe { db.persisted.defragment() }.unwrap();
+        total += pass.reclaimed;
+        if !pass.changed() {
+            return total;
         }
     }
+}
+
+/// Builds a mutable account with an exact persisted span.
+fn mutable_units(lamports: u64, units: u32, owner: &Pubkey) -> AccountSharedData {
+    (0..1024)
+        .map(|len| mutable_data(lamports, vec![0; len], owner))
+        .find(|account| account.owned().units() == units)
+        .unwrap()
 }
 
 // Routing, both eviction directions, owner remap and Closed/reset handling in
@@ -261,19 +277,26 @@ fn test_persistence_reopen_and_validate() {
     let dir = tempdir();
     let keys: Vec<Pubkey> = (0..8).map(|_| Pubkey::new_unique()).collect();
 
-    let checksum = {
+    let (checksum, before) = {
         let db = AccountsDB::new(dir.path()).unwrap();
         for (i, k) in keys.iter().enumerate() {
             store(&db, *k, delegated(100 + i as u64));
         }
+        let discarded = Pubkey::new_unique();
+        store(&db, discarded, delegated(0));
+        close(&db, &discarded);
         db.set_slot(42).unwrap();
         // Sync the checksum into the header so a reopen can validate against it.
         db.persisted.flush(true).unwrap();
         assert!(db.validate().is_ok());
-        db.checksum()
+        (db.checksum(), cursor(&db))
     };
 
-    let db = AccountsDB::new(dir.path()).unwrap();
+    let mut db = AccountsDB::new(dir.path()).unwrap();
+    assert!(db.validate().is_ok());
+    let reclaimed = db.compact().unwrap();
+    assert_eq!(reclaimed, before - cursor(&db));
+    assert!(reclaimed > 0);
     for (i, k) in keys.iter().enumerate() {
         assert_eq!(lamports(&db, k), 100 + i as u64);
     }
@@ -360,7 +383,8 @@ fn test_defragment_preserves_live_accounts() {
     let checksum = db.checksum();
     let before = cursor(&db);
 
-    defrag_to_stable(&db);
+    let reclaimed = defrag_to_stable(&db);
+    assert_eq!(reclaimed, before - cursor(&db));
     assert!(cursor(&db) < before);
 
     // Every survivor still loads unchanged and remains program-indexed.
@@ -378,6 +402,145 @@ fn test_defragment_preserves_live_accounts() {
     // Relocating images must not change the content checksum.
     db.persisted.flush(true).unwrap();
     assert_eq!(db.checksum(), checksum);
+}
+
+/// Exact and thresholded best-fit packing updates component holes correctly,
+/// while deferred source holes become usable only by a later committed pass.
+#[test]
+fn test_defragment_best_fit_and_deferred_holes() {
+    let owner = Pubkey::new_unique();
+    let small = mutable_units(1, 21, &owner);
+    let medium = mutable_units(2, 33, &owner);
+
+    // Two adjacent component holes form one run. The small tail account leaves
+    // an exact medium remainder, which the following account consumes.
+    {
+        let (_dir, db) = db();
+        let (small_hole, medium_hole, anchor, medium_key, small_key) = (
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+        );
+        store(&db, small_hole, small.clone());
+        store(&db, medium_hole, medium.clone());
+        store(&db, anchor, small.clone());
+        store(&db, medium_key, medium.clone());
+        store(&db, small_key, small.clone());
+        let medium_dst = offset(&db, &medium_hole);
+        let small_dst = offset(&db, &small_hole);
+        close(&db, &small_hole);
+        close(&db, &medium_hole);
+
+        let pass = unsafe { db.persisted.defragment() }.unwrap();
+        assert_eq!(pass.moved, 2);
+        assert_eq!(pass.reclaimed, 54);
+        assert!(offset(&db, &medium_key) == medium_dst);
+        assert!(offset(&db, &small_key) == small_dst);
+        assert_eq!(lamports(&db, &medium_key), 2);
+        assert_eq!(lamports(&db, &small_key), 1);
+        assert_eq!(lamports(&db, &anchor), 1);
+
+        let before = cursor(&db);
+        store(&db, Pubkey::new_unique(), small.clone());
+        assert_eq!(cursor(&db), before + 21);
+    }
+
+    // Exact fit wins first. The next account skips a 23-unit hole that would
+    // leave two units. Two accounts instead use a 75-unit hole and publish its
+    // reusable 33-unit suffix.
+    {
+        let (_dir, db) = db();
+        let near = mutable_units(3, 23, &owner);
+        let wide = mutable_units(4, 75, &owner);
+        let (
+            near_hole,
+            anchor_a,
+            wide_hole,
+            anchor_b,
+            exact_hole,
+            anchor_c,
+            wide_key_a,
+            wide_key_b,
+            exact_key,
+        ) = (
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+        );
+        store(&db, near_hole, near);
+        store(&db, anchor_a, small.clone());
+        store(&db, wide_hole, wide);
+        store(&db, anchor_b, small.clone());
+        store(&db, exact_hole, small.clone());
+        store(&db, anchor_c, small.clone());
+        store(&db, wide_key_a, small.clone());
+        store(&db, wide_key_b, small.clone());
+        store(&db, exact_key, small.clone());
+        let near_dst = offset(&db, &near_hole);
+        let wide_dst = offset(&db, &wide_hole);
+        let exact_dst = offset(&db, &exact_hole);
+        close(&db, &near_hole);
+        close(&db, &wide_hole);
+        close(&db, &exact_hole);
+
+        let pass = unsafe { db.persisted.defragment() }.unwrap();
+        assert_eq!(pass.moved, 3);
+        assert_eq!(pass.reclaimed, 63);
+        assert!(offset(&db, &wide_key_b) == wide_dst);
+        assert!(offset(&db, &exact_key) == exact_dst);
+
+        let before = cursor(&db);
+        store(&db, Pubkey::new_unique(), medium.clone());
+        assert_eq!(cursor(&db), before);
+        let near_key = Pubkey::new_unique();
+        store(&db, near_key, mutable_units(5, 23, &owner));
+        assert_eq!(cursor(&db), before);
+        assert!(offset(&db, &near_key) == near_dst);
+    }
+
+    // The first pass moves only the middle account. Its source joins the next
+    // hole after commit, and public startup compaction exhausts later passes.
+    {
+        let (_dir, mut db) = db();
+        let second = mutable_units(3, 45, &owner);
+        let (first_hole, middle, second_hole, tail) = (
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+        );
+        store(&db, first_hole, small.clone());
+        store(&db, middle, small.clone());
+        store(&db, second_hole, second);
+        store(&db, tail, medium.clone());
+        let middle_dst = offset(&db, &first_hole);
+        let tail_dst = offset(&db, &middle);
+        close(&db, &first_hole);
+        close(&db, &second_hole);
+        let before = cursor(&db);
+
+        let pass = unsafe { db.persisted.defragment() }.unwrap();
+        assert_eq!((pass.moved, pass.reclaimed), (1, 0));
+        assert_eq!(cursor(&db), before);
+        assert!(offset(&db, &middle) == middle_dst);
+
+        assert_eq!(db.compact().unwrap(), 66);
+        assert!(offset(&db, &tail) == tail_dst);
+        assert_eq!(lamports(&db, &middle), 1);
+        assert_eq!(lamports(&db, &tail), 2);
+
+        let before = cursor(&db);
+        store(&db, Pubkey::new_unique(), small.clone());
+        assert_eq!(cursor(&db), before + 21);
+    }
 }
 
 // A snapshot is a self-contained tree: reopening it restores persisted accounts
@@ -577,7 +740,8 @@ fn test_large_accounts_growth_and_defrag() {
     }
     let before = cursor(&db);
 
-    defrag_to_stable(&db);
+    let reclaimed = defrag_to_stable(&db);
+    assert_eq!(reclaimed, before - cursor(&db));
     assert!(cursor(&db) < before);
 
     // Every survivor keeps its full 2 MiB image byte-for-byte.
