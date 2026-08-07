@@ -14,11 +14,17 @@ in persistent storage, inserts owned images there, updates owned volatile
 images, and removes stale copies after mode changes or closure. `Transient`
 remains authoritative and runtime-immutable until its lifecycle state resolves.
 
+`AccountsDB::commit` is the ledger-transaction boundary. It stores successful
+account transitions and then advances a persistent transaction counter; empty
+transitions from failed executions advance the counter as well. Direct `store`
+operations used for initialization, sysvars, and administrative writes do not.
+
 ## Persisted layout
 
 `CURRENT/storage.db` contains a metadata header followed by account images in the
 borrowed `solana-account` layout. Each image includes its full pubkey so scans can
 recover keys without the index. Offsets are measured in 8-byte `StorageUnit`s.
+The transaction counter is metadata and is not part of the account checksum.
 
 The LMDB index under `CURRENT/index` contains:
 
