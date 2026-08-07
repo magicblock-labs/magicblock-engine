@@ -34,7 +34,7 @@ pub fn modify_memory_region_of_account(
     }
 }
 
-/// Creates the memory mapping in serialization and CPI return for direct account data.
+/// Creates a memory region that directly maps account data for serialization and CPI return.
 pub fn create_memory_region_of_account(
     account: &mut BorrowedInstructionAccount<'_, '_>,
     vaddr: u64,
@@ -49,6 +49,15 @@ pub fn create_memory_region_of_account(
         memory_region.access_violation_handler_payload = Some(account.get_index_in_transaction());
     }
     Ok(memory_region)
+}
+
+/// Returns the VM address space reserved for an account's data.
+pub(crate) fn account_data_region_size(is_loader_deprecated: bool, data_len: usize) -> usize {
+    if is_loader_deprecated {
+        data_len
+    } else {
+        data_len.saturating_add(MAX_PERMITTED_DATA_INCREASE)
+    }
 }
 
 #[allow(dead_code)]
@@ -121,11 +130,8 @@ impl Serializer {
     ) -> Result<u64, InstructionError> {
         self.push_region();
         let vm_data_addr = self.vaddr;
-        let address_space_reserved_for_account = if !self.is_loader_v1 {
-            account.get_data().len().saturating_add(MAX_PERMITTED_DATA_INCREASE)
-        } else {
-            account.get_data().len()
-        };
+        let address_space_reserved_for_account =
+            account_data_region_size(self.is_loader_v1, account.get_data().len());
         if address_space_reserved_for_account > 0 {
             let new_region = create_memory_region_of_account(account, self.vaddr)?;
             self.vaddr += address_space_reserved_for_account as u64;

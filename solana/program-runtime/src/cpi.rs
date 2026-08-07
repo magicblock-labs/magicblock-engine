@@ -3,13 +3,15 @@
 use {
     crate::{
         invoke_context::{InvokeContext, SerializedAccountMetadata},
-        memory::{translate_slice, translate_type, translate_type_mut_for_cpi, translate_vm_slice},
-        serialization::create_memory_region_of_account,
+        memory::{
+            MemoryTranslationError, address_is_aligned, translate_slice, translate_type,
+            translate_type_mut_for_cpi, translate_vm_slice,
+        },
+        serialization::{account_data_region_size, create_memory_region_of_account},
     },
     solana_account_info::AccountInfo,
     solana_instruction::{AccountMeta, Instruction, error::InstructionError},
     solana_loader_v3_interface::instruction as bpf_loader_upgradeable,
-    solana_program_entrypoint::MAX_PERMITTED_DATA_INCREASE,
     solana_pubkey::{MAX_SEEDS, Pubkey, PubkeyError},
     solana_sbpf::{ebpf, memory_region::MemoryMapping},
     solana_sdk_ids::{bpf_loader, bpf_loader_deprecated, native_loader},
@@ -80,6 +82,35 @@ struct SolAccountMeta {
     pub pubkey_addr: u64,
     pub is_writable: bool,
     pub is_signer: bool,
+}
+
+/// Byte-valid representation of an account meta supplied by an SBF program.
+#[repr(C)]
+struct UntrustedAccountMeta {
+    pubkey: [u8; 32],
+    is_signer: u8,
+    is_writable: u8,
+}
+
+/// Byte-valid representation of C's `SolAccountMeta`.
+#[repr(C)]
+struct UntrustedSolAccountMeta {
+    pubkey_addr: [u8; 8],
+    is_writable: u8,
+    is_signer: u8,
+    padding: [u8; 6],
+}
+
+const _: () = assert!(std::mem::size_of::<UntrustedAccountMeta>() == size_of::<AccountMeta>());
+const _: () =
+    assert!(std::mem::size_of::<UntrustedSolAccountMeta>() == size_of::<SolAccountMeta>());
+
+fn translate_bool(value: u8) -> Result<bool, Error> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(Box::new(InstructionError::InvalidArgument)),
+    }
 }
 
 /// Rust representation of C's SolAccountInfo
@@ -234,12 +265,8 @@ impl<'a> CallerAccount<'a> {
         original_data_len: usize,
         len: usize,
     ) -> Result<&'a mut [u8], Error> {
-        let is_caller_loader_deprecated = !check_aligned;
-        let address_space_reserved_for_account = if is_caller_loader_deprecated {
-            original_data_len
-        } else {
-            original_data_len.saturating_add(MAX_PERMITTED_DATA_INCREASE)
-        };
+        let address_space_reserved_for_account =
+            account_data_region_size(!check_aligned, original_data_len);
         if len > address_space_reserved_for_account {
             return Err(InstructionError::InvalidRealloc.into());
         }
@@ -454,7 +481,7 @@ pub fn translate_instruction_rust(
     let check_aligned = invoke_context.get_check_aligned();
     let memory_mapping = invoke_context.memory_contexts.memory_mapping()?;
     let ix = translate_type::<StableInstruction>(memory_mapping, addr, check_aligned)?;
-    let account_metas = translate_slice::<AccountMeta>(
+    let account_metas = translate_slice::<UntrustedAccountMeta>(
         memory_mapping,
         ix.accounts.as_vaddr(),
         ix.accounts.len(),
@@ -491,13 +518,11 @@ pub fn translate_instruction_rust(
     for account_index in 0..account_metas.len() {
         #[allow(clippy::indexing_slicing)]
         let account_meta = &account_metas[account_index];
-        if unsafe {
-            std::ptr::read_volatile(&account_meta.is_signer as *const _ as *const u8) > 1
-                || std::ptr::read_volatile(&account_meta.is_writable as *const _ as *const u8) > 1
-        } {
-            return Err(Box::new(InstructionError::InvalidArgument));
-        }
-        accounts.push(account_meta.clone());
+        accounts.push(AccountMeta {
+            pubkey: Pubkey::new_from_array(account_meta.pubkey),
+            is_signer: translate_bool(account_meta.is_signer)?,
+            is_writable: translate_bool(account_meta.is_writable)?,
+        });
     }
 
     Ok(Instruction {
@@ -596,12 +621,15 @@ pub fn translate_instruction_c(
     let ix_c = translate_type::<SolInstruction>(memory_mapping, addr, check_aligned)?;
 
     let program_id = translate_type::<Pubkey>(memory_mapping, ix_c.program_id_addr, check_aligned)?;
-    let account_metas = translate_slice::<SolAccountMeta>(
+    let account_metas = translate_slice::<UntrustedSolAccountMeta>(
         memory_mapping,
         ix_c.accounts_addr,
         ix_c.accounts_len,
         check_aligned,
     )?;
+    if check_aligned && !address_is_aligned::<SolAccountMeta>(account_metas.as_ptr() as u64) {
+        return Err(Box::new(MemoryTranslationError::UnalignedPointer));
+    }
     let data = translate_slice::<u8>(memory_mapping, ix_c.data_addr, ix_c.data_len, check_aligned)?;
 
     check_instruction_size(ix_c.accounts_len as usize, data.len())?;
@@ -628,18 +656,14 @@ pub fn translate_instruction_c(
     for account_index in 0..ix_c.accounts_len as usize {
         #[allow(clippy::indexing_slicing)]
         let account_meta = &account_metas[account_index];
-        if unsafe {
-            std::ptr::read_volatile(&account_meta.is_signer as *const _ as *const u8) > 1
-                || std::ptr::read_volatile(&account_meta.is_writable as *const _ as *const u8) > 1
-        } {
-            return Err(Box::new(InstructionError::InvalidArgument));
-        }
-        let pubkey =
-            translate_type::<Pubkey>(memory_mapping, account_meta.pubkey_addr, check_aligned)?;
+        let is_signer = translate_bool(account_meta.is_signer)?;
+        let is_writable = translate_bool(account_meta.is_writable)?;
+        let pubkey_addr = u64::from_ne_bytes(account_meta.pubkey_addr);
+        let pubkey = translate_type::<Pubkey>(memory_mapping, pubkey_addr, check_aligned)?;
         accounts.push(AccountMeta {
             pubkey: *pubkey,
-            is_signer: account_meta.is_signer,
-            is_writable: account_meta.is_writable,
+            is_signer,
+            is_writable,
         });
     }
 
@@ -1041,12 +1065,8 @@ fn update_caller_account_region(
     caller_account: &CallerAccount,
     callee_account: &mut BorrowedInstructionAccount<'_, '_>,
 ) -> Result<(), Error> {
-    let is_caller_loader_deprecated = !check_aligned;
-    let address_space_reserved_for_account = if is_caller_loader_deprecated {
-        caller_account.original_data_len
-    } else {
-        caller_account.original_data_len.saturating_add(MAX_PERMITTED_DATA_INCREASE)
-    };
+    let address_space_reserved_for_account =
+        account_data_region_size(!check_aligned, caller_account.original_data_len);
 
     if address_space_reserved_for_account > 0 {
         // We can trust vm_data_addr to point to the correct region because we
@@ -1089,12 +1109,8 @@ fn update_caller_account(
 
     let prev_len = *caller_account.ref_to_len_in_vm as usize;
     let post_len = callee_account.get_data().len();
-    let is_caller_loader_deprecated = !check_aligned;
-    let address_space_reserved_for_account = if is_caller_loader_deprecated {
-        caller_account.original_data_len
-    } else {
-        caller_account.original_data_len.saturating_add(MAX_PERMITTED_DATA_INCREASE)
-    };
+    let address_space_reserved_for_account =
+        account_data_region_size(!check_aligned, caller_account.original_data_len);
 
     if post_len > address_space_reserved_for_account {
         let max_increase =
@@ -1134,6 +1150,7 @@ mod tests {
         },
         assert_matches::assert_matches,
         solana_account::{Account, AccountSharedData},
+        solana_program_entrypoint::MAX_PERMITTED_DATA_INCREASE,
         solana_sbpf::{
             ebpf::MM_INPUT_START, memory_region::MemoryRegion, program::SBPFVersion, vm::Config,
         },

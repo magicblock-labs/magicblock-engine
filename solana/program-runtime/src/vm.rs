@@ -18,7 +18,7 @@ use {
         elf::Executable,
         error::{EbpfError, ProgramResult},
         memory_region::{AccessType, MemoryMapping, MemoryRegion},
-        vm::{CallFrame, ContextObject, EbpfVm, ExecutionMode},
+        vm::{ContextObject, EbpfVm, ExecutionMode},
     },
     solana_sdk_ids::bpf_loader_deprecated,
     solana_svm_log_collector::ic_logger_msg,
@@ -237,19 +237,16 @@ pub fn execute<'a, 'b, 'c>(
         vm.registers[2] = instruction_data_offset as u64;
         let mut execution_mode =
             if use_jit { ExecutionMode::PreferJit } else { ExecutionMode::Interpreted };
-        let mut call_frames = std::iter::repeat_with(|| CallFrame {
-            caller_saved_registers: [0; ebpf::SCRATCH_REGS],
-            frame_pointer: 0,
-            target_pc: 0,
-        })
-        .take(executable.get_config().max_call_depth)
-        .collect::<Vec<_>>();
+        let mut call_frames = MEMORY_POOL.with_borrow_mut(|memory_pool| {
+            memory_pool.get_call_frames(executable.get_config().max_call_depth)
+        });
         let (compute_units_consumed, result) =
             vm.execute_program(executable, &mut execution_mode, &mut call_frames);
         let register_trace = std::mem::take(&mut vm.register_trace);
         MEMORY_POOL.with_borrow_mut(|memory_pool| {
             memory_pool.put_stack(stack);
             memory_pool.put_heap(heap);
+            memory_pool.put_call_frames(call_frames);
             debug_assert!(memory_pool.stack_len() <= MAX_INSTRUCTION_STACK_DEPTH);
             debug_assert!(memory_pool.heap_len() <= MAX_INSTRUCTION_STACK_DEPTH);
         });
