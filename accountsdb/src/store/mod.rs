@@ -29,6 +29,8 @@ pub(crate) mod index;
 mod kv;
 pub(crate) mod mmap;
 
+#[cfg(test)]
+pub(crate) use defrag::MIN_REMAINDER;
 pub(crate) use mmap::Stats;
 
 /// Current on-disk storage format version.
