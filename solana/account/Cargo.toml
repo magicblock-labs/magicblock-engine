@@ -12,7 +12,14 @@ version = "4.3.1"
 
 [features]
 bincode = ["dep:bincode", "dep:solana-sysvar", "serde"]
-serde = ["bitflags/serde", "dep:serde", "dep:serde_bytes", "serde/rc", "solana-pubkey/serde"]
+serde = [
+    "bitflags/serde",
+    "dep:serde",
+    "dep:serde_bytes",
+    "serde/derive",
+    "serde/rc",
+    "solana-pubkey/serde"
+]
 testkit = ["bincode"]
 wincode = ["bincode", "dep:wincode", "solana-pubkey/wincode"]
 
