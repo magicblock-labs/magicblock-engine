@@ -23,10 +23,11 @@ stored separately in `executions.db`.
 
 One appender owns ordered writes. Transaction bytes are appended first and kept
 pending until their execution metadata arrives; only then are transaction and
-account indexes inserted. A block boundary records its locally computed hash
-and parent, flushes data, publishes durable file cursors, commits indexes, and
-updates ledger metadata. A seal finalizes the active files and rotates to the
-next superblock.
+account indexes inserted. Every durable sync flushes data and indexes, publishes
+durable file cursors, transfers the accumulated transaction count, and flushes
+ledger metadata. When the sync carries a block boundary, it also publishes that
+block's slot and increments the block count. A seal finalizes the active files
+and rotates to the next superblock.
 
 Reader requests run on a worker pool. Each worker owns its decode buffers and
 reads only through published cursors. The optional `testkit` feature reduces
