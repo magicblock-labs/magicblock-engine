@@ -60,7 +60,10 @@ impl TransactionSimulator {
                 _ = self.shutdown.signalled() => {
                     break;
                 }
-                Some(msg) = self.rx.recv() => {
+                msg = self.rx.recv() => {
+                    let Some(msg) = msg else {
+                        break;
+                    };
                     self.handle_message(msg);
                 }
             }
