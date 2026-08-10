@@ -56,7 +56,6 @@ async fn replay_rebuilds_state_after_counter_lag() {
     // replays both a sealed successor and the unsealed ledger head.
     std::fs::remove_file(&s2).unwrap();
 
-    // Guarded by a timeout so a replay regression fails fast instead of hanging.
     let te2 = TestEngine::with(dirs, authority).await;
     assert_eq!(
         load_v42_data(&te2, key),
