@@ -17,6 +17,7 @@ use nucleus::{
     shutdown::{Service, ShutdownManager, ShutdownReason},
 };
 use processor::{SequencerMessage, sequencer::Sequencer};
+use solana_compute_budget_program::Entrypoint as ComputeBudgetEntrypoint;
 use solana_program_runtime::{
     loaded_programs::{ProgramCache, ProgramCacheEntry},
     solana_sbpf::program::BuiltinFunctionDefinition,
@@ -76,6 +77,13 @@ impl Engine {
             (
                 SystemProgramEntrypoint::vm,
                 SystemProgramEntrypoint::codegen,
+            ),
+        );
+        builder.builtins.insert(
+            solana_sdk_ids::compute_budget::id(),
+            (
+                ComputeBudgetEntrypoint::vm,
+                ComputeBudgetEntrypoint::codegen,
             ),
         );
 
