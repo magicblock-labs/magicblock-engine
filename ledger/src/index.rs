@@ -5,12 +5,12 @@ use std::{array, borrow::Cow, fs, path::Path};
 use bytemuck::{Pod, Zeroable};
 use heed::{
     BoxedError, BytesDecode, BytesEncode, Database, DatabaseFlags, Env, EnvFlags, EnvOpenOptions,
-    IntegerComparator, RoIter, byteorder::LittleEndian,
+    IntegerComparator, RoIter, RwTxn, byteorder::LittleEndian,
     iteration_method::MoveOnCurrentKeyDuplicates, types::U64,
 };
 use nucleus::{
     Slot,
-    heed::{DatabaseIndex, OptRoTxn, OptRwTxn},
+    heed::{DatabaseIndex, OptRoTxn, read_txn},
 };
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
@@ -164,33 +164,30 @@ impl Index {
     /// Indexes a block boundary by slot.
     pub(crate) fn insert_block(
         &self,
-        txn: OptRwTxn<'_, '_>,
+        txn: &mut RwTxn<'_>,
         slot: &Slot,
         span: &Span,
     ) -> heed::Result<()> {
-        let txn = DatabaseIndex::write_txn(self, txn)?;
         self.blocks.put(txn, slot, span)
     }
 
     /// Indexes a transaction and its execution details.
     pub(crate) fn insert_transaction(
         &self,
-        txn: OptRwTxn<'_, '_>,
+        txn: &mut RwTxn<'_>,
         signature: &Signature,
         span: &TxSpan,
     ) -> heed::Result<()> {
-        let txn = DatabaseIndex::write_txn(self, txn)?;
         self.transactions.put(txn, signature, span)
     }
 
     /// Adds account-to-execution entries for all static transaction accounts.
     pub(crate) fn insert_accounts(
         &self,
-        txn: OptRwTxn<'_, '_>,
+        txn: &mut RwTxn<'_>,
         accounts: &[Pubkey],
         span: &Span,
     ) -> heed::Result<()> {
-        let txn = DatabaseIndex::write_txn(self, txn)?;
         for account in accounts {
             self.accounts.put(txn, account, span)?;
         }
@@ -198,18 +195,22 @@ impl Index {
     }
 
     /// Locates a transaction by its first signature.
-    pub(crate) fn transaction(
-        &self,
+    pub(crate) fn transaction<'t, 'e>(
+        &'e self,
         signature: &Signature,
-        txn: OptRoTxn<'_, '_>,
+        txn: OptRoTxn<'t, 'e>,
     ) -> heed::Result<Option<TxSpan>> {
-        let txn = DatabaseIndex::read_txn(self, txn)?;
+        let txn = read_txn(&self.env, txn)?;
         self.transactions.get(txn, signature)
     }
 
     /// Locates a block boundary by slot.
-    pub(crate) fn block(&self, slot: &Slot, txn: OptRoTxn<'_, '_>) -> heed::Result<Option<Span>> {
-        let txn = DatabaseIndex::read_txn(self, txn)?;
+    pub(crate) fn block<'t, 'e>(
+        &'e self,
+        slot: &Slot,
+        txn: OptRoTxn<'t, 'e>,
+    ) -> heed::Result<Option<Span>> {
+        let txn = read_txn(&self.env, txn)?;
         self.blocks.get(txn, slot)
     }
 
@@ -219,12 +220,12 @@ impl Index {
         pubkey: &Pubkey,
         txn: OptRoTxn<'t, 'e>,
     ) -> heed::Result<Option<AccountIter<'t>>> {
-        let txn = DatabaseIndex::read_txn(self, txn)?;
+        let txn = read_txn(&self.env, txn)?;
         self.accounts.get_duplicates(txn, pubkey)
     }
 }
 
-unsafe impl DatabaseIndex for Index {
+impl DatabaseIndex for Index {
     fn env(&self) -> &Env {
         &self.env
     }
