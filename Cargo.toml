@@ -22,15 +22,15 @@ rust-version = "1.94.1"
 version = "0.1.0"
 
 [workspace.dependencies]
-accountsdb = { path = "accountsdb" }
+accountsdb = { path = "accountsdb", package = "magicblock-accountsdb" }
 magic-root-interface = { path = "programs/magic-root-interface" }
 magic-root-program = { path = "programs/magic-root-program" }
 nucleus = { path = "nucleus", package = "magicblock-engine-nucleus" }
-v42-calculator-interface = { path = "programs/v42-calculator-interface", default-features = false }
 solana-account = { path = "solana/account" }
 solana-program-runtime = { path = "solana/program-runtime" }
 solana-svm = { path = "solana/svm" }
 solana-transaction-context = { path = "solana/transaction-context" }
+v42-calculator-interface = { path = "programs/v42-calculator-interface", default-features = false }
 
 ahash = "0.8.12"
 arc-swap = "1.9.1"
