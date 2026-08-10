@@ -408,11 +408,11 @@ impl LedgerReader {
     }
 
     /// Reads the timestamp from a block boundary entry.
-    fn blocktime(
+    fn blocktime<'t, 'e>(
         &mut self,
-        superblock: &Superblock,
+        superblock: &'e Superblock,
         slot: Slot,
-        txn: OptRoTxn<'_, '_>,
+        txn: OptRoTxn<'t, 'e>,
     ) -> Result<i64> {
         let Some(span) = superblock.index.block(&slot, txn)? else {
             return Ok(0);
