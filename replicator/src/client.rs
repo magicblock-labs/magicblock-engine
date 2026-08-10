@@ -1,5 +1,5 @@
 use std::{
-    fs::File,
+    fs::{self, File},
     io::{self, BufReader, Read},
     net::{SocketAddr, TcpStream},
     thread,
@@ -208,12 +208,15 @@ impl ReplicationClient {
         // Stage in the successor before seal rotation so restart can find it.
         let dir = Superblock::init_dir(self.superblocks().directory(), meta.id + 1)?;
         let archive = dir.join(ACCOUNTSDB_SNAPSHOT_FILE);
-        let mut file = File::options().write(true).create(true).truncate(true).open(&archive)?;
+        let temporary = dir.join(format!("{ACCOUNTSDB_SNAPSHOT_FILE}.tmp"));
+        let mut file = File::options().write(true).create(true).truncate(true).open(&temporary)?;
         let written = io::copy(&mut connection.take(meta.len), &mut file)?;
-        file.sync_all()?;
         if written != meta.len {
             return Err(ReplicationError::Snapshot(meta.len, written));
         }
+        file.sync_all()?;
+        drop(file);
+        fs::rename(temporary, archive)?;
         self.superblocks().append(meta.superblock)?;
         info!(?meta, "replication snapshot staged");
         Ok(())
