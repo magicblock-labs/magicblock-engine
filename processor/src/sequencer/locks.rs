@@ -62,19 +62,23 @@ impl LockTable {
                 continue;
             };
             *count -= 1;
+            let released = *count == 0;
+            if released {
+                executor.locks.remove(acc);
+            }
             let Some(lock) = self.get_mut(acc) else {
                 continue;
             };
             // Retry runs on `blocker`; reserve its acquired prefix against other work.
             lock.contend(blocker);
-            if *count == 0 {
+            if released {
                 lock.unlock(id);
             }
         }
         Err(blocker)
     }
 
-    /// Releases every account lock recorded in `held` for `executor`.
+    /// Releases every account lock recorded in `executor.locks`.
     pub(super) fn release(&mut self, executor: &mut ExecutorHandle) {
         let id = executor.id;
         for (acc, _) in executor.locks.drain() {
@@ -133,9 +137,12 @@ impl AccountLock {
         Ok(())
     }
 
-    /// Releases `executor`'s hold on the account, clearing the write bit.
+    /// Releases `executor`'s hold on the account and its write mode, if held.
     pub(super) fn unlock(&mut self, executor: ExecutorId) {
-        self.lock &= !(1 << executor | WRITE_BIT);
+        let bit = 1 << executor;
+        if self.lock & bit != 0 {
+            self.lock &= !(bit | WRITE_BIT);
+        }
     }
 
     /// Records `executor` as the contender owed the account next.

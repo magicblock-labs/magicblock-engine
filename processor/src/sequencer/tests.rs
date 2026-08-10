@@ -135,9 +135,9 @@ async fn acquire_locks_preserves_contender_priority_after_partial_conflict() {
         .expect_err("b blocks the second transaction");
 
     assert_eq!(err, 0);
-    assert_eq!(blocked.locks.get(&a), Some(&0));
-    // `a` was acquired before `b` conflicted, and the partial acquire is kept:
-    // it stays held for the blocked executor and closed to everyone else.
+    assert_eq!(blocked.locks.get(&a), None);
+    // `a` was released after `b` conflicted, but the blocker keeps contender
+    // priority so unrelated executors cannot acquire it before the retry.
     let a_lock = sequencer.locks.get_mut(&a).expect("a lock remains");
     assert!(a_lock.read(1).is_err());
     assert_eq!(a_lock.read(0), Ok(()));
