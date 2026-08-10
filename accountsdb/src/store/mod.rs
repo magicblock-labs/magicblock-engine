@@ -11,7 +11,7 @@ use solana_account::{
 use solana_pubkey::Pubkey;
 use tracing::{error, warn};
 
-use nucleus::heed::{DatabaseIndex, OptRoTxn, OptRwTxn};
+use nucleus::heed::{DatabaseIndex, OptRoTxn, OptRwTxn, read_txn, write_txn};
 use twox_hash::XxHash3_64;
 
 use crate::{
@@ -68,7 +68,7 @@ impl PersistedStore {
         txn: OptRoTxn<'_, 'e>,
         pubkey: &Pubkey,
     ) -> Result<Option<BorrowedAccount>> {
-        let txn = self.index.read_txn(txn)?;
+        let txn = read_txn(self.index.env(), txn)?;
         let offset = self.index.offset(pubkey, txn)?;
         offset.is_some().then(|| self.storage.stats().read());
         // SAFETY: offsets come from the persisted index and point into the map.
@@ -77,7 +77,7 @@ impl PersistedStore {
 
     /// Returns whether a persisted account image exists for `pubkey`.
     pub(crate) fn contains<'e>(&'e self, txn: OptRoTxn<'_, 'e>, pubkey: &Pubkey) -> Result<bool> {
-        let txn = self.index.read_txn(txn)?;
+        let txn = read_txn(self.index.env(), txn)?;
         self.index.offset(pubkey, txn).map(|o| o.is_some()).map_err(Into::into)
     }
 
@@ -198,7 +198,7 @@ impl PersistedStore {
         txn: OptRwTxn<'_, 'e>,
     ) -> Result<()> {
         if markers.contains(DirtyMarkers::OWNER) {
-            let txn = self.index.write_txn(txn)?;
+            let txn = write_txn(self.index.env(), txn)?;
             let owner = acc.owner().into();
             self.index.update_owner(pubkey, owner, txn)?;
         }
@@ -217,7 +217,7 @@ impl PersistedStore {
         acc: &OwnedAccount,
         txn: OptRwTxn<'_, 'e>,
     ) -> Result<()> {
-        let txn = self.index.write_txn(txn)?;
+        let txn = write_txn(self.index.env(), txn)?;
         let units = acc.units();
         let owner = acc.owner().into();
 
@@ -253,7 +253,7 @@ impl PersistedStore {
 
     /// Removes a persisted image and returns its storage span to the freelist.
     fn delete<'e>(&'e self, pubkey: &Pubkey, txn: OptRwTxn<'_, 'e>) -> Result<()> {
-        let txn = self.index.write_txn(txn)?;
+        let txn = write_txn(self.index.env(), txn)?;
         let Some(offset) = self.index.delete(pubkey, txn)? else {
             return Ok(());
         };
