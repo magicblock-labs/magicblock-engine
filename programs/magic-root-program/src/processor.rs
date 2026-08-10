@@ -35,6 +35,10 @@ pub(crate) fn authorize(ctx: &InvokeContext<'_, '_>) -> Result<(), InstructionEr
             .transaction_context
             .get_instruction_context_at_index_in_trace(instruction.get_index_of_caller())?;
         let caller_id = caller.get_program_key()?;
+        if caller_id == &magic_root_interface::ID {
+            ic_msg!(ctx, "MagicRoot: recursive caller");
+            return Err(InstructionError::CallDepth);
+        }
         let is_builtin = ctx
             .program_cache_for_tx_batch
             .find(caller_id)
