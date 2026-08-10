@@ -59,9 +59,12 @@ pub fn tempdir() -> TempDir {
 
 /// A block boundary with a distinct hash and time derived from `slot`.
 pub fn block(slot: Slot) -> Block {
+    let mut hash = [0; 32];
+    let bytes = slot.to_le_bytes();
+    hash[..bytes.len()].copy_from_slice(&bytes);
     Block {
         slot,
-        hash: Hash::new_from_array([slot as u8; 32]),
+        hash: Hash::new_from_array(hash),
         time: slot as i64,
         parent: Hash::default(),
     }
