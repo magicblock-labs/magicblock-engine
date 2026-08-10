@@ -9,7 +9,8 @@ zero when the system clock predates the epoch. Its default feature set is empty.
 - `config`: serializable authority, accountsdb, blockstore, and ledger
   configuration types. Authority serialization includes the complete local
   keypair; consumers must redact it before exposing serialized output.
-- `heed`: LMDB transaction aliases and the shared `DatabaseIndex` trait.
+- `heed`: LMDB transaction aliases, safe environment-bound transaction reuse
+  helpers, and the shared `DatabaseIndex` trait.
 - `shutdown`: ordered cancellation, service handles, and termination reporting.
   The pacemaker quiesces execution and terminally syncs the ledger before the
   sequencer and appender tier; remaining backing services stop afterward.
