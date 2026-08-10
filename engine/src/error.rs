@@ -28,6 +28,12 @@ pub enum EngineError {
     /// A background service is no longer reachable.
     #[error("service became unavailable: {0:?}")]
     ServiceUnavailable(Service),
+    /// The engine has begun coordinated shutdown and rejects new work.
+    #[error("engine is shutting down")]
+    ShuttingDown,
+    /// Timed out waiting for a submitted transaction's committed result.
+    #[error("timed out waiting for transaction result")]
+    TransactionTimeout,
     /// Signing a transaction with the engine authority failed.
     #[error("signature error: {0}")]
     Signature(#[source] SignerError),

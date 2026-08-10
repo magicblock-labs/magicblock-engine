@@ -142,7 +142,7 @@ async fn post_finalize_rejects_magic_root_ix() {
             error,
             EngineError::TransactionExecution(TransactionError::InstructionError(
                 _,
-                InstructionError::UnsupportedProgramId
+                InstructionError::CallDepth
             ))
         ),
         "unexpected recursive invocation error: {error:?}"
