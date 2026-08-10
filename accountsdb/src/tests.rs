@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering::{Relaxed, Release};
 
 use assert_matches::assert_matches;
 use nucleus::{
-    heed::DatabaseIndex,
+    heed::{DatabaseIndex, read_txn},
     testkit::{TempDir, init_tracing, tempdir},
 };
 use solana_account::{
@@ -104,7 +104,7 @@ fn cursor(db: &AccountsDB) -> u32 {
 /// Current persisted offset for one live account.
 fn offset(db: &AccountsDB, pubkey: &Pubkey) -> impl Copy + PartialEq + use<> {
     let mut txn = None;
-    let txn = db.persisted.index.read_txn(&mut txn).unwrap();
+    let txn = read_txn(db.persisted.index.env(), &mut txn).unwrap();
     db.persisted.index.offset(pubkey, txn).unwrap().unwrap()
 }
 
