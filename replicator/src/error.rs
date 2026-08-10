@@ -1,6 +1,5 @@
 use std::io;
 
-use derive_more::From;
 use engine::EngineError;
 use keeper::error::KeeperError;
 use ledger::LedgerError;
@@ -8,23 +7,23 @@ use nucleus::ledger::BlockstorePosition;
 use tokio::time::error::Elapsed;
 
 /// Failure while negotiating or transferring replicated state.
-#[derive(From, thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum ReplicationError {
     /// Socket or replicated-file access failed.
     #[error("replication I/O failed: {0}")]
-    IO(#[source] io::Error),
+    IO(#[from] io::Error),
     /// Applying replicated state through the keeper failed.
     #[error("failed to apply replicated state: {0}")]
-    State(#[source] KeeperError),
+    State(#[from] KeeperError),
     /// Applying a replicated entry through the execution engine failed.
     #[error("replication engine operation failed: {0}")]
-    Engine(#[source] EngineError),
+    Engine(#[from] EngineError),
     /// Reading or advancing replicated ledger storage failed.
     #[error("replication ledger operation failed: {0}")]
-    Ledger(#[source] LedgerError),
+    Ledger(#[from] LedgerError),
     /// A control message could not be encoded or decoded.
     #[error("invalid replication control message: {0}")]
-    Serde(#[source] wincode::Error),
+    Serde(#[from] wincode::Error),
     /// The peer uses a protocol version this crate cannot read.
     #[error("replication protocol version mismatch; expected version {0}")]
     VersionMismatch(u32),
@@ -51,5 +50,5 @@ pub enum ReplicationError {
     StreamClosed,
     /// Waiting for a locally committed block boundary timed out.
     #[error("timed out waiting for a replicated block boundary: {0}")]
-    Timeout(#[source] Elapsed),
+    Timeout(#[from] Elapsed),
 }
