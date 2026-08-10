@@ -9,9 +9,10 @@ use std::{
 use agave_transaction_view::transaction_view::TransactionView;
 use bitcode::Buffer;
 use flume::Receiver;
+use heed::{Env, RwTxn};
 use nucleus::{
     Slot,
-    heed::{DatabaseIndex, OptRwTxn},
+    heed::{DatabaseIndex, OptRwTxn, write_txn},
     ledger::BlockstorePosition,
     shutdown::{ShutdownHandle, ShutdownReason},
 };
@@ -89,22 +90,30 @@ impl LedgerAppender {
 
     /// Runs until shutdown (when the event stream closes).
     pub(crate) fn run(mut self, mut shutdown: ShutdownHandle) {
-        let mut txn = None;
         let reason = loop {
-            let Ok(event) = self.rx.recv() else {
-                break ShutdownReason::Signalled;
-            };
-            match self.process(event, &mut txn) {
-                Ok(false) => (),
-                Ok(true) => break ShutdownReason::Signalled,
-
+            let env = self.index.env().clone();
+            match self.run_epoch(&env) {
+                Ok(Epoch::Rotate) => (),
+                Ok(Epoch::Shutdown) => break ShutdownReason::Signalled,
                 Err(err) => break ShutdownReason::Error(Box::new(err)),
             }
         };
         // Release ledger ownership before the manager can reopen it.
-        drop(txn);
         drop(self);
         shutdown.terminate(reason);
+    }
+
+    /// Processes events against one stable superblock environment.
+    fn run_epoch<'e>(&mut self, env: &'e Env) -> Result<Epoch> {
+        let mut txn: Option<RwTxn<'e>> = None;
+        loop {
+            let Ok(event) = self.rx.recv() else {
+                return Ok(Epoch::Shutdown);
+            };
+            if let Some(epoch) = self.process(event, env, &mut txn)? {
+                return Ok(epoch);
+            }
+        }
     }
 
     /// Rotates to the next superblock directory.
@@ -127,31 +136,38 @@ impl LedgerAppender {
 
     /// Processes one append event, rotating after a superblock seal.
     ///
-    /// Returns true if the shutdown has been requested.
-    fn process(&mut self, event: Event, txn: OptRwTxn<'_, '_>) -> Result<bool> {
+    fn process<'e>(
+        &mut self,
+        event: Event,
+        env: &'e Env,
+        txn: OptRwTxn<'_, 'e>,
+    ) -> Result<Option<Epoch>> {
         match event {
             Event::Transaction(transaction) => {
                 self.write_transaction(transaction)?;
             }
             Event::Execution(execution) => {
-                self.write_execution(execution, txn)?;
+                self.write_execution(execution, env, txn)?;
             }
             Event::Block(block) => {
-                self.write_block(block, txn)?;
+                self.write_block(block, env, txn)?;
             }
             Event::Superblock(seal) => {
-                self.write_superblock(seal)?;
+                self.write_superblock(seal, txn)?;
                 self.rotate(seal)?;
+                return Ok(Some(Epoch::Rotate));
             }
             Event::Reset(slot) => {
-                self.write_reset(slot)?;
+                self.write_reset(slot, txn)?;
             }
             Event::Sync { response, is_final } => {
                 let _ = response.send(self.sync(None, txn));
-                return Ok(is_final);
+                if is_final {
+                    return Ok(Some(Epoch::Shutdown));
+                }
             }
         }
-        Ok(false)
+        Ok(None)
     }
 
     /// Writes a raw transaction and keeps it pending until execution arrives.
@@ -169,7 +185,12 @@ impl LedgerAppender {
     }
 
     /// Writes execution details and adds transaction/account indexes.
-    fn write_execution(&mut self, execution: Execution, txn: OptRwTxn<'_, '_>) -> Result<()> {
+    fn write_execution<'e>(
+        &mut self,
+        execution: Execution,
+        env: &'e Env,
+        txn: OptRwTxn<'_, 'e>,
+    ) -> Result<()> {
         let signature: Signature = execution.header.signature;
         let Some(pending) = self.pending.remove(&signature) else {
             warn!(%signature, "ledger execution arrived without a pending transaction; skipping");
@@ -181,6 +202,7 @@ impl LedgerAppender {
             blockstore: pending.span,
             execution,
         };
+        let txn = write_txn(env, txn)?;
         self.index.insert_transaction(txn, &signature, &span)?;
         let view = TransactionView::try_new_unsanitized(pending.transaction)?;
         let accounts = view.static_account_keys();
@@ -189,9 +211,9 @@ impl LedgerAppender {
     }
 
     /// Writes a block boundary and publishes it after data and indexes are durable.
-    fn write_block(&mut self, block: Block, txn: OptRwTxn<'_, '_>) -> Result<()> {
+    fn write_block<'e>(&mut self, block: Block, env: &'e Env, txn: OptRwTxn<'_, 'e>) -> Result<()> {
         let span = self.writer.write_blockstore(&BlockstoreEntry::Block(block))?;
-        self.index.insert_block(txn, &block.slot, &span)?;
+        self.index.insert_block(write_txn(env, txn)?, &block.slot, &span)?;
         self.sync(Some(block.slot), txn)?;
         if self.ledger.size_exceeded()? {
             self.ledger.truncate()?;
@@ -201,18 +223,18 @@ impl LedgerAppender {
     }
 
     /// Writes a superblock seal and prepares files for read-only access.
-    fn write_superblock(&mut self, seal: SuperblockSeal) -> Result<()> {
+    fn write_superblock(&mut self, seal: SuperblockSeal, txn: OptRwTxn<'_, '_>) -> Result<()> {
         self.writer.write_blockstore(&BlockstoreEntry::Superblock(seal))?;
-        self.sync(None, &mut None)?;
+        self.sync(None, txn)?;
         self.writer.finalize()?;
         info!(superblock = seal.id, "sealed superblock");
         Ok(())
     }
 
     /// Writes and publishes a volatile-state reset marker.
-    fn write_reset(&mut self, slot: Slot) -> Result<()> {
+    fn write_reset(&mut self, slot: Slot, txn: OptRwTxn<'_, '_>) -> Result<()> {
         self.writer.write_blockstore(&BlockstoreEntry::Reset(slot))?;
-        self.sync(None, &mut None)?;
+        self.sync(None, txn)?;
         info!(slot, "appended volatile state reset");
         Ok(())
     }
@@ -241,6 +263,12 @@ impl LedgerAppender {
         let _ = self.position.send(position);
         Ok(())
     }
+}
+
+/// Boundary reached while processing one superblock environment.
+enum Epoch {
+    Rotate,
+    Shutdown,
 }
 
 /// Transaction bytes already written but not yet paired with execution details.

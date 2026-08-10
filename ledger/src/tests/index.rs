@@ -1,8 +1,8 @@
 //! Index unit tests.
 
-use heed::RwTxn;
 use nucleus::{
     Slot,
+    heed::DatabaseIndex,
     testkit::{TempDir, init_tracing, tempdir},
 };
 use solana_pubkey::Pubkey;
@@ -16,13 +16,6 @@ fn index() -> (TempDir, Index) {
     let dir = tempdir();
     let index = Index::new(dir.path()).unwrap();
     (dir, index)
-}
-
-/// Commits a lazily opened write transaction, if any inserts opened one.
-fn commit(txn: Option<RwTxn<'_>>) {
-    if let Some(txn) = txn {
-        txn.commit().unwrap();
-    }
 }
 
 /// Drains every execution span the account index holds for `pubkey`.
@@ -65,11 +58,11 @@ fn transaction_and_block_roundtrip() {
     let block_a = Span::new(0, 8);
     let block_b = Span::new(8, 16);
 
-    let mut txn = None;
+    let mut txn = index.env().write_txn().unwrap();
     index.insert_transaction(&mut txn, &signature, &txspan).unwrap();
     index.insert_block(&mut txn, &slot_a, &block_a).unwrap();
     index.insert_block(&mut txn, &slot_b, &block_b).unwrap();
-    commit(txn);
+    txn.commit().unwrap();
 
     let mut txn = None;
     let got = index.transaction(&signature, &mut txn).unwrap().expect("transaction present");
@@ -91,12 +84,12 @@ fn account_signature_duplicates() {
     let spans = [Span::new(100, 10), Span::new(200, 20), Span::new(300, 30)];
     let other_span = Span::new(400, 40);
 
-    let mut txn = None;
+    let mut txn = index.env().write_txn().unwrap();
     for span in &spans {
         index.insert_accounts(&mut txn, &[account], span).unwrap();
     }
     index.insert_accounts(&mut txn, &[other], &other_span).unwrap();
-    commit(txn);
+    txn.commit().unwrap();
 
     // Account duplicate spans are newest-first, so later execution offsets are returned first.
     assert_eq!(
