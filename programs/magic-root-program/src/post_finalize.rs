@@ -25,10 +25,6 @@ pub(crate) fn process(
         }
     }
     for action in actions {
-        if action.program_id == magic_root_interface::ID {
-            ic_msg!(ctx, "MagicRoot: post-finalize tried to call root program");
-            return Err(InstructionError::UnsupportedProgramId);
-        }
         let signers: Vec<_> = action
             .accounts
             .iter()
