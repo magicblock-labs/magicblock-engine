@@ -6,6 +6,7 @@ members = [
     "nucleus",
     "processor",
     "programs/magic-root-interface",
+    "programs/magic-root-program",
     "programs/v42-calculator-interface",
     "programs/v42-calculator-program",
     "solana/account",
