@@ -41,7 +41,7 @@ opens without replay when its slot and transaction count are each at least the
 ledger values. After replay actually runs, the final transaction counts must be
 equal or startup returns `ReplayError::StateMismatch`.
 
-Internal pacing appends one reset marker at the upcoming slot and clears
+Internal pacing appends one reset marker at the current slot and clears
 chain-mirrored volatile accounts before the pacemaker task starts. Internal
 system accounts remain available. Replicas use external pacing and retain
 restored volatile state. External block producers supply the slot and timestamp;

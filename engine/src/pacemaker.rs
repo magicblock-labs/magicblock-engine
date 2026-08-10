@@ -128,16 +128,19 @@ impl PaceMaker {
     /// handshake.
     async fn run(mut self, mut shutdown: ShutdownHandle) {
         let mut res = loop {
-            tokio::select! {
+            let next = tokio::select! {
                 biased;
-                _ = shutdown.signalled() => {
-                    break Ok(());
-                }
-                success = self.pace() => {
-                    if !*success.as_ref().unwrap_or(&false) {
-                        break success.map(|_| ());
-                    }
-                }
+                _ = shutdown.signalled() => None,
+                next = self.next() => next,
+            };
+            let Some((block, submission)) = next else {
+                break Ok(());
+            };
+            if let Err(error) = self.handle(block).await {
+                break Err(error);
+            }
+            if let Some(submission) = submission {
+                let _ = submission.send(());
             }
         };
         res = if let Pacer::Internal(ref mut t) = self.pacer {
@@ -157,28 +160,15 @@ impl PaceMaker {
         }
     }
 
-    /// Emits one block boundary and seals a superblock when the emitted slot is
-    /// on the configured interval.
-    async fn pace(&mut self) -> Result<bool> {
-        let (block, submission) = match &mut self.pacer {
+    /// Waits for the next block boundary without applying it.
+    async fn next(&mut self) -> Option<(Block, Option<oneshot::Sender<()>>)> {
+        match &mut self.pacer {
             Pacer::Internal(t) => {
                 t.ticker.tick().await;
-                (t.block(), None)
+                Some((t.block(), None))
             }
-            Pacer::External(rx) => {
-                let Some(msg) = rx.recv().await else {
-                    return Ok(false);
-                };
-                (msg.block, Some(msg.submitted))
-            }
-        };
-        let result = self.handle(block).await.map(|()| true);
-        if let Some(submission) = submission
-            && result.is_ok()
-        {
-            let _ = submission.send(());
+            Pacer::External(rx) => rx.recv().await.map(|msg| (msg.block, Some(msg.submitted))),
         }
-        result
     }
 
     /// Advances the execution and simulation environments to `block`, sealing a

@@ -11,7 +11,7 @@ use solana_pubkey::Pubkey;
 use solana_transaction::TransactionResult;
 use tokio::time;
 
-use crate::{Engine, error::Result, transaction};
+use crate::{Engine, error::EngineError, error::Result, transaction};
 
 /// Upper bound on awaiting a submitted transaction's committed result.
 const EXECUTION_TIMEOUT: Duration = Duration::from_secs(8);
@@ -75,9 +75,10 @@ impl AccountAccessor<'_> {
 
 impl TransactionAccessor<'_> {
     /// Submits `transaction` for execution and awaits its committed result.
+    /// A timeout does not cancel the submitted transaction.
     pub async fn execute(self) -> Result<TransactionResult<()>> {
         if self.engine.terminating.load(Ordering::Acquire) {
-            Err("engine is shutting down".to_string())?;
+            return Err(EngineError::ShuttingDown);
         }
         let signature = self.transaction.signatures()[0];
         let msg = SequencerMessage::Transaction(self.transaction);
@@ -85,7 +86,7 @@ impl TransactionAccessor<'_> {
         self.engine.sequencer.send(msg).await?;
         let status = time::timeout(EXECUTION_TIMEOUT, rx.recv())
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|_| EngineError::TransactionTimeout)?
             .map_err(|e| e.to_string())?;
         Ok(status.result)
     }
@@ -93,7 +94,7 @@ impl TransactionAccessor<'_> {
     /// Submits `transaction` for execution without awaiting its result.
     pub async fn schedule(self) -> Result<()> {
         if self.engine.terminating.load(Ordering::Acquire) {
-            Err("engine is shutting down".to_string())?;
+            return Err(EngineError::ShuttingDown);
         }
         let msg = SequencerMessage::Transaction(self.transaction);
         self.engine.sequencer.send(msg).await.map_err(Into::into)
@@ -101,6 +102,9 @@ impl TransactionAccessor<'_> {
 
     /// Simulates `transaction` against current state without committing it.
     pub async fn simulate(self) -> Result<TransactionResult<ExecutionRecord>> {
+        if self.engine.terminating.load(Ordering::Acquire) {
+            return Err(EngineError::ShuttingDown);
+        }
         let (response, rx) = oneshot::channel();
         let msg = SimulatorMessage::Transaction(Simulation {
             transaction: self.transaction,

@@ -145,11 +145,14 @@ impl Engine {
             }
             OwnedBlockstoreEntry::Superblock(expected) => {
                 let _guard = self.barrier().await?;
+                let previous = self.superblocks().sealed().id;
                 self.accounts().set_superblock(expected.id);
                 self.sync(false)?;
                 let observed = self.superblocks().sealed();
                 if observed != expected {
                     error!(?observed, ?expected, "state mismatch; aborting replay");
+                    self.accounts().set_superblock(previous);
+                    self.sync(false)?;
                     Err(ReplayError::StateMismatch)?;
                 }
             }
