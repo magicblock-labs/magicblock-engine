@@ -200,7 +200,7 @@ impl Index {
     }
 }
 
-unsafe impl DatabaseIndex for Index {
+impl DatabaseIndex for Index {
     fn env(&self) -> &Env {
         &self.env
     }
