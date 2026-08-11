@@ -3,7 +3,11 @@
 use std::sync::OnceLock;
 
 use nucleus::metrics::{self as metric, OperationTimer};
-use nucleus::metrics::{IntCounter, IntGauge, MetricOperation, MetricSpec, OperationCounters};
+use nucleus::metrics::{
+    IntCounter, IntCounterVec, IntGauge, MetricOperation, MetricSpec, OperationCounters,
+};
+
+use crate::subscriptions::Subscription;
 
 /// Process-wide keeper metrics registered in the default Prometheus registry.
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -17,11 +21,6 @@ const OPERATION_TIME: MetricSpec = MetricSpec {
 const ACCOUNT_CACHE_ENTRIES: MetricSpec = MetricSpec {
     name: "keeper_account_cache_entries",
     help: "Current account load cache entries.",
-};
-/// Signature cache entries.
-const SIGNATURE_CACHE_ENTRIES: MetricSpec = MetricSpec {
-    name: "keeper_signature_cache_entries",
-    help: "Current signature cache entries.",
 };
 /// Block hash cache entries.
 const BLOCK_HASH_CACHE_ENTRIES: MetricSpec = MetricSpec {
@@ -42,6 +41,11 @@ const ACCOUNT_CACHE_EVICTIONS: MetricSpec = MetricSpec {
 const ACCOUNT_RESOLUTION_RACES: MetricSpec = MetricSpec {
     name: "keeper_account_resolution_races",
     help: "Account resolution race conditions.",
+};
+/// Slow multicast consumer disconnection counter.
+const SLOW_CONSUMER_DISCONNECTS: MetricSpec = MetricSpec {
+    name: "keeper_subscription_slow_consumer_disconnects",
+    help: "Multicast receivers disconnected because their queue was full.",
 };
 
 /// Keeper operation used as a low-cardinality operation label.
@@ -81,13 +85,6 @@ pub(crate) fn account_cache_insert() {
     metric::with_metrics(&METRICS, |m| m.account_cache_entries.inc());
 }
 
-/// Refreshes signature cache entry gauge.
-pub(crate) fn signature_entries(count: usize) {
-    metric::with_metrics(&METRICS, |m| {
-        m.signature_cache_entries.set(metric::gauge_value(count))
-    });
-}
-
 /// Refreshes block hash cache entry gauge.
 pub(crate) fn block_hash_entries(count: usize) {
     metric::with_metrics(&METRICS, |m| {
@@ -112,14 +109,19 @@ pub(crate) fn account_resolution_race() {
     metric::with_metrics(&METRICS, |m| m.account_resolution_race.inc());
 }
 
+/// Records one receiver disconnected because its queue was full.
+pub(crate) fn slow_consumer_disconnect(subscription: Subscription) {
+    metric::with_metrics(&METRICS, |m| {
+        m.slow_consumer_disconnects.with_label_values(&[subscription.label()]).inc()
+    });
+}
+
 /// Owns all Prometheus collectors registered by keeper.
 struct Metrics {
     /// Runtime operation duration and completion counters.
     operations: OperationCounters,
     /// Account cache entry gauge.
     account_cache_entries: IntGauge,
-    /// Signature cache entry gauge.
-    signature_cache_entries: IntGauge,
     /// Block hash cache entry gauge.
     block_hash_cache_entries: IntGauge,
     /// Most recently completed snapshot archive size in bytes.
@@ -128,6 +130,8 @@ struct Metrics {
     account_cache_evictions: IntCounter,
     /// Account resolution race conditions counter.
     account_resolution_race: IntCounter,
+    /// Slow consumer disconnections labeled by subscription stream.
+    slow_consumer_disconnects: IntCounterVec,
 }
 impl Default for Metrics {
     /// Builds collectors and registers them in the default Prometheus registry.
@@ -135,11 +139,14 @@ impl Default for Metrics {
         Self {
             operations: OperationCounters::new(OPERATION_TIME),
             account_cache_entries: metric::gauge(ACCOUNT_CACHE_ENTRIES, 0),
-            signature_cache_entries: metric::gauge(SIGNATURE_CACHE_ENTRIES, 0),
             block_hash_cache_entries: metric::gauge(BLOCK_HASH_CACHE_ENTRIES, 0),
             snapshot_size: metric::gauge(SNAPSHOT_SIZE, 0),
             account_cache_evictions: metric::counter(ACCOUNT_CACHE_EVICTIONS, 0),
             account_resolution_race: metric::counter(ACCOUNT_RESOLUTION_RACES, 0),
+            slow_consumer_disconnects: metric::counter_vec(
+                SLOW_CONSUMER_DISCONNECTS,
+                &["subscription"],
+            ),
         }
     }
 }

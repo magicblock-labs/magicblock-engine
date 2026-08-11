@@ -12,9 +12,11 @@ use solana_account::AccountMode;
 use solana_hash::Hash as SolanaHash;
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
-use tokio::sync::broadcast::{self, Sender};
 
-use crate::metrics;
+use crate::{
+    metrics,
+    subscriptions::{Subscription, Unicast},
+};
 
 pub(crate) struct Caches {
     /// Recent signature statuses keyed by transaction signature.
@@ -32,18 +34,17 @@ pub(crate) struct AccountCache {
     /// In-flight account loads keyed by account pubkey.
     pub(crate) reservations: HashMap<Pubkey, Arc<EventNotifier>, RandomState>,
     /// Pubkeys evicted when a committed load displaces a cold account.
-    pub(crate) evictions: Sender<Pubkey>,
+    pub(crate) evictions: Unicast<Pubkey>,
 }
 
 impl AccountCache {
     /// Creates missing-load coordination with the requested recent-load capacity.
     pub(crate) fn new(capacity: usize) -> Self {
-        let (evictions, _) = broadcast::channel(32);
         let lru = HashCache::with_capacity_and_hasher(256, capacity, Default::default());
         Self {
             lru,
             reservations: Default::default(),
-            evictions,
+            evictions: Unicast::new(32, Subscription::Evictions),
         }
     }
 }
@@ -70,7 +71,7 @@ pub enum MissingAccount {
 impl AccountLoad {
     /// Completes the load, wakes waiters, and tracks non-authoritative modes for
     /// eviction.
-    pub fn complete(mut self, mode: AccountMode) {
+    pub async fn complete(mut self, mode: AccountMode) {
         let Some((cache, notifier)) = self.release() else {
             return;
         };
@@ -80,7 +81,7 @@ impl AccountLoad {
         }
         if let Ok(Some(evicted)) = cache.lru.put_sync(self.pubkey, ()) {
             metrics::account_cache_eviction();
-            let _ = cache.evictions.send(evicted.0);
+            cache.evictions.send(evicted.0).await;
         } else {
             metrics::account_cache_insert()
         }

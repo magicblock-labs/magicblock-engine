@@ -26,13 +26,13 @@ use solana_sysvar::{
     clock::Clock,
     slot_hashes::{SlotHashes, SysvarId},
 };
-use tokio::sync::broadcast::Receiver;
+use solana_transaction_error::TransactionError;
+use tokio::sync::mpsc::Receiver;
 
 use crate::{
     FullTransaction, Keeper, ResolvedTransaction,
     cache::{AccountCache, MissingAccount},
     error::Result,
-    metrics,
     subscriptions::TransactionLogs,
     util::{execution_commit, request},
 };
@@ -90,22 +90,24 @@ impl<'a> AccountsAccessor<'a> {
 
     /// Subscribes to updates for one account pubkey.
     pub async fn subscribe(&self, account: Pubkey) -> Receiver<AccountSharedData> {
-        self.keeper.subscriptions.accounts.subscribe(account, 8).await
+        self.keeper.subscriptions.accounts.subscribe(account).await
     }
 
     /// Subscribes to account updates for accounts owned by `program`.
     pub async fn subscribe_program(&self, program: Pubkey) -> Receiver<AccountEntry> {
-        self.keeper.subscriptions.programs.subscribe(program, 16).await
+        self.keeper.subscriptions.programs.subscribe(program).await
     }
 
-    /// Subscribes to account pubkeys evicted from the recent-load cache.
-    pub fn subscribe_evictions(&self) -> Receiver<Pubkey> {
+    /// Subscribes as the sole receiver of account pubkeys evicted from the recent-load cache.
+    ///
+    /// Returns an error if the process-lifetime eviction receiver was already registered.
+    pub fn subscribe_evictions(&self) -> Result<Receiver<Pubkey>> {
         self.keeper.caches.accounts.evictions.subscribe()
     }
 
     /// Subscribes to completed accountsdb snapshot archives.
     pub fn subscribe_snapshots(&self) -> Receiver<PathBuf> {
-        self.keeper.subscriptions.snapshots.subscribe()
+        self.keeper.subscriptions.snapshots.subscribe_sync(())
     }
 
     /// Updates durable `SlotHashes` and `Clock` sysvar accounts from `block`.
@@ -158,42 +160,56 @@ impl<'a> TransactionsAccessor<'a> {
         Ok(request(self.keeper, signature, ReadRequest::TransactionStatus).await??)
     }
 
-    /// Subscribes to all processed transactions, including failed executions.
-    pub fn subscribe_processed(&self) -> Receiver<Arc<FullTransaction>> {
+    /// Subscribes as the sole receiver of all processed transactions, including failures.
+    ///
+    /// Returns an error if the process-lifetime transaction receiver was already registered.
+    pub fn subscribe_processed(&self) -> Result<Receiver<Arc<FullTransaction>>> {
         self.keeper.subscriptions.transactions.subscribe()
     }
 
     /// Subscribes to status updates for one transaction signature.
-    pub async fn subscribe_signature(&self, signature: Signature) -> Receiver<TransactionStatus> {
-        self.keeper.subscriptions.signatures.subscribe(signature, 1).await
+    pub async fn subscribe_signature(
+        &self,
+        signature: Signature,
+    ) -> oneshot::Receiver<TransactionStatus> {
+        self.keeper.subscriptions.signatures.subscribe(signature).await
     }
 
     /// Subscribes to log batches mentioning `account`.
     pub async fn subscribe_logs(&self, account: Pubkey) -> Receiver<Arc<TransactionLogs>> {
-        self.keeper.subscriptions.logs.subscribe(account, 8).await
+        self.keeper.subscriptions.logs.subscribe(account).await
     }
 
-    /// Subscribes to encoded service messages emitted by successful transactions.
-    pub fn subscribe_service_messages(&self) -> Receiver<EncodedMessage> {
+    /// Subscribes as the sole receiver of encoded service messages.
+    ///
+    /// Returns an error if the process-lifetime service receiver was already registered.
+    pub fn subscribe_service_messages(&self) -> Result<Receiver<EncodedMessage>> {
         self.keeper.subscriptions.services.subscribe()
     }
 
     /// Appends transaction bytes to the ledger, deduplicating by signature.
     ///
-    /// Returns `Ok(true)` when the transaction was appended, or `Ok(false)`
-    /// without appending if its signature was already seen for this slot.
-    /// Execution details are appended later by `commit_execution`.
+    /// Returns `Ok(true)` when the transaction was appended. On `Ok(false)`,
+    /// the latest signature subscriber receives `AlreadyProcessed` or
+    /// `BlockhashNotFound`. Execution details are appended later by
+    /// `commit_execution`.
     pub async fn append(&self, transaction: &ResolvedTransaction) -> Result<bool> {
         let caches = &self.keeper.caches;
         let slot = caches.blocks.latest.load().slot + 1;
         let signature = transaction.signatures()[0];
+        let mut result = Ok(());
         if !caches.signatures.push(signature, None, slot) {
+            result = Err(TransactionError::AlreadyProcessed);
+        } else if !self.keeper.blocks().is_valid(transaction.recent_blockhash()) {
+            result = Err(TransactionError::BlockhashNotFound);
+            let status = TransactionStatus { result: result.clone(), slot };
+            caches.signatures.update(&signature, Some(status));
+        }
+        if result.is_err() {
+            let status = TransactionStatus { result, slot };
+            self.keeper.subscriptions.signatures.send_last(&signature, &status);
             return Ok(false);
         }
-        if !self.keeper.blocks().is_valid(transaction.recent_blockhash()) {
-            return Ok(false);
-        }
-        metrics::signature_entries(caches.signatures.len());
         let event = Event::Transaction(TransactionEntry {
             signature,
             payload: transaction.inner_data().clone(),
@@ -220,29 +236,29 @@ impl<'a> TransactionsAccessor<'a> {
                             logs: Arc::clone(&commit.logs),
                         })
                     });
-                    subs.logs.send(pubkey, logs, false);
+                    subs.logs.send(pubkey, logs);
                 }
                 if !acc.dirty() {
                     continue;
                 }
-                subs.accounts.send(pubkey, acc, false);
+                subs.accounts.send(pubkey, acc);
                 if subs.programs.contains(acc.owner()) {
                     let account = &(*pubkey, acc.clone());
-                    subs.programs.send(acc.owner(), account, false);
+                    subs.programs.send(acc.owner(), account);
                 }
             }
-            if subs.services.receiver_count() != 0 {
+            if subs.services.is_subscribed() {
                 while let Some(msg) = TlsManager::dequeue() {
-                    let _ = subs.services.send(msg);
+                    subs.services.blocking_send(msg);
                 }
             }
         }
-        if subs.transactions.receiver_count() != 0 {
-            let _ = subs.transactions.send(Arc::new(txn));
+        if subs.transactions.is_subscribed() {
+            subs.transactions.blocking_send(Arc::new(txn));
         }
         // Clear TLS unconditionally so unsent messages cannot leak into the next transaction.
         TlsManager::clear();
-        subs.signatures.send(&commit.signature, &commit.status, true);
+        subs.signatures.send(&commit.signature, &commit.status);
         self.keeper.caches.signatures.update(&commit.signature, Some(commit.status));
         Ok(())
     }
@@ -291,7 +307,7 @@ impl<'a> BlocksAccessor<'a> {
 
     /// Subscribes to newly committed slots.
     pub fn subscribe(&self) -> Receiver<Block> {
-        self.keeper.subscriptions.blocks.subscribe()
+        self.keeper.subscriptions.blocks.subscribe_sync(())
     }
 
     /// Publishes a completed block and advances block-derived account state.
@@ -302,8 +318,8 @@ impl<'a> BlocksAccessor<'a> {
         if !replay {
             self.keeper.ledger.appender.send(event)?;
             self.keeper.caches.blocks.push(block);
-            if self.keeper.subscriptions.blocks.receiver_count() != 0 {
-                let _ = self.keeper.subscriptions.blocks.send(block);
+            if self.keeper.subscriptions.blocks.contains(&()) {
+                self.keeper.subscriptions.blocks.send(&(), &block);
             }
         }
         self.keeper.accounts().update_sysvars(block)?;

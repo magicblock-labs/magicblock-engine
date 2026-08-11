@@ -30,6 +30,7 @@ oneshot = { workspace = true }
 parking_lot = { workspace = true }
 scc = { workspace = true }
 serde = { workspace = true }
+smallvec = { workspace = true }
 tar = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }

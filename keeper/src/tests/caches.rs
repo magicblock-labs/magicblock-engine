@@ -59,7 +59,7 @@ async fn account_load_release_paths_wake_waiters() {
 
             let waiter = tokio::spawn(async move { wait.wait().await });
             if commit {
-                load.complete(mode);
+                load.complete(mode).await;
             } else {
                 drop(load)
             }
