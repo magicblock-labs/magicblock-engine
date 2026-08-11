@@ -1,4 +1,3 @@
-use solana_account::{AccountMode, AccountSharedData, DirtyMarkers};
 use solana_svm_transaction::svm_message::SVMMessage;
 use solana_transaction_error::TransactionError;
 use std::sync::Arc;
@@ -19,7 +18,7 @@ impl ExecutedTransaction {
         };
         let logs = Arc::make_mut(self.execution_details.log_messages.get_or_insert_default());
         for (i, (pk, acc)) in accounts {
-            if !tx.is_writable(i) || writable(acc) || privileged {
+            if !tx.is_writable(i) || acc.mutable() || privileged {
                 continue;
             }
             let error = format!("Program log: Immutable account {pk} has been modified");
@@ -29,7 +28,7 @@ impl ExecutedTransaction {
         }
         // The payer is writable in Solana messages even when fees are disabled
         // here; reject it only if execution actually changed immutable state.
-        if payer.1.dirty() && !writable(&payer.1) {
+        if payer.1.dirty() && !payer.1.mutable() {
             let error = format!("Program log: ({}) Feepayer account is readonly", payer.0);
             logs.push(error);
             self.execution_details.status = Err(TransactionError::InvalidAccountForFee);
@@ -37,19 +36,6 @@ impl ExecutedTransaction {
         }
         true
     }
-}
-
-/// Returns whether an unprivileged transaction may leave the account modified.
-///
-/// Mutable modes are writable directly. `Transient` and `Closed` are writable
-/// only when the mode dirty marker records a lifecycle transition in the
-/// current transaction.
-fn writable(account: &AccountSharedData) -> bool {
-    if account.mutable() {
-        return true;
-    }
-    matches!(account.mode(), AccountMode::Transient | AccountMode::Closed)
-        && account.markers().contains(DirtyMarkers::MODE)
 }
 
 /// Returns true when every instruction is handled by the MagicRoot authority path.
