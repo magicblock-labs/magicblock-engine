@@ -28,7 +28,7 @@ use self::{
     pool::Executors,
 };
 use crate::{
-    ExecutorMessage, ExecutorReady, Result, SequencerMessage,
+    ExecutorMessage, ExecutorReady, ProcessorError, Result, SequencerMessage,
     executor::TransactionExecutor,
     metrics::{self, FailureKind, Operation},
     simulator::TransactionSimulator,
@@ -250,8 +250,16 @@ impl Sequencer {
     /// every executor of the new block boundary.
     async fn finalize(&mut self, mut block: Block) -> Result<()> {
         let _timer = metrics::time(Operation::FinalizeBlock);
-        block.parent = self.hasher.parent;
-        block.hash = self.hasher.finalize();
+        if self.replay && block.parent != self.hasher.parent {
+            return Err(ProcessorError::Internal(format!(
+                "replayed block {} has parent {:?}, expected {:?}",
+                block.slot, block.parent, self.hasher.parent
+            )));
+        }
+        if !self.replay {
+            block.parent = self.hasher.parent;
+            block.hash = self.hasher.finalize();
+        }
 
         // Block boundaries synchronize executors:
         // 1. sysvar writes bypass account locks and must be ordered deterministically

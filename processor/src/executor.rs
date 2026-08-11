@@ -125,6 +125,9 @@ impl TransactionExecutor {
                     let result = self.process(&mut batch);
                     if let Err(e) = result {
                         error.replace(e);
+                        drop(self.rx);
+                        let signal = ExecutorReady { id: self.id, batch };
+                        let _ = self.ready.blocking_send(signal);
                         break;
                     }
                     let signal = ExecutorReady { id: self.id, batch };
