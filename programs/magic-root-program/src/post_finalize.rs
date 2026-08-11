@@ -17,9 +17,11 @@ pub(crate) fn process(
         let index = instruction.get_index_of_instruction_account_in_transaction(i)?;
         let account = ctx.transaction_context.accounts().try_borrow(index)?;
         if instruction.is_instruction_account_writable(i)? && !account.mutable() {
+            let pubkey = ctx.transaction_context.get_key_of_account_at_index(index)?;
             ic_msg!(
                 ctx,
-                "MagicRoot: post-finalize rejected immutable writable account"
+                "MagicRoot: post-finalize rejected immutable writable account: {}",
+                pubkey,
             );
             return Err(InstructionError::Immutable);
         }
