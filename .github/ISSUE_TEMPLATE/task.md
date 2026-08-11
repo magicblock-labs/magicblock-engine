@@ -6,6 +6,12 @@ type: Task
 labels: []
 ---
 
+<!--
+Title: start with an imperative verb and describe the completed outcome in
+sentence case, without a category prefix or terminal punctuation. Example:
+`Configure full Rust CI workflow`
+-->
+
 ## Outcome
 <!-- What should be true when this task is complete? -->
 

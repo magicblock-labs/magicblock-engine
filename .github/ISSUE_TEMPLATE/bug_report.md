@@ -6,6 +6,12 @@ type: Bug
 labels: ["bug"]
 ---
 
+<!--
+Title: describe the observable failure or regression in sentence case, without a
+category prefix or terminal punctuation. Example: `Duplicate submissions can
+strand callers until deadline`
+-->
+
 ## Problem
 <!-- What happened? Include the relevant error or diagnostic evidence. -->
 
