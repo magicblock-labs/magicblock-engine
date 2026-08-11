@@ -267,10 +267,11 @@ impl ReplicationServer {
             let archive = File::open(path)?;
             let meta = SnapshotMetadata {
                 len: archive.metadata()?.len(),
-                // Successor archives carry the predecessor seal and checksum.
+                // Successor archives carry the predecessor seal metadata.
                 superblock: SuperblockSeal {
                     id: superblock.id.saturating_sub(1),
                     checksum: superblock.checksum(),
+                    transactions: superblock.transactions(),
                 },
             };
             return Ok(ReplicationAction::Snapshot { archive, meta });

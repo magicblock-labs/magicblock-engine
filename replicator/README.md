@@ -35,8 +35,10 @@ intermediate superblocks.
 Before each handshake, the follower quiesces execution, flushes queued ledger
 appends, and reports the resulting cursor. A received snapshot is written to the
 successor superblock directory and its seal is appended synchronously. The
-client then reports `RestartRequired`; keeper restores the staged snapshot on
-the next startup and engine replay advances it to the ledger tip.
+seal's cumulative transaction count replaces the follower ledger baseline,
+including when a nonempty follower falls behind retention. The client then
+reports `RestartRequired`; keeper restores the staged snapshot on the next
+startup and engine replay advances it to the ledger tip.
 
 Externally paced shutdown flushes the cursor before writing
 `CURRENT/volatile.db`. Internally paced origins instead append one reset marker

@@ -217,7 +217,7 @@ impl ReplicationClient {
         file.sync_all()?;
         drop(file);
         fs::rename(temporary, archive)?;
-        self.superblocks().append(meta.superblock)?;
+        self.superblocks().bootstrap(meta.superblock)?;
         info!(?meta, "replication snapshot staged");
         Ok(())
     }
