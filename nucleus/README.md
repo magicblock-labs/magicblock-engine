@@ -14,6 +14,7 @@ zero when the system clock predates the epoch. Its default feature set is empty.
 - `shutdown`: ordered cancellation, service handles, and termination reporting.
   The pacemaker quiesces execution and terminally syncs the ledger before the
   sequencer and appender tier; remaining backing services stop afterward.
+  Dropping the manager cancels every tier without waiting for services to stop.
 - `notifier`: the one-shot, non-resetting `EventNotifier` latch.
 - `ledger`: shared block-boundary metadata, including each block's locally
   computed hash and parent, plus snapshot checksum/transaction seals and

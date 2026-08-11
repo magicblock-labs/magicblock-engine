@@ -9,14 +9,11 @@
 
 use std::{
     error::Error,
+    io,
     time::{Duration, Instant},
 };
 
-use futures::{
-    StreamExt,
-    future::{BoxFuture, select},
-    stream::FuturesUnordered,
-};
+use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use oneshot::Sender;
 use tokio::time::timeout;
 use tracing::{error, info, warn};
@@ -95,9 +92,14 @@ impl ShutdownManager {
     /// Wait for an OS shutdown signal, internal cancellation, or service failure.
     pub async fn wait(&mut self) -> ShutdownReason {
         tokio::select! {
-            _ = graceful_shutdown() => {
-                info!("graceful shutdown has been requested");
-                ShutdownReason::Signalled
+            result = graceful_shutdown() => {
+                match result {
+                    Ok(()) => {
+                        info!("graceful shutdown has been requested");
+                        ShutdownReason::Signalled
+                    }
+                    Err(error) => ShutdownReason::Error(Box::new(error)),
+                }
             }
             Some((service, tier, reason)) = self.handles.next(), if !self.handles.is_empty() => {
                 self.pending(tier, -1);
@@ -180,17 +182,23 @@ impl ShutdownManager {
     }
 }
 
+impl Drop for ShutdownManager {
+    fn drop(&mut self) {
+        for token in &self.tokens {
+            token.cancel();
+        }
+    }
+}
+
 /// Waits for SIGTERM or Ctrl-C.
-async fn graceful_shutdown() {
+async fn graceful_shutdown() -> io::Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
-    let term = Box::pin(async {
-        let Ok(mut term) = signal(SignalKind::terminate()) else {
-            return;
-        };
-        term.recv().await;
-    });
-    let ctrlc = Box::pin(tokio::signal::ctrl_c());
-    select(term, ctrlc).await;
+    let mut term = signal(SignalKind::terminate())?;
+    tokio::select! {
+        signal = term.recv() => signal
+            .ok_or_else(|| io::Error::other("SIGTERM listener closed")),
+        result = tokio::signal::ctrl_c() => result,
+    }
 }
 
 /// Cancellation handle held by a running service.
