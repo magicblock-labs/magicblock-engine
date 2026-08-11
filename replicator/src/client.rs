@@ -18,7 +18,7 @@ use nucleus::{
 };
 use tokio::{
     runtime,
-    sync::{broadcast::Receiver, mpsc::Sender},
+    sync::mpsc::{Receiver, Sender},
     time,
 };
 use tracing::{error, info, warn};
@@ -117,7 +117,7 @@ impl ReplicationClient {
                 let (external, guard) = ExternalBlock::new(block);
                 self.pacer.send(external).await.map_err(EngineError::from)?;
                 let pending = time::timeout(IO_TIMEOUT, self.blocks.recv());
-                let observed = pending.await?.map_err(|_| ReplicationError::StreamClosed)?;
+                let observed = pending.await?.ok_or(ReplicationError::StreamClosed)?;
                 if block != observed {
                     // Mismatches are diagnostic until recovery policy is implemented.
                     error!(?block, ?observed, "replication block divergence detected");
