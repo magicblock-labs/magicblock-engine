@@ -447,12 +447,21 @@ const _: () = {
 };
 
 /// Backing storage for `AccountSharedData`.
-#[derive(PartialEq, Eq, Clone)]
+#[derive(PartialEq, Eq)]
 pub enum CoWAccount {
     /// Borrowed image, a view into static backing buffer.
     Borrowed(BorrowedAccount),
     /// Heap-owned image.
     Owned(OwnedAccount),
+}
+
+impl Clone for CoWAccount {
+    fn clone(&self) -> Self {
+        match self {
+            Borrowed(acc) => Self::Owned(acc.into()),
+            Owned(acc) => Self::Owned(acc.clone()),
+        }
+    }
 }
 
 impl CoWAccount {
@@ -617,7 +626,7 @@ impl AccountSeqLock {
     pub fn new(account: AccountSharedData) -> Self {
         let mut sequence = None;
         if let Borrowed(ref acc) = account.cow {
-            sequence.replace(acc.sequence());
+            sequence.replace(acc.version);
         }
         Self { account, sequence }
     }
@@ -644,7 +653,7 @@ impl AccountSeqLock {
                     // SAFETY: a changed sequence means the active image may have
                     // moved, so the borrowed view must be repointed before retrying.
                     unsafe { acc.reset() };
-                    self.sequence = Some(post);
+                    self.sequence = Some(acc.version);
                 }
                 Owned(_) => return result,
             }
