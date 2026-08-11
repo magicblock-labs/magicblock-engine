@@ -157,7 +157,8 @@ impl Keeper {
         // is only run when there're no concurrent mutations taking place
         let snapshot = unsafe { self.accountsdb.snapshot(head) }?;
         let checksum = self.accountsdb.checksum();
-        let seal = SuperblockSeal { id: head, checksum };
+        let transactions = self.accountsdb.transactions();
+        let seal = SuperblockSeal { id: head, checksum, transactions };
         self.superblocks().append(seal)?;
         let dir = Superblock::init_dir(&self.ledger.directory, next)?;
         self.archive(snapshot, dir)?;

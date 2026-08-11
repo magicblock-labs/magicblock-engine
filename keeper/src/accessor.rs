@@ -339,6 +339,7 @@ impl SuperblockAccessor<'_> {
         SuperblockSeal {
             id: self.keeper.accountsdb.superblock(),
             checksum: self.keeper.accountsdb.checksum(),
+            transactions: self.keeper.accountsdb.transactions(),
         }
     }
 
@@ -356,6 +357,13 @@ impl SuperblockAccessor<'_> {
     /// rotating to the next. Used by a follower applying a seal received from the leader.
     pub fn append(&self, seal: SuperblockSeal) -> Result<()> {
         let event = Event::Superblock(seal);
+        self.keeper.ledger.appender.send(event)?;
+        self.sync(false)
+    }
+
+    /// Installs a snapshot seal and adopts its cumulative transaction count.
+    pub fn bootstrap(&self, seal: SuperblockSeal) -> Result<()> {
+        let event = Event::Bootstrap(seal);
         self.keeper.ledger.appender.send(event)?;
         self.sync(false)
     }
