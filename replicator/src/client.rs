@@ -6,7 +6,7 @@ use std::{
 };
 
 use derive_more::Deref;
-use engine::{Engine, EngineError, pacemaker::ExternalBlock};
+use engine::{Engine, EngineError, ReplayError, pacemaker::ExternalBlock};
 use ledger::{
     Superblock,
     schema::{Block, OwnedBlockstoreEntry, blockstore},
@@ -128,9 +128,9 @@ impl ReplicationClient {
                 // The preceding boundary finalized local state; this seal only validates it.
                 let observed = self.superblocks().sealed();
                 if observed != expected {
-                    // Mismatches are diagnostic until recovery policy is implemented.
                     error!(?expected, ?observed, "replication state mismatch detected");
                     metrics::client_state_mismatch();
+                    return Err(EngineError::Replay(ReplayError::StateMismatch).into());
                 }
             }
             entry => self.engine.replay(entry).await?,
