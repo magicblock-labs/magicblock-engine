@@ -5,8 +5,8 @@ use solana_svm_log_collector::ic_msg;
 
 /// Runs the post-finalize follow-up instructions, invoking each action via CPI
 /// while vouching for exactly the signers that action itself declares, then
-/// rejects the whole instruction if an action left an account modified that this
-/// engine is not authoritative for.
+/// rejects the whole instruction if an account exposed as writable did not end
+/// in a mode this engine may mutate.
 pub(crate) fn process(
     ctx: &mut InvokeContext<'_, '_>,
     actions: Vec<Instruction>,
@@ -26,10 +26,10 @@ pub(crate) fn process(
     for i in 0..count {
         let index = instruction.get_index_of_instruction_account_in_transaction(i)?;
         let account = ctx.transaction_context.accounts().try_borrow(index)?;
-        if account.dirty() && !account.mutable() {
+        if instruction.is_instruction_account_writable(i)? && !account.mutable() {
             ic_msg!(
                 ctx,
-                "MagicRoot: post-finalize modified immutable account: {}",
+                "MagicRoot: post-finalize rejected immutable writable account: {}",
                 ctx.transaction_context.get_key_of_account_at_index(index)?
             );
             return Err(InstructionError::Immutable);
