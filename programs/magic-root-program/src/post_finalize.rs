@@ -1,4 +1,3 @@
-use solana_account::{AccountMode, AccountSharedData, DirtyMarkers};
 use solana_instruction::Instruction;
 use solana_instruction_error::InstructionError;
 use solana_program_runtime::invoke_context::InvokeContext;
@@ -27,27 +26,14 @@ pub(crate) fn process(
     for i in 0..count {
         let index = instruction.get_index_of_instruction_account_in_transaction(i)?;
         let account = ctx.transaction_context.accounts().try_borrow(index)?;
-        if account.dirty() && !writable(&account) {
+        if account.dirty() && !account.mutable() {
             ic_msg!(
                 ctx,
-                "MagicRoot: post-finalize modified immutable account {}",
+                "MagicRoot: post-finalize modified immutable account: {}",
                 ctx.transaction_context.get_key_of_account_at_index(index)?
             );
             return Err(InstructionError::Immutable);
         }
     }
     Ok(())
-}
-
-/// Returns whether an action may leave the account modified.
-///
-/// Kept in step with the SVM's `access_permissions`: mutable modes are writable
-/// directly, and `Transient`/`Closed` are writable only when the mode dirty
-/// marker records a lifecycle transition in the current transaction.
-fn writable(account: &AccountSharedData) -> bool {
-    if account.mutable() {
-        return true;
-    }
-    matches!(account.mode(), AccountMode::Transient | AccountMode::Closed)
-        && account.markers().contains(DirtyMarkers::MODE)
 }
