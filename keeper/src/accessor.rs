@@ -317,11 +317,11 @@ impl<'a> BlocksAccessor<'a> {
         let event = Event::Block(block);
         if !replay {
             self.keeper.ledger.appender.send(event)?;
-            self.keeper.caches.blocks.push(block);
             if self.keeper.subscriptions.blocks.contains(&()) {
                 self.keeper.subscriptions.blocks.send(&(), &block);
             }
         }
+        self.keeper.caches.blocks.push(block);
         self.keeper.accounts().update_sysvars(block)?;
         self.keeper.accounts().set_slot(block.slot)?;
         Ok(())

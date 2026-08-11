@@ -25,8 +25,11 @@ use solana_feature_gate_interface::Feature;
 use solana_program_runtime::invoke_context::BuiltinFunctionWithContext;
 use solana_pubkey::Pubkey;
 use solana_sdk_ids::sysvar;
+#[allow(deprecated)]
+use solana_sysvar::fees::Fees;
 use solana_sysvar::{
     clock::Clock,
+    epoch_rewards::EpochRewards,
     epoch_schedule::EpochSchedule,
     last_restart_slot::LastRestartSlot,
     rent::Rent,
@@ -215,6 +218,11 @@ impl KeeperBuilder {
         };
         accounts.push((Clock::id(), self.account(&clock, &sysvar::ID)?.build()));
         accounts.push((Rent::id(), self.account(&self.rent, &sysvar::ID)?.build()));
+        #[allow(deprecated)]
+        accounts.push((
+            Fees::id(),
+            self.account(&Fees::default(), &sysvar::ID)?.build(),
+        ));
         accounts.push((
             sysvar::last_restart_slot::id(),
             self.account(&LastRestartSlot::default(), &sysvar::ID)?.build(),
@@ -226,6 +234,10 @@ impl KeeperBuilder {
         accounts.push((
             EpochSchedule::id(),
             self.account(&EpochSchedule::default(), &sysvar::ID)?.build(),
+        ));
+        accounts.push((
+            EpochRewards::id(),
+            self.account(&EpochRewards::default(), &sysvar::ID)?.build(),
         ));
         Ok(block)
     }
