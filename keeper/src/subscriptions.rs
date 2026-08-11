@@ -266,7 +266,7 @@ pub(crate) struct Subscriptions {
     pub(crate) signatures: MulticastOneshot<Signature, TransactionStatus>,
     /// Log notifications keyed by mentioned program or account pubkey.
     pub(crate) logs: Multicast<Pubkey, Arc<TransactionLogs>>,
-    /// Newly committed slots.
+    /// Newly committed blocks.
     pub(crate) blocks: Multicast<(), Block>,
     /// All committed transactions for the sole stream consumer.
     pub(crate) transactions: Unicast<Arc<FullTransaction>>,

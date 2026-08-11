@@ -70,7 +70,7 @@ impl MetricOperation for Operation {
     }
 }
 
-/// Registers keeper metrics once and seeds gauges from current caches.
+/// Registers keeper metrics once in the default Prometheus registry.
 pub(crate) fn init() {
     METRICS.get_or_init(Default::default);
 }
