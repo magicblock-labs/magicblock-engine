@@ -82,9 +82,9 @@ impl TransactionAccessor<'_> {
         }
         let signature = self.transaction.signatures()[0];
         let msg = SequencerMessage::Transaction(self.transaction);
-        let mut rx = self.engine.transactions().subscribe_signature(signature).await;
+        let rx = self.engine.transactions().subscribe_signature(signature).await;
         self.engine.sequencer.send(msg).await?;
-        let status = time::timeout(EXECUTION_TIMEOUT, rx.recv())
+        let status = time::timeout(EXECUTION_TIMEOUT, rx)
             .await
             .map_err(|_| EngineError::TransactionTimeout)?
             .map_err(|e| e.to_string())?;

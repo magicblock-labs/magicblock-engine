@@ -296,20 +296,23 @@ async fn submit(
 No polling loops — subscribe to what you care about and the engine pushes
 updates as they happen.
 
-Keeper accessors expose Tokio broadcast receivers for live state:
+Keeper accessors expose dedicated Tokio channels for live state:
 
 ```rust
 let mut account_updates = engine.accounts().subscribe(key).await;
 let mut blocks = engine.blocks().subscribe();
 
-let account = account_updates.recv().await?;
-let block = blocks.recv().await?;
+let account = account_updates.recv().await.expect("account stream is open");
+let block = blocks.recv().await.expect("block stream is open");
 ```
 
 Related accessors subscribe to program-owned accounts, cache evictions,
 snapshot completion, transaction status, logs, processed transactions, and
-service messages. Broadcast consumers must handle `Lagged` when they fall
-behind and `Closed` during shutdown; retained reads are available separately.
+service messages. Signatures use terminal oneshot channels; other multicast
+streams give each consumer a bounded queue and disconnect a consumer that falls
+behind. Processed transactions, service messages, and cache evictions each have
+one process-lifetime consumer and apply producer backpressure when its queue is
+full.
 
 ---
 
