@@ -46,4 +46,6 @@ pub struct SuperblockSeal {
     pub id: u64,
     /// Checksum of accountsdb at the moment the superblock was sealed.
     pub checksum: u64,
+    /// Total committed transactions represented by the sealed accountsdb snapshot.
+    pub transactions: u64,
 }

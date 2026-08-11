@@ -16,7 +16,8 @@ zero when the system clock predates the epoch. Its default feature set is empty.
   sequencer and appender tier; remaining backing services stop afterward.
 - `notifier`: the one-shot, non-resetting `EventNotifier` latch.
 - `ledger`: shared block-boundary metadata, including each block's locally
-  computed hash and parent, plus `SuperblockSeal` and blockstore positions.
+  computed hash and parent, plus snapshot checksum/transaction seals and
+  blockstore positions.
 - `metrics`: Prometheus metric construction, `engine_`-namespaced registration,
   labels, and timers.
 - `service`: the `metrics` and `shutdown` feature bundle.
