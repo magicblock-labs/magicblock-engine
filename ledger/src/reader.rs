@@ -365,14 +365,18 @@ impl LedgerReader {
             let mut signatures = Vec::new();
             while cursor.position() < len && !request.cancelled() {
                 let entry = blockstore::decode(&mut cursor).map_err(Into::<Error>::into)?;
-                let BlockstoreEntry::Transaction(transaction) = entry else {
-                    error!(
-                        superblock = superblock.id,
-                        slot, "ledger blockstore includes invalid block entries"
-                    );
-                    return Err(LedgerError::Corruption(
-                        "blockstore includes invalid block entries",
-                    ));
+                let transaction = match entry {
+                    BlockstoreEntry::Transaction(transaction) => transaction,
+                    BlockstoreEntry::Reset(_) => continue,
+                    _ => {
+                        error!(
+                            superblock = superblock.id,
+                            slot, "ledger blockstore includes invalid block entries"
+                        );
+                        return Err(LedgerError::Corruption(
+                            "blockstore includes invalid block entries",
+                        ));
+                    }
                 };
                 if matches!(details, BlockDetails::Transactions) {
                     transactions.push(transaction);
