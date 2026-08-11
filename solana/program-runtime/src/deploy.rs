@@ -94,8 +94,9 @@ macro_rules! deploy_program {
             $invoke_context.get_log_collector(),
             $invoke_context.program_cache_for_tx_batch,
             $invoke_context
-                .get_program_runtime_environments_for_deployment()
-                .get_env_for_deployment()
+                .environment_config
+                .program_runtime_environments_for_execution
+                .get_env_for_execution()
                 .clone(),
             $program_id,
             $programdata,

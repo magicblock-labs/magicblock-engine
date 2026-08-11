@@ -24,6 +24,7 @@ pub struct SysvarCache {
     // Full account data, including any trailing zero bytes.
     clock: Option<Vec<u8>>,
     epoch_schedule: Option<Vec<u8>>,
+    epoch_rewards: Option<Vec<u8>>,
     rent: Option<Vec<u8>>,
     slot_hashes: Option<Vec<u8>>,
     last_restart_slot: Option<Vec<u8>>,
@@ -31,6 +32,8 @@ pub struct SysvarCache {
     // Object representations of large sysvars used by native builtins.
     slot_hashes_obj: Option<SlotHashes>,
 
+    #[allow(deprecated)]
+    fees: Option<Fees>,
     #[allow(deprecated)]
     recent_blockhashes: Option<RecentBlockhashes>,
 }
@@ -42,6 +45,8 @@ impl SysvarCache {
             &self.clock
         } else if EpochSchedule::check_id(sysvar_id) {
             &self.epoch_schedule
+        } else if EpochRewards::check_id(sysvar_id) {
+            &self.epoch_rewards
         } else if Rent::check_id(sysvar_id) {
             &self.rent
         } else if SlotHashes::check_id(sysvar_id) {
@@ -107,20 +112,20 @@ impl SysvarCache {
             .map(Arc::new)
     }
 
-    /// Returns the (deprecated) fees sysvar; this engine always reports defaults.
+    /// Returns the cached deprecated fees sysvar.
     #[allow(deprecated)]
     pub fn get_fees(&self) -> Result<Arc<Fees>, InstructionError> {
-        Ok(Arc::new(Default::default()))
+        self.fees.clone().map(Arc::new).ok_or(InstructionError::UnsupportedSysvar)
     }
 
-    /// Returns the epoch-schedule sysvar; this engine always reports defaults.
+    /// Typed epoch-schedule access is unsupported; use the serialized sysvar cache.
     pub fn get_epoch_schedule(&self) -> Result<Arc<EpochSchedule>, InstructionError> {
-        Ok(Arc::new(Default::default()))
+        Err(InstructionError::UnsupportedSysvar)
     }
 
-    /// Returns the epoch-rewards sysvar; this engine always reports defaults.
+    /// Typed epoch-rewards access is unsupported; use the serialized sysvar cache.
     pub fn get_epoch_rewards(&self) -> Result<Arc<EpochRewards>, InstructionError> {
-        Ok(Arc::new(Default::default()))
+        Err(InstructionError::UnsupportedSysvar)
     }
 
     /// Fills missing sysvars by asking the caller for serialized account data.
@@ -140,6 +145,14 @@ impl SysvarCache {
             get_account_data(&EpochSchedule::id(), &mut |data: &[u8]| {
                 if bincode::deserialize::<EpochSchedule>(data).is_ok() {
                     self.epoch_schedule = Some(data.to_vec());
+                }
+            });
+        }
+
+        if self.epoch_rewards.is_none() {
+            get_account_data(&EpochRewards::id(), &mut |data: &[u8]| {
+                if bincode::deserialize::<EpochRewards>(data).is_ok() {
+                    self.epoch_rewards = Some(data.to_vec());
                 }
             });
         }
@@ -165,6 +178,15 @@ impl SysvarCache {
             get_account_data(&LastRestartSlot::id(), &mut |data: &[u8]| {
                 if bincode::deserialize::<LastRestartSlot>(data).is_ok() {
                     self.last_restart_slot = Some(data.to_vec());
+                }
+            });
+        }
+
+        #[allow(deprecated)]
+        if self.fees.is_none() {
+            get_account_data(&Fees::id(), &mut |data: &[u8]| {
+                if let Ok(fees) = bincode::deserialize(data) {
+                    self.fees = Some(fees);
                 }
             });
         }
