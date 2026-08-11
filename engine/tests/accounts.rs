@@ -2,7 +2,7 @@
 //! exposed by `AccountAccessor`. This path is untested below the engine: it needs
 //! the always-on MagicRoot builtin plus the executor's per-thread authority
 //! (MagicRoot authorizes the transaction's fee payer against it). Asserts the
-//! create/patch/update/delete round-trip and the sponsor-balance invariant, and
+//! create/update/delete round-trip and the sponsor-balance invariant, and
 //! that post-finalize actions actually run.
 #![cfg(test)]
 
@@ -10,9 +10,7 @@ use engine::{Engine, EngineError, testkit::TestEngine};
 use keeper::testkit::{
     V42_ID, load_v42_data, load_v42_lamports, patterned_bytes, store_v42, v42_builder,
 };
-use solana_account::{
-    AccountBuilder, AccountFieldPatch, AccountMode, OwnedAccount, ReadableAccount,
-};
+use solana_account::{AccountBuilder, AccountMode, OwnedAccount, ReadableAccount};
 use solana_instruction_error::InstructionError;
 use solana_pubkey::Pubkey;
 use solana_system_interface::MAX_PERMITTED_DATA_LENGTH;
@@ -88,8 +86,8 @@ fn assert_invalid_mode_transition(error: EngineError) {
 
 // The full lifecycle. `create` materializes a fresh account by patching every
 // non-flag field, balancing lamport patches against the authority, then
-// finalizing its flags; `patch` mutates individual fields in place;
-// `update` overwrites an existing account or materializes a fresh key; and
+// finalizing its flags; `update` overwrites an existing account or materializes
+// a fresh key; and
 // `delete` closes it. Mutations here keep the balance constant after creation.
 #[tokio::test(flavor = "multi_thread")]
 async fn account_crud_lifecycle() {
@@ -120,30 +118,8 @@ async fn account_crud_lifecycle() {
         "the lamport patch sponsors the created balance from the authority"
     );
 
-    // patch the data, growing the buffer (exercises the borrowed-image
-    // copy-on-write promotion), leaving other fields untouched.
-    te.account(key)
-        .patch(vec![AccountFieldPatch::DataAt {
-            offset: 0,
-            data: vec![9; 16],
-        }])
-        .await
-        .unwrap();
-    let acc = te.get_account(key).expect("still exists");
-    assert_eq!(acc.data(), &[9; 16]);
-    assert_eq!(acc.lamports(), LAMPORTS, "patch leaves lamports untouched");
-
-    // patch a different field (owner).
-    let new_owner = Pubkey::new_unique();
-    te.account(key).patch(vec![AccountFieldPatch::Owner(new_owner)]).await.unwrap();
-    assert_eq!(
-        te.get_account(key).expect("still exists").owner(),
-        &new_owner
-    );
-
     // update overwrites the existing account in place: same-length data (the
     // patch sequence replaces the exact data length) and identical lamports.
-    // The owner reverting to `owner` proves the earlier patch was overwritten.
     // Read-only accounts remain replaceable after finalization.
     te.account(key)
         .update(account(owner, vec![5; 16], AccountMode::ReadOnly, 11))

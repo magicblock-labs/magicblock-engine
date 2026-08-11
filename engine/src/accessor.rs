@@ -5,7 +5,7 @@ use std::{sync::atomic::Ordering, time::Duration};
 use keeper::{ExecutionRecord, TransactionView};
 use magic_root_interface::MagicRootInstruction;
 use processor::{SequencerMessage, Simulation, SimulatorMessage};
-use solana_account::{AccountFieldPatch, OwnedAccount};
+use solana_account::OwnedAccount;
 use solana_instruction::Instruction;
 use solana_pubkey::Pubkey;
 use solana_transaction::TransactionResult;
@@ -46,16 +46,6 @@ impl AccountAccessor<'_> {
     /// Updates the account by patching in every field of `account`
     pub async fn update(&self, acc: impl Into<OwnedAccount>) -> Result<()> {
         let instructions = MagicRootInstruction::compose_account(self.pubkey, acc.into())?;
-        self.execute(instructions).await
-    }
-
-    /// Applies the given field patches to the account.
-    pub async fn patch(&self, patches: Vec<AccountFieldPatch>) -> Result<()> {
-        let mut instructions = Vec::with_capacity(patches.len());
-        for patch in patches {
-            let ix = MagicRootInstruction::Patch(patch).compose(self.pubkey)?;
-            instructions.push(ix);
-        }
         self.execute(instructions).await
     }
 

@@ -201,12 +201,12 @@ copy from the other backend, so there is only ever one live copy. `Transient`
 accounts remain authoritative and persisted even though runtime code cannot
 mutate them.
 
-To change accounts directly, use `Engine::account(pubkey)`. `create`, `update`,
-`patch`, and `delete` each run as one signed, committed transaction and require
-the local signer to match the engine authority.
+To replace accounts directly, use `Engine::account(pubkey)`. `create`, `update`,
+and `delete` each run as one signed, committed transaction and require the local
+signer to match the engine authority.
 
 ```rust
-use solana_account::{AccountBuilder, AccountFieldPatch, AccountMode};
+use solana_account::{AccountBuilder, AccountMode};
 use solana_pubkey::Pubkey;
 
 let key = Pubkey::new_unique();
@@ -220,15 +220,6 @@ let account = AccountBuilder::default()
     .build();
 
 engine.account(key).create(account, None).await?;
-let current = engine.accounts().loader().load(&key)?;
-
-engine
-    .account(key)
-    .patch(vec![AccountFieldPatch::DataAt {
-        offset: 0,
-        data: vec![9; 4],
-    }])
-    .await?;
 
 let replacement = AccountBuilder::default()
     .lamports(2_000_000)
