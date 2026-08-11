@@ -130,7 +130,7 @@ impl ReplicationClient {
                 if observed != expected {
                     error!(?expected, ?observed, "replication state mismatch detected");
                     metrics::client_state_mismatch();
-                    return Err(EngineError::Replay(ReplayError::StateMismatch).into());
+                    Err(EngineError::Replay(ReplayError::StateMismatch))?;
                 }
             }
             entry => self.engine.replay(entry).await?,

@@ -346,7 +346,8 @@ async fn streams_and_resumes_without_duplicate_application() {
     let expected = commit_increment(&mut leader, state).await;
     await_replication(&mut positions, &follower, expected, state, 4).await;
 
-    // Resume after an outage from the durable cursor; replaying one entry yields 6.
+    // Resume after an outage from the durable cursor. Exactly-once application
+    // yields 5; applying the same entry twice would yield 6.
     first_dispatcher.terminate().await;
     let expected = commit_increment(&mut leader, state).await;
     let mut second_dispatcher = dispatcher(upstream, &leader, &[follower_identity]).await;
