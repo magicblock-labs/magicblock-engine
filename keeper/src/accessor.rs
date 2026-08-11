@@ -163,7 +163,7 @@ impl<'a> TransactionsAccessor<'a> {
     /// Subscribes as the sole receiver of all processed transactions, including failures.
     ///
     /// Returns an error if the process-lifetime transaction receiver was already registered.
-    pub fn subscribe_processed(&self) -> Result<Receiver<Arc<FullTransaction>>> {
+    pub fn subscribe_processed(&self) -> Result<Receiver<FullTransaction>> {
         self.keeper.subscriptions.transactions.subscribe()
     }
 
@@ -247,15 +247,11 @@ impl<'a> TransactionsAccessor<'a> {
                     subs.programs.send(acc.owner(), account);
                 }
             }
-            if subs.services.is_subscribed() {
-                while let Some(msg) = TlsManager::dequeue() {
-                    subs.services.blocking_send(msg);
-                }
+            while let Some(msg) = TlsManager::dequeue() {
+                subs.services.blocking_send(msg);
             }
         }
-        if subs.transactions.is_subscribed() {
-            subs.transactions.blocking_send(Arc::new(txn));
-        }
+        subs.transactions.blocking_send(txn);
         // Clear TLS unconditionally so unsent messages cannot leak into the next transaction.
         TlsManager::clear();
         subs.signatures.send(&commit.signature, &commit.status);
@@ -317,9 +313,7 @@ impl<'a> BlocksAccessor<'a> {
         let event = Event::Block(block);
         if !replay {
             self.keeper.ledger.appender.send(event)?;
-            if self.keeper.subscriptions.blocks.contains(&()) {
-                self.keeper.subscriptions.blocks.send(&(), &block);
-            }
+            self.keeper.subscriptions.blocks.send(&(), &block);
         }
         self.keeper.caches.blocks.push(block);
         self.keeper.accounts().update_sysvars(block)?;

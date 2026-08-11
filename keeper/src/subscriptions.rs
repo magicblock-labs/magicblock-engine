@@ -62,6 +62,54 @@ impl Subscription {
     }
 }
 
+/// Live notification channels owned by keeper.
+pub(crate) struct Subscriptions {
+    /// Account updates keyed by account pubkey.
+    pub(crate) accounts: Multicast<Pubkey, AccountSharedData>,
+    /// Program account updates keyed by owner pubkey.
+    pub(crate) programs: Multicast<Pubkey, AccountEntry>,
+    /// Signature status updates keyed by transaction signature.
+    pub(crate) signatures: MulticastOneshot<Signature, TransactionStatus>,
+    /// Log notifications keyed by mentioned program or account pubkey.
+    pub(crate) logs: Multicast<Pubkey, Arc<TransactionLogs>>,
+    /// Newly committed blocks.
+    pub(crate) blocks: Multicast<(), Block>,
+    /// All committed transactions for the sole stream consumer.
+    pub(crate) transactions: Unicast<FullTransaction>,
+    /// Accountsdb snapshot archive completions.
+    pub(crate) snapshots: Multicast<(), PathBuf>,
+    /// Encoded service messages for the sole stream consumer.
+    pub(crate) services: Unicast<EncodedMessage>,
+}
+
+impl Subscriptions {
+    /// Builds subscription channels and starts cleanup for idle keyed entries.
+    pub(crate) fn new(shutdown: &mut ShutdownManager) -> Arc<Self> {
+        let subscriptions = Arc::new(Self {
+            accounts: Multicast::new(8, Subscription::Accounts),
+            programs: Multicast::new(16, Subscription::Programs),
+            signatures: Default::default(),
+            logs: Multicast::new(8, Subscription::Logs),
+            blocks: Multicast::new(32, Subscription::Blocks),
+            transactions: Unicast::new(1024, Subscription::Transactions),
+            snapshots: Multicast::new(4, Subscription::Snapshots),
+            services: Unicast::new(64, Subscription::Services),
+        });
+        let shutdown = shutdown.handle(Service::SubscriptionsCleanup);
+        tokio::spawn(cleanup(subscriptions.clone(), shutdown));
+        subscriptions
+    }
+
+    async fn cleanup(&self) {
+        self.accounts.cleanup().await;
+        self.programs.cleanup().await;
+        self.signatures.cleanup().await;
+        self.logs.cleanup().await;
+        self.blocks.cleanup().await;
+        self.snapshots.cleanup().await;
+    }
+}
+
 /// Composite log notification sent to log subscribers.
 #[derive(Clone)]
 pub struct TransactionLogs {
@@ -96,11 +144,6 @@ impl<V> Unicast<V> {
             .set(tx)
             .map_err(|_| KeeperError::SubscriptionRegistered(self.subscription.label()))?;
         Ok(rx)
-    }
-
-    /// Returns whether the stream's process-lifetime receiver is still open.
-    pub(crate) fn is_subscribed(&self) -> bool {
-        self.sender.get().is_some_and(|sender| !sender.is_closed())
     }
 
     /// Sends asynchronously, waiting until the receiver has capacity.
@@ -253,54 +296,6 @@ where
         for sender in senders {
             let _ = sender.send(value.clone());
         }
-    }
-}
-
-/// Live notification channels owned by keeper.
-pub(crate) struct Subscriptions {
-    /// Account updates keyed by account pubkey.
-    pub(crate) accounts: Multicast<Pubkey, AccountSharedData>,
-    /// Program account updates keyed by owner pubkey.
-    pub(crate) programs: Multicast<Pubkey, AccountEntry>,
-    /// Signature status updates keyed by transaction signature.
-    pub(crate) signatures: MulticastOneshot<Signature, TransactionStatus>,
-    /// Log notifications keyed by mentioned program or account pubkey.
-    pub(crate) logs: Multicast<Pubkey, Arc<TransactionLogs>>,
-    /// Newly committed blocks.
-    pub(crate) blocks: Multicast<(), Block>,
-    /// All committed transactions for the sole stream consumer.
-    pub(crate) transactions: Unicast<Arc<FullTransaction>>,
-    /// Accountsdb snapshot archive completions.
-    pub(crate) snapshots: Multicast<(), PathBuf>,
-    /// Encoded service messages for the sole stream consumer.
-    pub(crate) services: Unicast<EncodedMessage>,
-}
-
-impl Subscriptions {
-    /// Builds subscription channels and starts cleanup for idle keyed entries.
-    pub(crate) fn new(shutdown: &mut ShutdownManager) -> Arc<Self> {
-        let subscriptions = Arc::new(Self {
-            accounts: Multicast::new(8, Subscription::Accounts),
-            programs: Multicast::new(16, Subscription::Programs),
-            signatures: Default::default(),
-            logs: Multicast::new(8, Subscription::Logs),
-            blocks: Multicast::new(32, Subscription::Blocks),
-            transactions: Unicast::new(1024, Subscription::Transactions),
-            snapshots: Multicast::new(4, Subscription::Snapshots),
-            services: Unicast::new(64, Subscription::Services),
-        });
-        let shutdown = shutdown.handle(Service::SubscriptionsCleanup);
-        tokio::spawn(cleanup(subscriptions.clone(), shutdown));
-        subscriptions
-    }
-
-    async fn cleanup(&self) {
-        self.accounts.cleanup().await;
-        self.programs.cleanup().await;
-        self.signatures.cleanup().await;
-        self.logs.cleanup().await;
-        self.blocks.cleanup().await;
-        self.snapshots.cleanup().await;
     }
 }
 
