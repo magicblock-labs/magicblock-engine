@@ -546,7 +546,7 @@ mod tests {
             ..solana_message::v1::Message::default()
         };
 
-        let serialized = message.serialize();
+        let serialized = solana_message::v1::serialize(&message);
 
         let mut offset = 42; // instruction headers start after the V1 prefix for no config, 0 addresses
         let instructions_frame =
