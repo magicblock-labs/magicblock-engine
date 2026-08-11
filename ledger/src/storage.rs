@@ -270,6 +270,8 @@ pub(crate) struct SuperblockMeta {
     pub(crate) range: BlockRange,
     /// Accountsdb snapshot checksum carried over from the seal that opened this superblock.
     pub(crate) checksum: AtomicU64,
+    /// Transaction count carried over from the seal that opened this superblock.
+    pub(crate) transactions: AtomicU64,
 }
 
 /// Durable append cursors for superblock data files.

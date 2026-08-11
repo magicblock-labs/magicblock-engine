@@ -257,6 +257,11 @@ impl Superblock {
         self.meta.checksum.load(Acquire)
     }
 
+    /// Transaction count recorded by the seal that opened this superblock.
+    pub fn transactions(&self) -> u64 {
+        self.meta.transactions.load(Acquire)
+    }
+
     /// Opens a superblock directory, creating its data files when needed.
     fn open(root: &Path, id: u64) -> Result<Arc<Self>> {
         let directory = Self::init_dir(root, id)?;

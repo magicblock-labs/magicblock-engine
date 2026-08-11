@@ -121,8 +121,9 @@ impl LedgerAppender {
         let _timer = metrics::time(Operation::Rotate);
         let head = seal.id + 1;
         let superblock = Superblock::open(&self.ledger.directory, head)?;
-        // Seal N opens N+1, which stores N's snapshot archive and checksum.
+        // Seal N opens N+1, which stores N's snapshot archive and seal metadata.
         superblock.meta.checksum.store(seal.checksum, Release);
+        superblock.meta.transactions.store(seal.transactions, Release);
         self.writer = SuperblockWriter::new(&superblock.directory)?;
         self.ledger.meta.head.store(head, Release);
         self.ledger.meta.superblocks.fetch_add(1, Release);
@@ -153,8 +154,11 @@ impl LedgerAppender {
                 self.write_block(block, env, txn)?;
             }
             Event::Superblock(seal) => {
-                self.write_superblock(seal, txn)?;
-                self.rotate(seal)?;
+                self.seal(seal, false, txn)?;
+                return Ok(Some(Epoch::Rotate));
+            }
+            Event::Bootstrap(seal) => {
+                self.seal(seal, true, txn)?;
                 return Ok(Some(Epoch::Rotate));
             }
             Event::Reset(slot) => {
@@ -168,6 +172,16 @@ impl LedgerAppender {
             }
         }
         Ok(None)
+    }
+
+    /// Seals the active superblock, optionally adopting a restored snapshot's
+    /// cumulative transaction count before publishing the successor metadata.
+    fn seal(&mut self, seal: SuperblockSeal, bootstrap: bool, txn: OptRwTxn<'_, '_>) -> Result<()> {
+        self.write_superblock(seal, txn)?;
+        if bootstrap {
+            self.ledger.meta.transactions.store(seal.transactions, Release);
+        }
+        self.rotate(seal)
     }
 
     /// Writes a raw transaction and keeps it pending until execution arrives.

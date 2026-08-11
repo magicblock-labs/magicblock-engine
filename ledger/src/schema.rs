@@ -71,6 +71,8 @@ pub enum Event {
     Block(Block),
     /// Seal the active superblock and rotate to a fresh directory.
     Superblock(SuperblockSeal),
+    /// Install a snapshot seal and adopt its cumulative transaction count.
+    Bootstrap(SuperblockSeal),
     /// Volatile accounts were discarded at `Slot` after upstream synchronization was lost.
     Reset(Slot),
     /// Flush pending appends and optionally stop the appender after acknowledging.

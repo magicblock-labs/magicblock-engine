@@ -27,7 +27,9 @@ account indexes inserted. Every durable sync flushes data and indexes, publishes
 durable file cursors, transfers the accumulated transaction count, and flushes
 ledger metadata. When the sync carries a block boundary, it also publishes that
 block's slot and increments the block count. A seal finalizes the active files
-and rotates to the next superblock.
+and rotates to the next superblock. The successor metadata retains the sealed
+snapshot's checksum and cumulative transaction count so it remains
+self-describing after retention removes the preceding blockstore.
 
 Reader requests run on a worker pool. Each worker owns its decode buffers and
 reads only through published cursors. The optional `testkit` feature reduces

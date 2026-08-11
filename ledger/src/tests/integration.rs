@@ -97,7 +97,7 @@ fn recorded(sig: Signature, payload: Arc<Vec<u8>>, slot: Slot) -> [Event; 2] {
 
 /// Ends superblock `id` and rotates the writer to the next one.
 fn seal(id: u64) -> Event {
-    Event::Superblock(SuperblockSeal { checksum: 0, id })
+    Event::Superblock(SuperblockSeal { checksum: 0, id, transactions: 0 })
 }
 
 /// Serves one read request on a reader run synchronously on the test thread.
