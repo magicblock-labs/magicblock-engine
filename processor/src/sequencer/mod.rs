@@ -118,14 +118,14 @@ impl Sequencer {
     /// Main loop: drains executor-ready signals, inbound messages, and the
     /// shutdown signal until cancellation, then joins the executor threads.
     async fn run(mut self) {
-        loop {
+        let reason = loop {
             let result = tokio::select! {
                 biased;
                 Some(msg) = self.executors.ready.recv() => {
                     self.handle_ready(msg)
                 }
                 _ = self.shutdown.signalled() => {
-                    break;
+                    break ShutdownReason::Signalled;
                 }
                 Some(msg) = self.rx.recv(), if self.executors.ready() => {
                     self.handle_message(msg).await
@@ -133,10 +133,10 @@ impl Sequencer {
             };
             if let Err(error) = result {
                 error!(?error, "sequencer failed, terminating");
-                break;
+                break ShutdownReason::Error(Box::new(error));
             }
-        }
-        info!("sequencer shutdown is requested, draining the in-flight work");
+        };
+        info!("sequencer is draining the in-flight work");
         let _ = self.drain().await;
         for mut e in self.executors.handles.drain(..) {
             let handle = e.task.take();
@@ -147,7 +147,7 @@ impl Sequencer {
         }
         // Release engine storage before the manager can reopen it.
         drop(self.state);
-        self.shutdown.terminate(ShutdownReason::Signalled);
+        self.shutdown.terminate(reason);
     }
 
     /// Dispatches an inbound message to the transaction or block handler.
