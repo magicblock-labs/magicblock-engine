@@ -8,7 +8,10 @@ field-level dirty markers.
 Equality compares core state and data bytes, ignoring storage form and dirty
 markers.
 
-`AccountMode::mutable()` identifies modes writable by user programs.
+`AccountMode::mutable()` identifies modes intrinsically writable by user
+programs. `AccountSharedData::mutable()` also accepts transient and closed
+accounts when its mode dirty marker records the lifecycle transition in the
+current transaction.
 `AccountMode::authoritative()` separately identifies delegated, ephemeral, and
 transient state that the engine owns and higher layers retain in persistent
 storage.

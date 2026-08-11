@@ -33,8 +33,7 @@ pub struct StorageUnit(pub u64);
 /// Shared account data that borrows directly from an aligned external buffer
 /// until a write requires promotion to owned heap storage.
 ///
-/// Higher layers use `mutable()` to decide whether the account is routed to
-/// the persisted or volatile store.
+/// Higher layers use `mutable()` to enforce transaction write permissions.
 #[cfg_attr(feature = "serde", derive(serde::Deserialize), serde(from = "Account"))]
 #[derive(Clone, Default)]
 pub struct AccountSharedData {
@@ -134,9 +133,14 @@ impl AccountSharedData {
         }
     }
 
-    /// Returns `true` for engine-exclusive modes that may be mutated
+    /// Returns whether the current transaction may leave the account modified.
+    ///
+    /// Mutable modes are always accepted. `Transient` and `Closed` are accepted
+    /// only when this transaction performed the corresponding mode transition.
     pub fn mutable(&self) -> bool {
         self.mode.mutable()
+            || matches!(self.mode, AccountMode::Transient | AccountMode::Closed)
+                && self.dirty.contains(DirtyMarkers::MODE)
     }
 
     /// Returns the account's exact lifecycle mode.
