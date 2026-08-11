@@ -149,8 +149,11 @@ impl LedgerReader {
         &mut self,
         request: &AccountSignaturesPayload,
     ) -> AccountSignaturesReadResult {
-        let mut signatures = Vec::new();
         let AccountSignaturesParams { pubkey, limit, mut before, until } = request.params;
+        let mut signatures = Vec::new();
+        if limit == 0 {
+            return Ok(signatures);
+        }
         let mut blocktimes = HashMap::<Slot, i64>::new();
         for superblock in self.ledger.clone().iter() {
             if request.cancelled() {
