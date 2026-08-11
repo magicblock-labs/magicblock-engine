@@ -1,31 +1,68 @@
-//! Broadcast channels for live read-side notifications.
+//! Live read-side notification channels.
 
-use std::{hash::Hash, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    hash::Hash,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use accountsdb::AccountEntry;
 use ahash::RandomState;
-use derive_more::Deref;
 use ledger::{request::TransactionStatus, schema::Block};
 use nucleus::{
     shutdown::{Service, ShutdownHandle, ShutdownManager, ShutdownReason},
     tls::EncodedMessage,
 };
 use scc::HashMap;
+use smallvec::SmallVec;
 use solana_account::AccountSharedData;
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 use solana_transaction_error::TransactionResult;
 use tokio::{
-    sync::broadcast::{self, Receiver, Sender},
+    sync::mpsc::{self, error::TrySendError},
     time::{MissedTickBehavior, interval},
 };
 
 use crate::{
     FullTransaction,
+    error::{KeeperError, Result},
     metrics::{self, Operation},
 };
 
-/// Composite log notification broadcast to log subscribers
+type MpscSenders<V> = SmallVec<[mpsc::Sender<V>; 1]>;
+type OneshotSenders<V> = SmallVec<[oneshot::Sender<V>; 1]>;
+
+/// Stable metric identity for a subscription stream.
+#[derive(Clone, Copy)]
+pub(crate) enum Subscription {
+    Accounts,
+    Programs,
+    Logs,
+    Blocks,
+    Transactions,
+    Snapshots,
+    Services,
+    Evictions,
+}
+
+impl Subscription {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Accounts => "accounts",
+            Self::Programs => "programs",
+            Self::Logs => "logs",
+            Self::Blocks => "blocks",
+            Self::Transactions => "transactions",
+            Self::Snapshots => "snapshots",
+            Self::Services => "services",
+            Self::Evictions => "evictions",
+        }
+    }
+}
+
+/// Composite log notification sent to log subscribers.
 #[derive(Clone)]
 pub struct TransactionLogs {
     /// First transaction signature.
@@ -36,91 +73,238 @@ pub struct TransactionLogs {
     pub logs: Arc<Vec<String>>,
 }
 
-/// Live notification channels owned by keeper.
-pub(crate) struct Subscriptions {
-    /// Account updates keyed by account pubkey.
-    pub(crate) accounts: Subscribers<Pubkey, AccountSharedData>,
-    /// Program account updates keyed by owner pubkey;
-    pub(crate) programs: Subscribers<Pubkey, AccountEntry>,
-    /// Signature status updates keyed by transaction signature.
-    pub(crate) signatures: Subscribers<Signature, TransactionStatus>,
-    /// Log broadcasts keyed by mentioned program or account pubkey.
-    pub(crate) logs: Subscribers<Pubkey, Arc<TransactionLogs>>,
-    /// Broadcast channel for newly committed slots.
-    pub(crate) blocks: Sender<Block>,
-    /// Broadcast channel for all committed transactions.
-    pub(crate) transactions: Sender<Arc<FullTransaction>>,
-    /// Accountsdb snapshot archive completions, sent after compression finishes.
-    pub(crate) snapshots: Sender<PathBuf>,
-    /// Encoded service messages emitted during successful transaction execution.
-    pub(crate) services: Sender<EncodedMessage>,
+/// One process-lifetime bounded receiver.
+pub(crate) struct Unicast<V> {
+    sender: OnceLock<mpsc::Sender<V>>,
+    capacity: usize,
+    subscription: Subscription,
 }
 
-/// Lazily-created per-key broadcast channel map.
-#[derive(Deref)]
-pub(crate) struct Subscribers<K, V>(HashMap<K, Sender<V>, RandomState>);
+impl<V> Unicast<V> {
+    pub(crate) const fn new(capacity: usize, subscription: Subscription) -> Self {
+        Self {
+            sender: OnceLock::new(),
+            capacity,
+            subscription,
+        }
+    }
 
-impl<K, V> Default for Subscribers<K, V> {
+    /// Creates the process-lifetime receiver, rejecting every later subscriber.
+    pub(crate) fn subscribe(&self) -> Result<mpsc::Receiver<V>> {
+        let (tx, rx) = mpsc::channel(self.capacity);
+        self.sender
+            .set(tx)
+            .map_err(|_| KeeperError::SubscriptionRegistered(self.subscription.label()))?;
+        Ok(rx)
+    }
+
+    /// Returns whether the stream's process-lifetime receiver is still open.
+    pub(crate) fn is_subscribed(&self) -> bool {
+        self.sender.get().is_some_and(|sender| !sender.is_closed())
+    }
+
+    /// Sends asynchronously, waiting until the receiver has capacity.
+    pub(crate) async fn send(&self, value: V) {
+        let Some(sender) = self.sender.get() else {
+            return;
+        };
+        let _ = sender.send(value).await;
+    }
+
+    /// Sends from a synchronous worker, waiting until the receiver has capacity.
+    pub(crate) fn blocking_send(&self, value: V) {
+        let Some(sender) = self.sender.get() else {
+            return;
+        };
+        let _ = sender.blocking_send(value);
+    }
+}
+
+/// Persistent per-key fanout over one bounded queue per receiver.
+pub(crate) struct Multicast<K, V> {
+    senders: HashMap<K, MpscSenders<V>, RandomState>,
+    capacity: usize,
+    subscription: Subscription,
+}
+
+impl<K, V> Multicast<K, V>
+where
+    K: Eq + Hash,
+{
+    pub(crate) fn new(capacity: usize, subscription: Subscription) -> Self {
+        Self {
+            senders: Default::default(),
+            capacity,
+            subscription,
+        }
+    }
+
+    /// Adds a receiver for `key` with its own bounded queue.
+    pub(crate) async fn subscribe(&self, key: K) -> mpsc::Receiver<V> {
+        let (tx, rx) = mpsc::channel(self.capacity);
+        self.senders.entry_async(key).await.or_default().push(tx);
+        rx
+    }
+
+    /// Adds a receiver synchronously when the public accessor cannot await.
+    pub(crate) fn subscribe_sync(&self, key: K) -> mpsc::Receiver<V> {
+        let (tx, rx) = mpsc::channel(self.capacity);
+        self.senders.entry_sync(key).or_default().push(tx);
+        rx
+    }
+
+    /// Returns whether `key` has any live receivers.
+    pub(crate) fn contains(&self, key: &K) -> bool {
+        let mut contains = false;
+        self.senders.remove_if_sync(key, |senders| {
+            senders.retain(|sender| !sender.is_closed());
+            contains = !senders.is_empty();
+            !contains
+        });
+        contains
+    }
+
+    /// Drops closed receivers and keys that no longer have receivers.
+    async fn cleanup(&self) {
+        self.senders
+            .retain_async(|_, senders| {
+                senders.retain(|sender| !sender.is_closed());
+                !senders.is_empty()
+            })
+            .await;
+    }
+}
+
+impl<K, V> Multicast<K, V>
+where
+    K: Eq + Hash,
+    V: Clone,
+{
+    /// Fans out without blocking, disconnecting receivers whose queues are full.
+    pub(crate) fn send(&self, key: &K, value: &V) {
+        self.senders.remove_if_sync(key, |senders| {
+            senders.retain(|sender| match sender.try_send(value.clone()) {
+                Ok(()) => true,
+                Err(TrySendError::Full(_)) => {
+                    metrics::slow_consumer_disconnect(self.subscription);
+                    false
+                }
+                Err(TrySendError::Closed(_)) => false,
+            });
+            senders.is_empty()
+        });
+    }
+}
+
+/// Terminal per-key fanout over one oneshot channel per receiver.
+pub(crate) struct MulticastOneshot<K, V>(HashMap<K, OneshotSenders<V>, RandomState>);
+
+impl<K, V> Default for MulticastOneshot<K, V> {
     fn default() -> Self {
         Self(Default::default())
     }
 }
 
-impl<K: Eq + Hash, V: Clone> Subscribers<K, V> {
-    /// Returns a receiver for `key`, creating its broadcast channel on demand.
-    pub(crate) async fn subscribe(&self, key: K, cap: usize) -> Receiver<V> {
-        self.entry_async(key)
-            .await
-            .or_insert_with(|| broadcast::channel(cap).0)
-            .subscribe()
+impl<K, V> MulticastOneshot<K, V>
+where
+    K: Eq + Hash,
+{
+    /// Adds a receiver for the terminal value associated with `key`.
+    pub(crate) async fn subscribe(&self, key: K) -> oneshot::Receiver<V> {
+        let (tx, rx) = oneshot::channel();
+        self.0.entry_async(key).await.or_default().push(tx);
+        rx
     }
 
-    /// Broadcasts `value` to every subscriber on `key`, dropping the channel
-    /// afterwards if the last receiver is gone or `oneshot` marks `key` as
-    /// terminal (a final update, e.g. a settled signature status).
-    #[inline]
-    pub(crate) fn send(&self, key: &K, value: &V, oneshot: bool) {
-        let sender = |_: &K, tx: &Sender<V>| tx.send(value.clone()).is_ok();
-        let success = self.read_sync(key, sender).unwrap_or(true);
-        if !success || oneshot {
-            self.remove_sync(key);
+    /// Drops closed receivers and keys that no longer have receivers.
+    async fn cleanup(&self) {
+        self.0
+            // Keep closed positions while any receiver is live so `send_last`
+            // cannot mistake an older subscription for the newest one.
+            .retain_async(|_, senders| senders.iter().any(|sender| !sender.is_closed()))
+            .await;
+    }
+}
+
+impl<K, V> MulticastOneshot<K, V>
+where
+    K: Eq + Hash,
+    V: Clone,
+{
+    /// Sends the terminal value only to the most recently added receiver.
+    pub(crate) fn send_last(&self, key: &K, value: &V) {
+        let Some(mut senders) = self.0.get_sync(key) else {
+            return;
+        };
+        let sender = senders.pop();
+        if senders.is_empty() {
+            let _ = senders.remove_entry();
+        }
+        if let Some(sender) = sender {
+            let _ = sender.send(value.clone());
         }
     }
 
-    /// Returns whether `key` currently has a subscription channel.
-    #[inline]
-    pub(crate) fn contains(&self, key: &K) -> bool {
-        if self.is_empty() {
-            return false;
+    /// Removes `key` and sends its terminal value to every current receiver.
+    pub(crate) fn send(&self, key: &K, value: &V) {
+        let Some((_, senders)) = self.0.remove_sync(key) else {
+            return;
+        };
+        for sender in senders {
+            let _ = sender.send(value.clone());
         }
-        self.contains_sync(key)
     }
+}
+
+/// Live notification channels owned by keeper.
+pub(crate) struct Subscriptions {
+    /// Account updates keyed by account pubkey.
+    pub(crate) accounts: Multicast<Pubkey, AccountSharedData>,
+    /// Program account updates keyed by owner pubkey.
+    pub(crate) programs: Multicast<Pubkey, AccountEntry>,
+    /// Signature status updates keyed by transaction signature.
+    pub(crate) signatures: MulticastOneshot<Signature, TransactionStatus>,
+    /// Log notifications keyed by mentioned program or account pubkey.
+    pub(crate) logs: Multicast<Pubkey, Arc<TransactionLogs>>,
+    /// Newly committed slots.
+    pub(crate) blocks: Multicast<(), Block>,
+    /// All committed transactions for the sole stream consumer.
+    pub(crate) transactions: Unicast<Arc<FullTransaction>>,
+    /// Accountsdb snapshot archive completions.
+    pub(crate) snapshots: Multicast<(), PathBuf>,
+    /// Encoded service messages for the sole stream consumer.
+    pub(crate) services: Unicast<EncodedMessage>,
 }
 
 impl Subscriptions {
     /// Builds subscription channels and starts cleanup for idle keyed entries.
     pub(crate) fn new(shutdown: &mut ShutdownManager) -> Arc<Self> {
-        let (transactions, _) = broadcast::channel(1024);
-        let (blocks, _) = broadcast::channel(32);
-        let (snapshots, _) = broadcast::channel(4);
-        let (services, _) = broadcast::channel(64);
-        let subs = Arc::new(Self {
-            accounts: Default::default(),
-            programs: Default::default(),
+        let subscriptions = Arc::new(Self {
+            accounts: Multicast::new(8, Subscription::Accounts),
+            programs: Multicast::new(16, Subscription::Programs),
             signatures: Default::default(),
-            logs: Default::default(),
-            blocks,
-            transactions,
-            snapshots,
-            services,
+            logs: Multicast::new(8, Subscription::Logs),
+            blocks: Multicast::new(32, Subscription::Blocks),
+            transactions: Unicast::new(1024, Subscription::Transactions),
+            snapshots: Multicast::new(4, Subscription::Snapshots),
+            services: Unicast::new(64, Subscription::Services),
         });
         let shutdown = shutdown.handle(Service::SubscriptionsCleanup);
-        tokio::spawn(cleanup(subs.clone(), shutdown));
-        subs
+        tokio::spawn(cleanup(subscriptions.clone(), shutdown));
+        subscriptions
+    }
+
+    async fn cleanup(&self) {
+        self.accounts.cleanup().await;
+        self.programs.cleanup().await;
+        self.signatures.cleanup().await;
+        self.logs.cleanup().await;
+        self.blocks.cleanup().await;
+        self.snapshots.cleanup().await;
     }
 }
 
-/// Drops keyed broadcast channels after their last receiver is gone.
+/// Drops abandoned multicast senders after their receivers are gone.
 async fn cleanup(subscriptions: Arc<Subscriptions>, mut shutdown: ShutdownHandle) {
     let mut ticker = interval(Duration::from_secs(60));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -130,10 +314,7 @@ async fn cleanup(subscriptions: Arc<Subscriptions>, mut shutdown: ShutdownHandle
             _ = shutdown.signalled() => break,
             _ = ticker.tick() => {
                 let _timer = metrics::time(Operation::Cleanup);
-                subscriptions.accounts.0.retain_async(|_, s| s.receiver_count() != 0).await;
-                subscriptions.programs.0.retain_async(|_, s| s.receiver_count() != 0).await;
-                subscriptions.signatures.0.retain_async(|_, s| s.receiver_count() != 0).await;
-                subscriptions.logs.0.retain_async(|_, s| s.receiver_count() != 0).await;
+                subscriptions.cleanup().await;
             }
         }
     }

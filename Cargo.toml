@@ -67,6 +67,7 @@ scc = "3.8.4"
 serde = "1.0.228"
 serde_bytes = "0.11.19"
 serde_with = { version = "3.21.0", default-features = false }
+smallvec = "1.15.2"
 snedfile = "0.1"
 tar = "0.4.45"
 tempfile = "3"

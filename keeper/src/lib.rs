@@ -220,7 +220,7 @@ impl Keeper {
         let path = target.join(ACCOUNTSDB_SNAPSHOT_FILE);
         let tmp = target.join(format!("{ACCOUNTSDB_SNAPSHOT_FILE}.tmp"));
         let dst = File::options().write(true).create(true).truncate(true).open(&tmp)?;
-        let snapshots = self.subscriptions.snapshots.clone();
+        let subscriptions = self.subscriptions.clone();
         thread::Builder::new().name("snapshot-archiver".into()).spawn(move || {
             {
                 let _timer = metrics::time(Operation::ArchiveSnapshot);
@@ -234,9 +234,7 @@ impl Keeper {
                 // Rename only after sync so replication cannot serve a partial archive.
                 fs::rename(tmp, &path)?;
                 fs::remove_dir_all(snapshot)?;
-                if snapshots.receiver_count() != 0 {
-                    let _ = snapshots.send(path);
-                }
+                subscriptions.snapshots.send(&(), &path);
                 Ok::<(), SnapshotError>(())
             }
             .inspect_err(|error| error!(?error, "snapshot archival failed"))

@@ -27,6 +27,9 @@ pub enum KeeperError {
     /// Ledger read request failed before a response was received.
     #[error("ledger read request: {0}")]
     LedgerRequest(#[source] LedgerRequestError),
+    /// A process-lifetime unicast stream was already registered.
+    #[error("subscription already registered: {0}")]
+    SubscriptionRegistered(&'static str),
 }
 
 impl From<SendError<Event>> for KeeperError {

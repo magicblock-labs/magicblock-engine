@@ -61,9 +61,14 @@ insertion. The account cache is an LRU that also coordinates concurrent loads of
 missing accounts. Only non-authoritative modes enter the eviction LRU;
 delegated, ephemeral, and unresolved transient state remains outside it.
 
-Broadcast channels publish account and program updates, signature results, logs,
+Dedicated channels publish account and program updates, signature results, logs,
 processed transactions, blocks, cache evictions, completed snapshots, and
-service messages. They hold no durable state.
+service messages. Signatures have terminal oneshot fanout; persistent multicast
+streams give each receiver a bounded queue and disconnect a receiver that falls
+behind. Processed transactions, service messages, and cache evictions each have
+one process-lifetime receiver and apply producer backpressure when full.
+Append rejection notifies only its newest signature waiter, preserving older
+waiters for an already accepted transaction; invalid-blockhash status is cached.
 
 ## `testkit`
 
