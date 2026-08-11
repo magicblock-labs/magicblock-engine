@@ -49,7 +49,7 @@ const _: () = assert!(size_of::<AccountHeader>() == STORAGE_UNIT);
 const _: () = assert!((size_of::<Pubkey>() + STORAGE_UNIT) / ALIGNMENT == IMAGE_OFFSET);
 
 /// Borrowed zero-copy account view into an aligned external buffer.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct BorrowedAccount {
     /// Header pointer for the borrowed buffer.
     pub(crate) header: NonNull<AccountHeader>,
@@ -57,16 +57,18 @@ pub struct BorrowedAccount {
     pub(crate) core: NonNull<AccountCore>,
     /// Borrowed data bytes for the active image.
     pub(crate) data: DataSlice,
+    /// Sequence used to select this view's image.
+    pub(crate) version: u32,
 }
 
 /// Returns the byte offset for the active or shadow image.
 #[inline]
-fn offset(header: &AccountHeader, active: bool) -> usize {
+fn offset(space: u32, sequence: u32, active: bool) -> usize {
     // Even sequence => image A is active, odd sequence => image B is active.
-    let even = header.sequence.load(Acquire).is_multiple_of(2);
+    let even = sequence.is_multiple_of(2);
     // Flip to the shadow image when `active` does not match the current parity.
     let step = (active ^ even) as u32;
-    (step * header.space) as usize + IMAGE_OFFSET
+    (step * space) as usize + IMAGE_OFFSET
 }
 
 impl BorrowedAccount {
@@ -105,13 +107,14 @@ impl BorrowedAccount {
     /// image-sized payloads. The active image is selected from the header
     /// sequence parity.
     pub unsafe fn init(buffer: NonNull<StorageUnit>) -> Self {
-        let header = buffer.cast();
-        let offset = offset(header.as_ref(), true);
+        let header = buffer.cast::<AccountHeader>();
+        let version = header.as_ref().sequence.load(Acquire);
+        let offset = offset(header.as_ref().space, version, true);
 
         let core = header.add(offset).cast();
         let data = DataSlice::init(core.add(1).cast());
 
-        Self { header, core, data }
+        Self { header, core, data, version }
     }
 
     /// Copies the active image into the shadow image and switches to it.
@@ -120,11 +123,14 @@ impl BorrowedAccount {
     ///
     /// The borrowed image must still be the one selected by `init`.
     pub unsafe fn translate(&mut self) {
-        let offset = offset(self.header.as_ref(), false);
+        let offset = offset(self.header.as_ref().space, self.version, false);
 
         // Copy bytes in bulk from active image to the shadow
         let dst = self.header.add(offset).cast();
         let src = self.core.cast::<StorageUnit>();
+        if src == dst {
+            return;
+        }
         let count = self.header.as_ref().space as usize;
         dst.copy_from_nonoverlapping(src, count);
         // Switch the pointers to the shadow view
@@ -132,10 +138,18 @@ impl BorrowedAccount {
         self.data = DataSlice::init(self.core.add(1).cast());
     }
 
-    /// Commits the shadow image by advancing the sequence counter.
+    /// Publishes the shadow image if it was prepared against the current sequence.
     pub fn commit(&self) {
         // SAFETY: the header is part of the borrowed buffer for the lifetime of `self`.
-        unsafe { self.header.as_ref().sequence.fetch_add(1, Release) };
+        let header = unsafe { self.header.as_ref() };
+        let shadow = unsafe {
+            self.header.add(offset(header.space, self.version, false)).cast::<AccountCore>()
+        };
+        if self.core != shadow {
+            return;
+        }
+        let next = self.version.wrapping_add(1);
+        let _ = header.sequence.compare_exchange(self.version, next, Release, Relaxed);
     }
 
     /// Repoints this view to the currently active image without copying data.
@@ -145,7 +159,8 @@ impl BorrowedAccount {
     /// The header must remain live, and `self` must be a view previously produced
     /// by [`Self::init`] or [`Self::translate`] for that borrowed buffer.
     pub unsafe fn reset(&mut self) {
-        let offset = offset(self.header.as_ref(), true);
+        self.version = self.header.as_ref().sequence.load(Acquire);
+        let offset = offset(self.header.as_ref().space, self.version, true);
         self.core = self.header.add(offset).cast();
         self.data = DataSlice::init(self.core.add(1).cast());
     }
