@@ -1,6 +1,7 @@
-#![cfg(feature = "agave-unstable-api")]
+#![allow(clippy::disallowed_methods)]
 #![deny(clippy::arithmetic_side_effects)]
 #![deny(clippy::indexing_slicing)]
+#![doc = include_str!("../README.md")]
 
 pub use solana_sbpf;
 pub mod cpi;
@@ -8,12 +9,9 @@ pub mod deploy;
 pub mod execution_budget;
 pub mod invoke_context;
 pub mod loaded_programs;
-pub mod loading_task;
 pub mod mem_pool;
 pub mod memory;
 pub mod memory_context;
-pub mod program_cache_entry;
-pub mod program_metrics;
 pub mod serialization;
 pub mod stable_log;
 pub mod sysvar_cache;

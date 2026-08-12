@@ -1,13 +1,10 @@
 use {
     crate::execution_budget::{
-        MAX_CALL_DEPTH, MAX_HEAP_FRAME_BYTES, MAX_INSTRUCTION_STACK_DEPTH_SIMD_0268,
-        MIN_HEAP_FRAME_BYTES,
+        MAX_CALL_DEPTH, MAX_HEAP_FRAME_BYTES, MAX_INSTRUCTION_STACK_DEPTH, MIN_HEAP_FRAME_BYTES,
+        STACK_FRAME_SIZE,
     },
     solana_sbpf::{aligned_memory::AlignedMemory, ebpf::HOST_ALIGN, vm::CallFrame},
-    std::{
-        array,
-        ops::{Deref, DerefMut},
-    },
+    std::array,
 };
 
 trait Reset {
@@ -36,9 +33,7 @@ impl<T: Reset, const SIZE: usize> Pool<T, SIZE> {
             return None;
         }
         self.next_empty = self.next_empty.saturating_sub(1);
-        self.items
-            .get_mut(self.next_empty)
-            .and_then(|item| item.take())
+        self.items.get_mut(self.next_empty).and_then(|item| item.take())
     }
 
     fn put(&mut self, mut value: T) -> bool {
@@ -60,79 +55,57 @@ impl Reset for AlignedMemory<{ HOST_ALIGN }> {
     }
 }
 
-pub struct CallFrameBuffer(Box<[CallFrame; MAX_CALL_DEPTH]>);
-
-impl Default for CallFrameBuffer {
-    fn default() -> Self {
-        let mut mem = Box::<[CallFrame; MAX_CALL_DEPTH]>::new_uninit();
-        let ptr = mem.as_mut_ptr().cast::<CallFrame>();
-        for i in 0..MAX_CALL_DEPTH {
-            unsafe { ptr.add(i).write(CallFrame::default()) }
-        }
-        Self(unsafe { mem.assume_init() })
-    }
-}
-
-impl Reset for CallFrameBuffer {
+impl Reset for Vec<CallFrame> {
     fn reset(&mut self) {
         self.fill(CallFrame::default())
     }
 }
 
-impl Deref for CallFrameBuffer {
-    type Target = [CallFrame];
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_slice()
-    }
-}
-
-impl DerefMut for CallFrameBuffer {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0.as_mut_slice()
-    }
-}
-
+/// Fixed-size pools of reusable SBF VM buffers.
 pub struct VmMemoryPool {
-    stack: Pool<AlignedMemory<{ HOST_ALIGN }>, MAX_INSTRUCTION_STACK_DEPTH_SIMD_0268>,
-    heap: Pool<AlignedMemory<{ HOST_ALIGN }>, MAX_INSTRUCTION_STACK_DEPTH_SIMD_0268>,
-    call_frame: Pool<CallFrameBuffer, MAX_INSTRUCTION_STACK_DEPTH_SIMD_0268>,
+    stack: Pool<AlignedMemory<{ HOST_ALIGN }>, MAX_INSTRUCTION_STACK_DEPTH>,
+    heap: Pool<AlignedMemory<{ HOST_ALIGN }>, MAX_INSTRUCTION_STACK_DEPTH>,
+    call_frames: Pool<Vec<CallFrame>, MAX_INSTRUCTION_STACK_DEPTH>,
 }
 
 impl VmMemoryPool {
+    /// Allocates a pool sized for the maximum instruction stack depth.
     pub fn new() -> Self {
         Self {
             stack: Pool::new(array::from_fn(|_| {
-                #[allow(clippy::arithmetic_side_effects)]
-                AlignedMemory::zero_filled(solana_sbpf::vm::get_stack_frame_size() * MAX_CALL_DEPTH)
+                AlignedMemory::zero_filled(STACK_FRAME_SIZE * MAX_CALL_DEPTH)
             })),
             heap: Pool::new(array::from_fn(|_| {
                 AlignedMemory::zero_filled(MAX_HEAP_FRAME_BYTES as usize)
             })),
-            call_frame: Pool::new(array::from_fn(|_| CallFrameBuffer::default())),
+            call_frames: Pool::new(array::from_fn(|_| {
+                std::iter::repeat_with(CallFrame::default).take(MAX_CALL_DEPTH).collect()
+            })),
         }
     }
 
+    /// Number of stack buffers managed by the pool.
     pub fn stack_len(&self) -> usize {
         self.stack.len()
     }
 
+    /// Number of heap buffers managed by the pool.
     pub fn heap_len(&self) -> usize {
         self.heap.len()
     }
 
-    #[allow(clippy::arithmetic_side_effects)]
+    /// Returns a zeroed stack buffer, allocating one if the pool is empty.
     pub fn get_stack(&mut self, size: usize) -> AlignedMemory<{ HOST_ALIGN }> {
-        debug_assert!(size == solana_sbpf::vm::get_stack_frame_size() * MAX_CALL_DEPTH);
-        self.stack
-            .get()
-            .unwrap_or_else(|| AlignedMemory::zero_filled(size))
+        debug_assert!(size == STACK_FRAME_SIZE * MAX_CALL_DEPTH);
+        self.stack.get().unwrap_or_else(|| AlignedMemory::zero_filled(size))
     }
 
+    /// Returns a stack buffer to the pool after clearing it.
     pub fn put_stack(&mut self, stack: AlignedMemory<{ HOST_ALIGN }>) -> bool {
         self.stack.put(stack)
     }
 
+    /// Returns a maximum-sized zeroed heap buffer; callers slice it to `heap_size`.
     pub fn get_heap(&mut self, heap_size: u32) -> AlignedMemory<{ HOST_ALIGN }> {
         debug_assert!((MIN_HEAP_FRAME_BYTES..=MAX_HEAP_FRAME_BYTES).contains(&heap_size));
         self.heap
@@ -140,6 +113,7 @@ impl VmMemoryPool {
             .unwrap_or_else(|| AlignedMemory::zero_filled(MAX_HEAP_FRAME_BYTES as usize))
     }
 
+    /// Returns a heap buffer to the pool after clearing it.
     pub fn put_heap(&mut self, heap: AlignedMemory<{ HOST_ALIGN }>) -> bool {
         let heap_size = heap.len();
         debug_assert!(
@@ -149,12 +123,17 @@ impl VmMemoryPool {
         self.heap.put(heap)
     }
 
-    pub fn get_call_frames(&mut self) -> CallFrameBuffer {
-        self.call_frame.get().unwrap_or_default()
+    /// Returns a zeroed call-frame buffer sized for the executable.
+    pub(crate) fn get_call_frames(&mut self, max_call_depth: usize) -> Vec<CallFrame> {
+        let mut call_frames = self.call_frames.get().unwrap_or_default();
+        call_frames.resize_with(max_call_depth, CallFrame::default);
+        call_frames.truncate(max_call_depth);
+        call_frames
     }
 
-    pub fn put_call_frames(&mut self, call_frame: CallFrameBuffer) -> bool {
-        self.call_frame.put(call_frame)
+    /// Returns a call-frame buffer to the pool after clearing it.
+    pub(crate) fn put_call_frames(&mut self, call_frames: Vec<CallFrame>) -> bool {
+        self.call_frames.put(call_frames)
     }
 }
 
