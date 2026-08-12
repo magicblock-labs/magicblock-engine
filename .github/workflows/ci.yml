@@ -1,0 +1,80 @@
+name: Run CI
+
+on:
+  push:
+    branches: [master, dev]
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+env:
+  AGAVE_VERSION: v4.2.0
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Format
+            command: cargo fmt --check
+            cache: false
+            sbf: false
+            nextest: false
+          - name: Clippy
+            command: cargo clippy --quiet --all-features --all-targets -- -D warnings
+            cache: true
+            sbf: true
+            nextest: false
+          - name: Tests
+            command: cargo nextest run --cargo-quiet --nff
+            cache: true
+            sbf: true
+            nextest: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - name: Cache Rust build artifacts
+        if: matrix.cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+          cache-on-failure: true
+
+      - name: Cache Solana SBF tools
+        if: matrix.sbf
+        id: cache-solana
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/solana
+            ~/.cache/solana
+          key: solana-sbf-${{ runner.os }}-${{ runner.arch }}-${{ env.AGAVE_VERSION }}
+
+      - name: Install Solana CLI
+        if: matrix.sbf && steps.cache-solana.outputs.cache-hit != 'true'
+        run: sh -c "$(curl -sSfL https://release.anza.xyz/$AGAVE_VERSION/install)"
+
+      - name: Add Solana CLI to PATH
+        if: matrix.sbf
+        run: echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install cargo-nextest
+        if: matrix.nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run ${{ matrix.name }}
+        run: ${{ matrix.command }}
