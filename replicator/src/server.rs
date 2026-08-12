@@ -120,7 +120,8 @@ impl ReplicationDispatcher {
                 }
             }
         };
-        // Release engine storage before the manager can reopen it.
+        // Release owned resources before reporting service termination.
+        drop(self.listener);
         drop(self.engine);
         self.shutdown.terminate(reason);
     }
