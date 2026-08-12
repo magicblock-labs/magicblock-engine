@@ -10,6 +10,7 @@ use engine::{Engine, EngineError, testkit::TestEngine};
 use keeper::testkit::{
     V42_ID, load_v42_data, load_v42_lamports, patterned_bytes, store_v42, v42_builder,
 };
+use magic_root_interface::MagicRootInstruction;
 use solana_account::{AccountBuilder, AccountMode, OwnedAccount, ReadableAccount};
 use solana_instruction_error::InstructionError;
 use solana_pubkey::Pubkey;
@@ -261,33 +262,74 @@ async fn account_create_accepts_max_data_with_post_finalize() {
     te.close().await;
 }
 
-// Replacing the seeded executable at a newer slot exercises MagicRoot's large
-// account reconstruction and executable finalization, then proves the resulting
-// program remains usable by executing it through the normal client path.
+/// Proves program-cache entries follow the complete v42 account lifecycle:
+/// transaction-local deletion hides a loaded program immediately but rolls back
+/// on a later instruction failure, while committed deletion evicts the shared
+/// entry so invalid executable data restored at the same key cannot use stale code.
 #[tokio::test(flavor = "multi_thread")]
-async fn account_update_replaces_v42_program_at_new_slot() {
+async fn account_program_cache_tracks_v42_lifecycle() {
     let te = TestEngine::new().await;
-    let program = te.get_account(V42_ID).expect("v42 program is seeded");
-    let data = program.data().to_vec();
-    let owner = *program.owner();
-    let lamports = program.lamports();
-    let slot = program.slot() + 1;
-    let replacement = AccountBuilder::from(program).slot(slot);
+    let seeded = te.get_account(V42_ID).expect("v42 program is seeded");
+    let program = Pubkey::new_unique();
+    let closeable = AccountBuilder::from(seeded.clone())
+        .mode(AccountMode::Ephemeral)
+        .slot(seeded.slot() + 1);
+    te.account(program).create(closeable, None).await.unwrap();
 
-    te.account(V42_ID).update(replacement).await.unwrap();
+    let output = Pubkey::new_unique();
+    te.accounts()
+        .store(&[(
+            output,
+            v42_builder(0, AccountMode::Ephemeral).owner(program).build(),
+        )])
+        .unwrap();
+    let invoke = |value| {
+        let mut instruction = E::lit(value).compose(output, &[]);
+        instruction.program_id = program;
+        instruction.accounts.last_mut().unwrap().pubkey = program;
+        instruction
+    };
 
-    let replaced = te.get_account(V42_ID).expect("replaced v42 program exists");
-    assert_eq!(replaced.lamports(), lamports);
-    assert_eq!(replaced.owner(), &owner);
-    assert_eq!(replaced.slot(), slot);
-    assert!(replaced.executable());
-    assert_eq!(replaced.data(), data);
-
-    let output = store_v42(&te, 0, AccountMode::Ephemeral);
-    te.execute(&[E::lit(42).compose(output, &[])])
+    te.execute(&[invoke(42)])
         .await
-        .expect("replaced v42 program executes");
+        .expect("fresh v42 program executes and primes the shared cache");
     assert_eq!(load_v42_data(&te, output), Some(42));
+
+    let delete = MagicRootInstruction::Delete.compose(program).unwrap();
+    assert_eq!(
+        te.execute(&[delete, invoke(7)]).await,
+        Err(TransactionError::InstructionError(
+            1,
+            InstructionError::UnsupportedProgramId
+        )),
+        "deletion hides the program from later instructions in the transaction"
+    );
+    assert!(
+        te.get_account(program).is_some(),
+        "failed transaction rolls back account deletion"
+    );
+
+    te.execute(&[invoke(7)])
+        .await
+        .expect("rolled-back deletion preserves the shared cache entry");
+    assert_eq!(load_v42_data(&te, output), Some(7));
+
+    te.account(program).delete().await.unwrap();
+    assert!(
+        te.get_account(program).is_none(),
+        "committed deletion removes the account"
+    );
+
+    let invalid = AccountBuilder::from(seeded).mode(AccountMode::Ephemeral).data(vec![0]);
+    te.accounts().store(&[(program, invalid.build())]).unwrap();
+    assert_eq!(
+        te.execute(&[invoke(9)]).await,
+        Err(TransactionError::InstructionError(
+            0,
+            InstructionError::UnsupportedProgramId
+        )),
+        "invalid restored executable cannot run through a stale compiled entry"
+    );
 
     te.close().await;
 }
