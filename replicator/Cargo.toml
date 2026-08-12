@@ -1,0 +1,44 @@
+[package]
+name = "magicblock-replicator"
+
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+name = "replicator"
+
+[dependencies]
+engine = { workspace = true }
+keeper = { workspace = true }
+ledger = { workspace = true }
+nucleus = { workspace = true, features = ["ledger", "service"] }
+
+derive_more = { workspace = true, features = ["from"] }
+scc = { workspace = true }
+snedfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "sync", "time"] }
+tracing = { workspace = true }
+wincode = { workspace = true }
+
+solana-keypair = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-signature = { workspace = true }
+
+[dev-dependencies]
+engine = { workspace = true, features = ["testkit"] }
+keeper = { workspace = true, features = ["testkit"] }
+nucleus = { workspace = true, features = ["testkit"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+v42-calculator-interface = { workspace = true, features = ["builder"] }
+
+solana-account = { workspace = true }
+solana-sysvar = { workspace = true }
+
+[lints]
+workspace = true

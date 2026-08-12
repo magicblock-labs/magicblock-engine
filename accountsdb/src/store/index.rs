@@ -15,9 +15,9 @@ use solana_pubkey::Pubkey;
 use crate::store::kv::{KeyTail, Offset, OwnerAndOffset, PubkeyBytes, U32LE};
 
 /// LMDB map size for the index database.
-#[cfg(any(test, feature = "testkit"))]
+#[cfg(feature = "testkit")]
 const INDEX_MAP_SIZE: usize = nucleus::MB;
-#[cfg(not(any(test, feature = "testkit")))]
+#[cfg(not(feature = "testkit"))]
 const INDEX_MAP_SIZE: usize = nucleus::GB;
 /// Subdirectory used for the LMDB index.
 const INDEX_SUBDIR: &str = "index";
