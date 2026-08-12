@@ -1,0 +1,54 @@
+name: Run CI - Lint
+
+on:
+  push:
+    branches: [master, dev]
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.96.1 --profile minimal --component clippy
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: magicblock-engine-ci-lint-v001
+          cache-on-failure: true
+
+      - name: Cache Solana CLI
+        id: cache-solana
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/solana
+          key: solana-cli-v1-${{ runner.os }}-${{ runner.arch }}-v4.0.3
+
+      - name: Cache Solana platform tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/solana
+          key: solana-platform-tools-v1-${{ runner.os }}-${{ runner.arch }}-v4.0.3
+
+      - name: Install Solana CLI
+        if: steps.cache-solana.outputs.cache-hit != 'true'
+        run: sh -c "$(curl -sSfL https://release.anza.xyz/v4.0.3/install)"
+
+      - name: Add Solana CLI to PATH
+        run: echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Run Clippy
+        run: cargo clippy --all-features --all-targets -- -D warnings
