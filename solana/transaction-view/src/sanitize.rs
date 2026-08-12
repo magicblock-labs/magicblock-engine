@@ -66,9 +66,7 @@ fn sanitize_message_header(view: &UnsanitizedTransactionView<impl TransactionDat
     // We have already checked that `num_required_signatures` is less than or equal to `num_static_account_keys`,
     // so it is safe to use wrapping arithmetic.
     if view.num_readonly_unsigned_static_accounts()
-        > view
-            .num_static_account_keys()
-            .wrapping_sub(view.num_required_signatures())
+        > view.num_static_account_keys().wrapping_sub(view.num_required_signatures())
     {
         return Err(TransactionViewError::SanitizeError);
     }
@@ -80,9 +78,8 @@ fn sanitize_message_header(view: &UnsanitizedTransactionView<impl TransactionDat
 /// * heap_size must be multiples of 1024, if specified
 fn sanitize_config(view: &UnsanitizedTransactionView<impl TransactionData>) -> Result<()> {
     #[allow(clippy::collapsible_if)]
-    if let Some(requested_heap_bytes) = view
-        .transaction_config()
-        .and_then(|config| config.requested_heap_size())
+    if let Some(requested_heap_bytes) =
+        view.transaction_config().and_then(|config| config.requested_heap_size())
     {
         if !(MIN_HEAP_FRAME_BYTES..=MAX_HEAP_FRAME_BYTES).contains(&requested_heap_bytes)
             || !requested_heap_bytes.is_multiple_of(1024)
@@ -659,11 +656,7 @@ mod tests {
             num_readonly_signed_accounts: 0,
             num_readonly_unsigned_accounts: 1,
         };
-        let account_keys = vec![
-            Pubkey::new_unique(),
-            Pubkey::new_unique(),
-            Pubkey::new_unique(),
-        ];
+        let account_keys = vec![Pubkey::new_unique(), Pubkey::new_unique(), Pubkey::new_unique()];
         let valid_instructions = vec![
             CompiledInstruction {
                 program_id_index: 1,
@@ -765,9 +758,7 @@ mod tests {
             // Invalid account index.
             {
                 let mut instructions = valid_instructions.clone();
-                instructions[instruction_index]
-                    .accounts
-                    .push(account_keys.len() as u8);
+                instructions[instruction_index].accounts.push(account_keys.len() as u8);
                 let transaction = create_legacy_transaction(
                     num_signatures,
                     header,
@@ -788,9 +779,7 @@ mod tests {
                     atls[0].writable_indexes.len() + atls[0].readonly_indexes.len();
                 let total_accounts = (account_keys.len() + num_lookup_accounts) as u8;
                 let mut instructions = valid_instructions.clone();
-                instructions[instruction_index]
-                    .accounts
-                    .push(total_accounts);
+                instructions[instruction_index].accounts.push(total_accounts);
                 let transaction = create_v0_transaction(
                     num_signatures,
                     header,
@@ -809,12 +798,8 @@ mod tests {
 
         // SIMD-0160, too many instructions are invalid
         {
-            let too_many_instructions: Vec<_> = valid_instructions
-                .iter()
-                .cycle()
-                .take(65)
-                .cloned()
-                .collect();
+            let too_many_instructions: Vec<_> =
+                valid_instructions.iter().cycle().take(65).cloned().collect();
             let transaction = create_legacy_transaction(
                 num_signatures,
                 header,

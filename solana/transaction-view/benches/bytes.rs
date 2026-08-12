@@ -15,9 +15,8 @@ fn setup() -> Vec<(u16, usize, Vec<u8>)> {
     for value in 0..PACKET_DATA_SIZE as u16 {
         let short_u16 = ShortU16(value);
         let mut buffer = vec![0u8; 16];
-        let serialized_len = options
-            .serialized_size(&short_u16)
-            .expect("Failed to get serialized size");
+        let serialized_len =
+            options.serialized_size(&short_u16).expect("Failed to get serialized size");
         serialize_into(&mut buffer[..], &short_u16).expect("Serialization failed");
         values.push((value, serialized_len as usize, buffer));
     }

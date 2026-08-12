@@ -164,12 +164,10 @@ impl<const SANITIZED: bool, D: TransactionData> TransactionView<SANITIZED, D> {
     #[inline]
     pub fn transaction_config(&self) -> Option<TransactionConfigView<'_>> {
         let transaction_config_frame = self.frame.transaction_config_frame();
-        transaction_config_frame
-            .is_present()
-            .then_some(TransactionConfigView {
-                transaction_config_frame,
-                bytes: self.data(),
-            })
+        transaction_config_frame.is_present().then_some(TransactionConfigView {
+            transaction_config_frame,
+            bytes: self.data(),
+        })
     }
 
     /// Return the full serialized transaction data.
@@ -213,8 +211,7 @@ impl<D: TransactionData> TransactionView<true, D> {
     /// Return the number of unsigned static account keys.
     #[inline]
     pub(crate) fn num_static_unsigned_static_accounts(&self) -> u8 {
-        self.num_static_account_keys()
-            .wrapping_sub(self.num_required_signatures())
+        self.num_static_account_keys().wrapping_sub(self.num_required_signatures())
     }
 
     /// Return the number of writable unsigned static accounts.
@@ -410,10 +407,7 @@ mod tests {
         );
         assert_eq!(
             view.num_address_table_lookups(),
-            tx.message
-                .address_table_lookups()
-                .map(|x| x.len() as u8)
-                .unwrap_or(0)
+            tx.message.address_table_lookups().map(|x| x.len() as u8).unwrap_or(0)
         );
 
         assert!(view.transaction_config().is_none());
