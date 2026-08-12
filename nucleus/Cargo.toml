@@ -1,0 +1,86 @@
+[package]
+name = "magicblock-engine-nucleus"
+
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+name = "nucleus"
+
+[features]
+config = [
+    "dep:serde",
+    "dep:serde_with",
+    "dep:solana-keypair",
+    "dep:solana-pubkey",
+    "dep:solana-signer"
+]
+default = []
+heed = ["dep:heed"]
+ledger = ["solana-hash/copy", "solana-hash/wincode", "wincode/derive"]
+metrics = ["dep:prometheus", "dep:tracing"]
+notifier = ["tokio/sync"]
+runtime = [
+    "agave-transaction-view/agave-unstable-api",
+    "dep:derive_more",
+    "dep:oneshot",
+    "dep:solana-svm",
+    "dep:solana-transaction-error",
+    "ledger",
+    "service",
+    "tls",
+    "tokio/sync"
+]
+service = ["metrics", "shutdown"]
+shutdown = ["dep:futures", "dep:oneshot", "dep:tokio", "dep:tokio-util", "dep:tracing"]
+testkit = [
+    "dep:solana-instruction",
+    "dep:solana-keypair",
+    "dep:solana-message",
+    "dep:solana-pubkey",
+    "dep:solana-signature",
+    "dep:solana-signer",
+    "dep:tempfile",
+    "dep:tracing-subscriber",
+    "dep:v42-calculator-interface",
+    "runtime",
+    "solana-transaction/wincode"
+]
+tls = ["dep:solana-instruction-error", "dep:solana-pubkey", "dep:wincode"]
+
+[dependencies]
+derive_more = { workspace = true, optional = true, features = ["deref", "from"] }
+futures = { workspace = true, features = ["alloc"], optional = true }
+heed = { workspace = true, optional = true }
+oneshot = { workspace = true, features = ["async"], optional = true }
+prometheus = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+serde_with = { workspace = true, optional = true }
+solana-hash = { workspace = true, optional = true }
+solana-instruction-error = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["macros", "signal", "time"], optional = true }
+tokio-util = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"], optional = true }
+wincode = { workspace = true, optional = true }
+
+agave-transaction-view = { workspace = true, optional = true }
+solana-instruction = { workspace = true, optional = true }
+solana-keypair = { workspace = true, optional = true }
+solana-message = { workspace = true, optional = true }
+solana-pubkey = { workspace = true, optional = true }
+solana-signature = { workspace = true, optional = true }
+solana-signer = { workspace = true, optional = true }
+solana-svm = { workspace = true, optional = true }
+solana-transaction = { workspace = true, optional = true }
+solana-transaction-error = { workspace = true, optional = true }
+v42-calculator-interface = { workspace = true, optional = true, features = ["builder"] }
+
+[lints]
+workspace = true

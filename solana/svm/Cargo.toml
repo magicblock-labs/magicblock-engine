@@ -1,0 +1,84 @@
+[package]
+name = "solana-svm"
+
+authors = { workspace = true }
+description = "Solana SVM"
+documentation = "https://docs.rs/solana-svm"
+edition = { workspace = true }
+homepage = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+version = "4.1.1"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[lib]
+crate-type = ["lib"]
+name = "solana_svm"
+
+[features]
+# No-op stub retained only so external (patched-in) crates that reference
+# `solana-svm/agave-unstable-api` still resolve; the lib is no longer gated on
+# it, and the upstream svm-* deps enable their unstable API unconditionally below.
+agave-unstable-api = []
+dev-context-only-utils = ["dep:qualifier_attr", "solana-program-runtime/dev-context-only-utils"]
+# Compatibility stub forwarded to program-runtime; neither fork consumes frozen
+# ABI metadata.
+frozen-abi = ["solana-program-runtime/frozen-abi"]
+shuttle-test = ["solana-program-runtime/shuttle-test", "solana-svm-type-overrides/shuttle-test"]
+svm-internal = ["dep:qualifier_attr"]
+
+[dependencies]
+magic-root-interface = { workspace = true }
+
+ahash = { workspace = true }
+qualifier_attr = { workspace = true, optional = true }
+serde = { workspace = true, features = ["rc"] }
+
+solana-account = { workspace = true }
+solana-clock = { workspace = true }
+solana-fee-structure = { workspace = true }
+solana-hash = { workspace = true }
+solana-instruction = { workspace = true, features = ["std"] }
+solana-instructions-sysvar = { workspace = true }
+solana-loader-v3-interface = { workspace = true, features = ["bincode"] }
+solana-message = { workspace = true }
+solana-program-runtime = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-rent = { workspace = true }
+solana-sdk-ids = { workspace = true }
+solana-svm-callback = { workspace = true, features = ["agave-unstable-api"] }
+solana-svm-feature-set = { workspace = true, features = ["agave-unstable-api"] }
+solana-svm-log-collector = { workspace = true, features = ["agave-unstable-api"] }
+solana-svm-transaction = { workspace = true, features = ["agave-unstable-api"] }
+solana-svm-type-overrides = { workspace = true, features = ["agave-unstable-api"] }
+solana-system-interface = { workspace = true, features = ["bincode"] }
+solana-transaction-context = { workspace = true }
+solana-transaction-error = { workspace = true }
+
+[dev-dependencies]
+bincode = { workspace = true }
+env_logger = { workspace = true }
+rand = { workspace = true }
+solana-clock = { workspace = true }
+solana-ed25519-program = { workspace = true }
+solana-epoch-schedule = { workspace = true }
+solana-fee-calculator = { workspace = true }
+solana-keypair = { workspace = true }
+solana-native-token = { workspace = true }
+solana-precompile-error = { workspace = true }
+solana-program-runtime = { workspace = true, features = ["dev-context-only-utils"] }
+solana-pubkey = { workspace = true, features = ["rand"] }
+solana-rent = { workspace = true }
+solana-sbpf = { workspace = true, features = ["jit"] }
+solana-signature = { workspace = true, features = ["rand"] }
+solana-signer = { workspace = true }
+# See order-crates-for-publishing.py for using this unusual `path = "."`
+solana-svm = { path = ".", features = ["dev-context-only-utils", "svm-internal"] }
+solana-sysvar = { workspace = true }
+solana-transaction = { workspace = true, features = ["dev-context-only-utils"] }
+solana-transaction-context = { workspace = true, features = ["dev-context-only-utils"] }
+
+[lints.rust]
+unexpected_cfgs = "allow"

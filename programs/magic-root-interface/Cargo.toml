@@ -1,0 +1,18 @@
+[package]
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+name = "magic-root-interface"
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+wincode = { workspace = true }
+
+solana-account = { workspace = true, features = ["wincode"] }
+solana-instruction = { workspace = true, features = ["wincode"] }
+solana-pubkey = { workspace = true }
+
+[lints]
+workspace = true

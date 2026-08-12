@@ -1,0 +1,48 @@
+[package]
+name = "solana-transaction-context"
+
+authors = { workspace = true }
+description = "Solana data shared between program runtime and built-in programs as well as SBF programs."
+documentation = "https://docs.rs/solana-transaction-context"
+edition = { workspace = true }
+homepage = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+version = "4.1.1"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg=docsrs"]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[features]
+# No-op stub retained only so external (patched-in) crates that reference
+# `solana-transaction-context/agave-unstable-api` still resolve; the lib is no
+# longer gated on it.
+agave-unstable-api = []
+bincode = ["dep:bincode", "serde", "solana-account/bincode"]
+dev-context-only-utils = ["bincode"]
+serde = ["serde/derive", "solana-pubkey/serde"]
+
+[dependencies]
+solana-account = { workspace = true }
+solana-instruction = { workspace = true, features = ["std"] }
+solana-instructions-sysvar = { workspace = true }
+solana-pubkey = { workspace = true }
+
+[target.'cfg(not(any(target_arch = "sbf", target_arch = "bpf")))'.dependencies]
+bincode = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+solana-rent = { workspace = true }
+solana-sbpf = { workspace = true }
+solana-sdk-ids = { workspace = true }
+
+[dev-dependencies]
+solana-account-info = { workspace = true }
+solana-program-entrypoint = { workspace = true }
+solana-system-interface = { workspace = true }
+solana-transaction-context = { path = ".", features = ["dev-context-only-utils"] }
+static_assertions = "1.1.0"
+
+[lints.rust]
+unexpected_cfgs = "allow"
