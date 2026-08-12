@@ -186,8 +186,7 @@ impl<'a> InstructionContext<'a, '_> {
     pub fn get_program_key(&self) -> Result<&'a Pubkey, InstructionError> {
         self.get_index_of_program_account_in_transaction()
             .and_then(|index_in_transaction| {
-                self.transaction_context
-                    .get_key_of_account_at_index(index_in_transaction)
+                self.transaction_context.get_key_of_account_at_index(index_in_transaction)
             })
     }
 
@@ -195,9 +194,7 @@ impl<'a> InstructionContext<'a, '_> {
     pub fn get_program_owner(&self) -> Result<Pubkey, InstructionError> {
         self.get_index_of_program_account_in_transaction()
             .and_then(|index_in_transaction| {
-                self.transaction_context
-                    .accounts
-                    .try_borrow(index_in_transaction)
+                self.transaction_context.accounts.try_borrow(index_in_transaction)
             })
             .map(|acc| *acc.owner())
     }

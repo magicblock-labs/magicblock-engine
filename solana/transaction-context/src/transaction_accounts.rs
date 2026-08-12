@@ -1,232 +1,64 @@
-#[cfg(feature = "dev-context-only-utils")]
-use qualifier_attr::qualifiers;
 use {
-    crate::{
-        IndexOfAccount, MAX_ACCOUNT_DATA_GROWTH_PER_TRANSACTION, MAX_ACCOUNT_DATA_LEN,
-        vm_addresses::{GUEST_ACCOUNT_PAYLOAD_BASE_ADDRESS, GUEST_REGION_SIZE},
-        vm_slice::VmSlice,
-    },
-    solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
+    crate::{IndexOfAccount, MAX_ACCOUNT_DATA_GROWTH_PER_TRANSACTION, MAX_ACCOUNT_DATA_LEN},
+    solana_account::AccountSharedData,
     solana_instruction::error::InstructionError,
     solana_pubkey::Pubkey,
     std::{
         cell::{Cell, UnsafeCell},
         ops::{Deref, DerefMut},
-        ptr,
-        sync::Arc,
     },
 };
-
-/// This struct is shared with programs. Do not alter its fields.
-#[repr(C)]
-#[derive(Debug, PartialEq)]
-struct AccountSharedFields {
-    key: Pubkey,
-    owner: Pubkey,
-    lamports: u64,
-    // The payload is going to be filled with the guest virtual address of the account payload
-    // vector.
-    payload: VmSlice<u8>,
-}
-
-#[derive(Debug, PartialEq)]
-#[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
-struct AccountPrivateFields {
-    rent_epoch: u64,
-    executable: bool,
-    payload: Arc<Vec<u8>>,
-}
-
-#[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
-impl AccountPrivateFields {
-    fn payload_len(&self) -> usize {
-        self.payload.len()
-    }
-}
 
 #[derive(Debug, PartialEq)]
 #[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
 pub struct TransactionAccountView<'a> {
-    abi_account: &'a AccountSharedFields,
-    private_fields: &'a AccountPrivateFields,
+    account: &'a AccountSharedData,
 }
 
 #[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
-impl ReadableAccount for TransactionAccountView<'_> {
-    fn lamports(&self) -> u64 {
-        self.abi_account.lamports
-    }
-
-    fn data(&self) -> &[u8] {
-        self.private_fields.payload.as_slice()
-    }
-
-    fn owner(&self) -> &Pubkey {
-        &self.abi_account.owner
-    }
-
-    fn executable(&self) -> bool {
-        self.private_fields.executable
-    }
-
-    fn rent_epoch(&self) -> u64 {
-        self.private_fields.rent_epoch
+impl Deref for TransactionAccountView<'_> {
+    type Target = AccountSharedData;
+    fn deref(&self) -> &Self::Target {
+        self.account
     }
 }
 
 #[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
 impl PartialEq<AccountSharedData> for TransactionAccountView<'_> {
     fn eq(&self, other: &AccountSharedData) -> bool {
-        other.lamports() == self.lamports()
-            && other.data() == self.data()
-            && other.owner() == self.owner()
-            && other.executable() == self.executable()
-            && other.rent_epoch() == self.rent_epoch()
+        self.account == other
     }
 }
 
 #[derive(Debug)]
 #[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
 pub struct TransactionAccountViewMut<'a> {
-    abi_account: &'a mut AccountSharedFields,
-    private_fields: &'a mut AccountPrivateFields,
+    account: &'a mut AccountSharedData,
 }
 
 #[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
 impl TransactionAccountViewMut<'_> {
-    fn data_mut(&mut self) -> &mut Vec<u8> {
-        Arc::make_mut(&mut self.private_fields.payload)
-    }
-
-    pub(crate) fn resize(&mut self, new_len: usize, value: u8) {
-        self.data_mut().resize(new_len, value);
-        // SAFETY: We are synchronizing the lengths.
-        unsafe {
-            self.abi_account.payload.set_len(new_len as u64);
-        }
-    }
-
-    #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-    pub(crate) fn set_data_from_slice(&mut self, new_data: &[u8]) {
-        // If the buffer isn't shared, we're going to memcpy in place.
-        let Some(data) = Arc::get_mut(&mut self.private_fields.payload) else {
-            // If the buffer is shared, the cheapest thing to do is to clone the
-            // incoming slice and replace the buffer.
-            self.private_fields.payload = Arc::new(new_data.to_vec());
-            // SAFETY: We are synchronizing the lengths.
-            unsafe {
-                self.abi_account.payload.set_len(new_data.len() as u64);
-            }
-            return;
-        };
-
-        let new_len = new_data.len();
-
-        // Reserve additional capacity if needed. Here we make the assumption
-        // that growing the current buffer is cheaper than doing a whole new
-        // allocation to make `new_data` owned.
-        //
-        // This assumption holds true during CPI, especially when the account
-        // size doesn't change but the account is only changed in place. And
-        // it's also true when the account is grown by a small margin (the
-        // realloc limit is quite low), in which case the allocator can just
-        // update the allocation metadata without moving.
-        //
-        // Shrinking and copying in place is always faster than making
-        // `new_data` owned, since shrinking boils down to updating the Vec's
-        // length.
-
-        data.reserve(new_len.saturating_sub(data.len()));
-
-        // Safety:
-        // We just reserved enough capacity. We set data::len to 0 to avoid
-        // possible UB on panic (dropping uninitialized elements), do the copy,
-        // finally set the new length once everything is initialized.
-        unsafe {
-            data.set_len(0);
-            ptr::copy_nonoverlapping(new_data.as_ptr(), data.as_mut_ptr(), new_len);
-            data.set_len(new_len);
-            self.abi_account.payload.set_len(new_len as u64);
-        };
-    }
-
-    pub(crate) fn extend_from_slice(&mut self, data: &[u8]) {
-        self.data_mut().extend_from_slice(data);
-        // SAFETY: We are synchronizing the lengths.
-        unsafe {
-            self.abi_account
-                .payload
-                .set_len(self.private_fields.payload_len() as u64);
-        }
-    }
-
     pub(crate) fn reserve(&mut self, additional: usize) {
-        if let Some(data) = Arc::get_mut(&mut self.private_fields.payload) {
-            data.reserve(additional)
-        } else {
-            let mut data =
-                Vec::with_capacity(self.private_fields.payload_len().saturating_add(additional));
-            data.extend_from_slice(self.private_fields.payload.as_slice());
-            self.private_fields.payload = Arc::new(data);
-        }
-    }
-
-    #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-    pub(crate) fn is_shared(&self) -> bool {
-        Arc::strong_count(&self.private_fields.payload) > 1
+        self.account.cow_mut().reserve(additional);
     }
 }
 
 #[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
-impl ReadableAccount for TransactionAccountViewMut<'_> {
-    fn lamports(&self) -> u64 {
-        self.abi_account.lamports
-    }
-
-    fn data(&self) -> &[u8] {
-        self.private_fields.payload.as_slice()
-    }
-
-    fn owner(&self) -> &Pubkey {
-        &self.abi_account.owner
-    }
-
-    fn executable(&self) -> bool {
-        self.private_fields.executable
-    }
-
-    fn rent_epoch(&self) -> u64 {
-        self.private_fields.rent_epoch
+impl Deref for TransactionAccountViewMut<'_> {
+    type Target = AccountSharedData;
+    fn deref(&self) -> &Self::Target {
+        self.account
     }
 }
 
 #[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
-impl WritableAccount for TransactionAccountViewMut<'_> {
-    fn set_lamports(&mut self, lamports: u64) {
-        self.abi_account.lamports = lamports;
-    }
-
-    fn data_as_mut_slice(&mut self) -> &mut [u8] {
-        Arc::make_mut(&mut self.private_fields.payload).as_mut_slice()
-    }
-
-    fn set_owner(&mut self, owner: Pubkey) {
-        self.abi_account.owner = owner;
-    }
-
-    fn copy_into_owner_from_slice(&mut self, source: &[u8]) {
-        self.abi_account.owner.as_mut().copy_from_slice(source);
-    }
-
-    fn set_executable(&mut self, executable: bool) {
-        self.private_fields.executable = executable;
-    }
-
-    fn set_rent_epoch(&mut self, epoch: u64) {
-        self.private_fields.rent_epoch = epoch;
+impl DerefMut for TransactionAccountViewMut<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.account
     }
 }
 
+//
 /// An account key and the matching account
 #[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
 pub type KeyedAccountSharedData = (Pubkey, AccountSharedData);
@@ -237,8 +69,7 @@ pub(crate) type DeconstructedTransactionAccounts =
 #[derive(Debug)]
 #[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
 pub struct TransactionAccounts {
-    shared_account_fields: Box<[UnsafeCell<AccountSharedFields>]>,
-    private_account_fields: Box<[UnsafeCell<AccountPrivateFields>]>,
+    accounts: Box<[UnsafeCell<KeyedAccountSharedData>]>,
     borrow_counters: Box<[BorrowCounter]>,
     touched_flags: Box<[Cell<bool>]>,
     resize_delta: Cell<i64>,
@@ -250,36 +81,11 @@ impl TransactionAccounts {
     pub(crate) fn new(accounts: Vec<KeyedAccountSharedData>) -> TransactionAccounts {
         let touched_flags = vec![Cell::new(false); accounts.len()].into_boxed_slice();
         let borrow_counters = vec![BorrowCounter::default(); accounts.len()].into_boxed_slice();
-        let (shared_accounts, private_fields) = accounts
-            .into_iter()
-            .enumerate()
-            .map(|(idx, item)| {
-                (
-                    UnsafeCell::new(AccountSharedFields {
-                        key: item.0,
-                        owner: *item.1.owner(),
-                        lamports: item.1.lamports(),
-                        payload: VmSlice::new(
-                            GUEST_ACCOUNT_PAYLOAD_BASE_ADDRESS
-                                .saturating_add(GUEST_REGION_SIZE.saturating_mul(idx as u64)),
-                            item.1.data().len() as u64,
-                        ),
-                    }),
-                    UnsafeCell::new(AccountPrivateFields {
-                        rent_epoch: item.1.rent_epoch(),
-                        executable: item.1.executable(),
-                        payload: item.1.data_clone(),
-                    }),
-                )
-            })
-            .collect::<(
-                Vec<UnsafeCell<AccountSharedFields>>,
-                Vec<UnsafeCell<AccountPrivateFields>>,
-            )>();
+        let accounts =
+            accounts.into_iter().map(UnsafeCell::new).collect::<Vec<_>>().into_boxed_slice();
 
         TransactionAccounts {
-            shared_account_fields: shared_accounts.into_boxed_slice(),
-            private_account_fields: private_fields.into_boxed_slice(),
+            accounts,
             borrow_counters,
             touched_flags,
             resize_delta: Cell::new(0),
@@ -288,7 +94,7 @@ impl TransactionAccounts {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.shared_account_fields.len()
+        self.accounts.len()
     }
 
     pub fn touch(&self, index: IndexOfAccount) -> Result<(), InstructionError> {
@@ -330,8 +136,7 @@ impl TransactionAccounts {
         Ok(())
     }
 
-    #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-    pub(crate) fn try_borrow_mut(
+    pub fn try_borrow_mut(
         &self,
         index: IndexOfAccount,
     ) -> Result<AccountRefMut<'_>, InstructionError> {
@@ -344,31 +149,11 @@ impl TransactionAccounts {
         // SAFETY: The borrow counter guarantees this is the only mutable borrow of this account.
         // The unwrap is safe because accounts.len() == borrow_counters.len(), so the missing
         // account error should have been returned above.
-        let svm_account = unsafe {
-            &mut *self
-                .shared_account_fields
-                .get(index as usize)
-                .unwrap()
-                .get()
-        };
-
-        let private_fields = unsafe {
-            &mut *self
-                .private_account_fields
-                .get(index as usize)
-                .unwrap()
-                .get()
-        };
-
         let account = TransactionAccountViewMut {
-            abi_account: svm_account,
-            private_fields,
+            account: unsafe { &mut (*self.accounts.get(index as usize).unwrap().get()).1 },
         };
 
-        Ok(AccountRefMut {
-            account,
-            borrow_counter,
-        })
+        Ok(AccountRefMut { account, borrow_counter })
     }
 
     pub fn try_borrow(&self, index: IndexOfAccount) -> Result<AccountRef<'_>, InstructionError> {
@@ -381,40 +166,17 @@ impl TransactionAccounts {
         // SAFETY: The borrow counter guarantees there are no mutable borrow of this account.
         // The unwrap is safe because accounts.len() == borrow_counters.len(), so the missing
         // account error should have been returned above.
-        let svm_account = unsafe {
-            &*self
-                .shared_account_fields
-                .get(index as usize)
-                .unwrap()
-                .get()
-        };
+        let keyed_account = unsafe { &*self.accounts.get(index as usize).unwrap().get() };
 
-        let private_fields = unsafe {
-            &*self
-                .private_account_fields
-                .get(index as usize)
-                .unwrap()
-                .get()
-        };
+        let account = TransactionAccountView { account: &keyed_account.1 };
 
-        let account = TransactionAccountView {
-            abi_account: svm_account,
-            private_fields,
-        };
-
-        Ok(AccountRef {
-            account,
-            borrow_counter,
-        })
+        Ok(AccountRef { account, borrow_counter })
     }
 
     pub(crate) fn add_lamports_delta(&self, balance: i128) -> Result<(), InstructionError> {
         let delta = self.lamports_delta.get();
-        self.lamports_delta.set(
-            delta
-                .checked_add(balance)
-                .ok_or(InstructionError::ArithmeticOverflow)?,
-        );
+        self.lamports_delta
+            .set(delta.checked_add(balance).ok_or(InstructionError::ArithmeticOverflow)?);
         Ok(())
     }
 
@@ -422,47 +184,18 @@ impl TransactionAccounts {
         self.lamports_delta.get()
     }
 
+    fn drain_accounts(&mut self) -> Box<[UnsafeCell<KeyedAccountSharedData>]> {
+        debug_assert_eq!(self.accounts.len(), self.borrow_counters.len());
+        debug_assert_eq!(self.accounts.len(), self.touched_flags.len());
+        std::mem::take(&mut self.accounts)
+    }
+
     fn deconstruct_into_keyed_account_shared_data(&mut self) -> Vec<KeyedAccountSharedData> {
-        let shared_account_fields = std::mem::take(&mut self.shared_account_fields);
-        let private_account_fields = std::mem::take(&mut self.private_account_fields);
-        shared_account_fields
-            .into_iter()
-            .zip(private_account_fields)
-            .map(|(shared_fields_cell, private_fields_cell)| {
-                let shared_fields = shared_fields_cell.into_inner();
-                let private_fields = private_fields_cell.into_inner();
-                (
-                    shared_fields.key,
-                    AccountSharedData::create_from_existing_shared_data(
-                        shared_fields.lamports,
-                        private_fields.payload.clone(),
-                        shared_fields.owner,
-                        private_fields.executable,
-                        private_fields.rent_epoch,
-                    ),
-                )
-            })
-            .collect()
+        self.drain_accounts().into_iter().map(UnsafeCell::into_inner).collect()
     }
 
     pub(crate) fn deconstruct_into_account_shared_data(&mut self) -> Vec<AccountSharedData> {
-        let shared_account_fields = std::mem::take(&mut self.shared_account_fields);
-        let private_account_fields = std::mem::take(&mut self.private_account_fields);
-        shared_account_fields
-            .into_iter()
-            .zip(private_account_fields)
-            .map(|(shared_fields_cell, private_fields_cell)| {
-                let shared_fields = shared_fields_cell.into_inner();
-                let private_fields = private_fields_cell.into_inner();
-                AccountSharedData::create_from_existing_shared_data(
-                    shared_fields.lamports,
-                    private_fields.payload.clone(),
-                    shared_fields.owner,
-                    private_fields.executable,
-                    private_fields.rent_epoch,
-                )
-            })
-            .collect()
+        self.drain_accounts().into_iter().map(|cell| cell.into_inner().1).collect()
     }
 
     pub(crate) fn take(mut self) -> DeconstructedTransactionAccounts {
@@ -476,20 +209,12 @@ impl TransactionAccounts {
 
     pub(crate) fn account_key(&self, index: IndexOfAccount) -> Option<&Pubkey> {
         // SAFETY: We never modify an account key, so returning a reference to it is safe.
-        unsafe {
-            self.shared_account_fields
-                .get(index as usize)
-                .map(|acc| &(*acc.get()).key)
-        }
+        unsafe { self.accounts.get(index as usize).map(|acc| &(*acc.get()).0) }
     }
 
     pub(crate) fn account_keys_iter(&self) -> impl Iterator<Item = &Pubkey> {
         // SAFETY: We never modify account keys, so returning an immutable reference to them is safe.
-        unsafe {
-            self.shared_account_fields
-                .iter()
-                .map(|item| &(*item.get()).key)
-        }
+        unsafe { self.accounts.iter().map(|item| &(*item.get()).0) }
     }
 }
 
@@ -578,13 +303,6 @@ pub struct AccountRefMut<'a> {
 #[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
 impl Drop for AccountRefMut<'_> {
     fn drop(&mut self) {
-        // SAFETY: We are synchronizing the lengths.
-        unsafe {
-            self.account
-                .abi_account
-                .payload
-                .set_len(self.account.private_fields.payload_len() as u64);
-        }
         self.borrow_counter.release_borrow_mut();
     }
 }
@@ -607,8 +325,13 @@ impl DerefMut for AccountRefMut<'_> {
 #[cfg(all(test, not(target_arch = "sbf"), not(target_arch = "bpf")))]
 mod tests {
     use {
-        crate::transaction_accounts::TransactionAccounts, solana_account::AccountSharedData,
-        solana_instruction::error::InstructionError, solana_pubkey::Pubkey,
+        crate::transaction_accounts::TransactionAccounts,
+        solana_account::{
+            AccountBuilder, AccountFieldPatch, AccountMode, AccountSharedData, DirtyMarkers,
+            ReadableAccount, StateFlags, WritableAccount,
+        },
+        solana_instruction::error::InstructionError,
+        solana_pubkey::Pubkey,
     };
 
     #[test]
@@ -734,5 +457,73 @@ mod tests {
                 assert_eq!(acc.err(), Some(InstructionError::AccountBorrowFailed));
             }
         }
+    }
+
+    #[test]
+    fn preserves_account_shared_data_on_deconstruct() {
+        let key = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let mut account = AccountBuilder::default()
+            .lamports(23)
+            .data(vec![1, 2, 3])
+            .owner(owner)
+            .mode(AccountMode::ReadOnly)
+            .slot(41)
+            .executable(true)
+            .build::<AccountSharedData>();
+
+        AccountFieldPatch::Mode(AccountMode::Ephemeral).apply(&mut account).unwrap();
+        AccountFieldPatch::Slot(42).apply(&mut account).unwrap();
+        account.set_flags(StateFlags::EXECUTABLE);
+        AccountFieldPatch::DataAt { offset: 0, data: vec![4, 5] }
+            .apply(&mut account)
+            .unwrap();
+
+        let expected_markers = account.markers().bits();
+        let mut tx_accounts = TransactionAccounts::new(vec![(key, account)]);
+        let mut accounts = tx_accounts.deconstruct_into_account_shared_data();
+        let account = accounts.pop().unwrap();
+
+        assert!(accounts.is_empty());
+        assert!(account.is(AccountMode::Ephemeral));
+        assert_eq!(account.slot(), 42);
+        assert!(account.executable());
+        assert_eq!(account.data(), &[4, 5, 3]);
+        assert_eq!(account.markers().bits(), expected_markers);
+    }
+
+    #[test]
+    fn mutable_view_updates_account_shared_data() {
+        let key = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+        let new_owner = Pubkey::new_unique();
+        let tx_accounts =
+            TransactionAccounts::new(vec![(key, AccountSharedData::new(7, 2, &owner))]);
+
+        {
+            let mut account = tx_accounts.try_borrow_mut(0).unwrap();
+            account.set_lamports(11);
+            account.set_owner(new_owner);
+            account.set_executable(true);
+            account.resize(4, 9);
+            assert_eq!(account.data(), &[0, 0, 9, 9]);
+            account.set_data_from_slice(&[1, 2, 3]);
+            account.extend_from_slice(&[4, 5]);
+            account.data_as_mut_slice()[0] = 8;
+        }
+
+        let mut tx_accounts = tx_accounts;
+        let mut accounts = tx_accounts.deconstruct_into_account_shared_data();
+        let account = accounts.pop().unwrap();
+
+        assert!(accounts.is_empty());
+        assert_eq!(account.lamports(), 11);
+        assert_eq!(account.owner(), &new_owner);
+        assert!(account.executable());
+        assert_eq!(account.data(), &[8, 2, 3, 4, 5]);
+        assert!(account.markers().contains(DirtyMarkers::LAMPORTS));
+        assert!(account.markers().contains(DirtyMarkers::OWNER));
+        assert!(account.markers().contains(DirtyMarkers::FLAGS));
+        assert!(account.markers().contains(DirtyMarkers::DATA));
     }
 }
