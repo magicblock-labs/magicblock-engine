@@ -6,6 +6,12 @@ type: Feature
 labels: ["enhancement"]
 ---
 
+<!--
+Title: start with an imperative verb and describe the requested outcome in
+sentence case, without a category prefix or terminal punctuation. Example: `Add
+durable engine state replication`
+-->
+
 ## Goal
 <!-- What outcome should this change produce? -->
 
