@@ -1,0 +1,28 @@
+name: Run CI - Format
+
+on:
+  push:
+    branches: [master, dev]
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.96.1 --profile minimal --component rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --check
