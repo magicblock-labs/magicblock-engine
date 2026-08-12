@@ -3,6 +3,7 @@
 //! Rent management for SVM.
 
 use {
+    solana_account::{AccountMode, AccountSharedData, ReadableAccount},
     solana_clock::Epoch,
     solana_pubkey::Pubkey,
     solana_rent::Rent,
@@ -29,33 +30,28 @@ pub enum RentState {
     RentExempt,
 }
 
-/// Check rent state transition for an account in a transaction.
-///
-/// This method has a default implementation that calls into
-/// `check_rent_state_with_account`.
+/// Checks a writable account rent-state transition inside a transaction.
 pub fn check_rent_state(
-    pre_rent_state: &RentState,
-    post_rent_state: &RentState,
+    pre_rent_state: Option<&RentState>,
+    post_rent_state: Option<&RentState>,
     transaction_context: &TransactionContext,
     index: IndexOfAccount,
 ) -> TransactionResult<()> {
-    let expect_msg = "account must exist at TransactionContext index";
-    check_rent_state_with_account(
-        pre_rent_state,
-        post_rent_state,
-        transaction_context
-            .get_key_of_account_at_index(index)
-            .expect(expect_msg),
-        index,
-    )?;
+    if let Some((pre_rent_state, post_rent_state)) = pre_rent_state.zip(post_rent_state) {
+        let expect_msg = "account must exist at TransactionContext index if rent-states are Some";
+        check_rent_state_with_account(
+            pre_rent_state,
+            post_rent_state,
+            transaction_context.get_key_of_account_at_index(index).expect(expect_msg),
+            index,
+        )?;
+    }
     Ok(())
 }
 
-/// Check rent state transition for an account directly.
+/// Checks a rent-state transition for a known account address.
 ///
-/// This method has a default implementation that checks whether the
-/// transition is allowed and returns an error if it is not. It also
-/// verifies that the account is not the incinerator.
+/// The incinerator is exempt from this check.
 pub fn check_rent_state_with_account(
     pre_rent_state: &RentState,
     post_rent_state: &RentState,
@@ -72,36 +68,26 @@ pub fn check_rent_state_with_account(
     }
 }
 
-/// Determine the rent state of an account.
+/// Determines the rent state of an account from lamports and data size.
 ///
-/// This method has a default implementation that treats accounts with zero
-/// lamports as uninitialized and uses the implemented `get_rent` to
-/// determine whether an account is rent-exempt.
-pub fn get_account_rent_state(
-    rent: &Rent,
-    account_lamports: u64,
-    account_size: usize,
-) -> RentState {
-    if account_lamports == 0 {
+/// A nonzero-lamport ephemeral account is rent-exempt even below the normal
+/// minimum. An account with zero lamports remains uninitialized.
+pub fn get_account_rent_state(rent: &Rent, acc: &AccountSharedData) -> RentState {
+    let (lamports, len) = (acc.lamports(), acc.data().len());
+    if lamports == 0 {
         RentState::Uninitialized
-    } else if rent.is_exempt(account_lamports, account_size) {
+    } else if rent.is_exempt(lamports, len) || acc.is(AccountMode::Ephemeral) {
         RentState::RentExempt
     } else {
-        RentState::RentPaying {
-            data_size: account_size,
-            lamports: account_lamports,
-        }
+        RentState::RentPaying { data_size: len, lamports }
     }
 }
 
-/// Check whether a transition from the pre_rent_state to the
-/// post_rent_state is valid.
+/// Returns whether a pre/post rent-state transition is valid.
 ///
-/// This method has a default implementation that allows transitions from
-/// any state to `RentState::Uninitialized` or `RentState::RentExempt`.
-/// Pre-state `RentState::RentPaying` can only transition to
-/// `RentState::RentPaying` if the data size remains the same and the
-/// account is not credited.
+/// Any state may become uninitialized or rent-exempt. A rent-paying account
+/// may remain rent-paying only if it keeps the same data size and is not
+/// credited.
 pub fn transition_allowed(pre_rent_state: &RentState, post_rent_state: &RentState) -> bool {
     match post_rent_state {
         RentState::Uninitialized | RentState::RentExempt => true,
