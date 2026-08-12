@@ -201,12 +201,12 @@ copy from the other backend, so there is only ever one live copy. `Transient`
 accounts remain authoritative and persisted even though runtime code cannot
 mutate them.
 
-To change accounts directly, use `Engine::account(pubkey)`. `create`, `update`,
-`patch`, and `delete` each run as one signed, committed transaction and require
-the local signer to match the engine authority.
+To replace accounts directly, use `Engine::account(pubkey)`. `create`, `update`,
+and `delete` each run as one signed, committed transaction and require the local
+signer to match the engine authority.
 
 ```rust
-use solana_account::{AccountBuilder, AccountFieldPatch, AccountMode};
+use solana_account::{AccountBuilder, AccountMode};
 use solana_pubkey::Pubkey;
 
 let key = Pubkey::new_unique();
@@ -214,25 +214,18 @@ let owner = Pubkey::new_unique();
 let account = AccountBuilder::default()
     .lamports(2_000_000)
     .owner(owner)
-    .mode(AccountMode::Delegated)
+    .mode(AccountMode::ReadOnly)
+    .slot(1)
     .data(vec![1, 2, 3, 4])
     .build();
 
 engine.account(key).create(account, None).await?;
-let current = engine.accounts().loader().load(&key)?;
-
-engine
-    .account(key)
-    .patch(vec![AccountFieldPatch::DataAt {
-        offset: 0,
-        data: vec![9; 4],
-    }])
-    .await?;
 
 let replacement = AccountBuilder::default()
     .lamports(2_000_000)
     .owner(owner)
-    .mode(AccountMode::Delegated)
+    .mode(AccountMode::ReadOnly)
+    .slot(2)
     .data(vec![5; 4])
     .build();
 engine.account(key).update(replacement).await?;
@@ -241,7 +234,12 @@ engine.account(key).delete().await?;
 
 Each mutation is one committed transaction. `create` can also run optional
 post-finalize instructions in that transaction; if an instruction fails, the
-creation does not commit.
+creation does not commit. Complete-account patches cover non-flag fields, and
+finalization atomically installs the caller-supplied flags without changing
+lamports. Callers are responsible for supplying current state; later
+replacements remain subject to the account's slot and lifecycle rules. Internal
+create composition places post-finalize instructions immediately after
+finalization.
 
 Missing external accounts can be coordinated with `Engine::accounts().ensure`.
 The first caller receives `MissingAccount::Load`; concurrent callers receive a
@@ -289,20 +287,23 @@ async fn submit(
 No polling loops — subscribe to what you care about and the engine pushes
 updates as they happen.
 
-Keeper accessors expose Tokio broadcast receivers for live state:
+Keeper accessors expose dedicated Tokio channels for live state:
 
 ```rust
 let mut account_updates = engine.accounts().subscribe(key).await;
 let mut blocks = engine.blocks().subscribe();
 
-let account = account_updates.recv().await?;
-let block = blocks.recv().await?;
+let account = account_updates.recv().await.expect("account stream is open");
+let block = blocks.recv().await.expect("block stream is open");
 ```
 
 Related accessors subscribe to program-owned accounts, cache evictions,
 snapshot completion, transaction status, logs, processed transactions, and
-service messages. Broadcast consumers must handle `Lagged` when they fall
-behind and `Closed` during shutdown; retained reads are available separately.
+service messages. Signatures use terminal oneshot channels; other multicast
+streams give each consumer a bounded queue and disconnect a consumer that falls
+behind. Processed transactions, service messages, and cache evictions each have
+one process-lifetime consumer and apply producer backpressure when its queue is
+full.
 
 ---
 

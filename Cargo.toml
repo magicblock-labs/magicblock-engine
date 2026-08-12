@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "accountsdb",
+    "engine",
     "keeper",
     "ledger",
     "nucleus",
@@ -28,6 +29,7 @@ version = "0.1.0"
 
 [workspace.dependencies]
 accountsdb = { path = "accountsdb", package = "magicblock-accountsdb" }
+engine = { path = "engine", package = "magicblock-engine" }
 keeper = { path = "keeper", package = "magicblock-keeper" }
 ledger = { path = "ledger", package = "magicblock-ledger" }
 magic-root-interface = { path = "programs/magic-root-interface" }
@@ -90,6 +92,7 @@ agave-transaction-view = "4.1.1"
 solana-account-info = "3.1.1"
 solana-clock = "3.1.0"
 solana-compute-budget-instruction = "=4.1.1"
+solana-compute-budget-program = "=4.1.1"
 solana-cpi = "3.1.0"
 solana-ed25519-program = "3.0.0"
 solana-epoch-rewards = "3.0.1"

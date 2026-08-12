@@ -1,0 +1,61 @@
+[package]
+name = "magicblock-engine"
+
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+name = "engine"
+
+[features]
+testkit = ["keeper/testkit", "nucleus/testkit", "tokio/time"]
+
+[dependencies]
+keeper = { workspace = true }
+ledger = { workspace = true }
+magic-root-interface = { workspace = true }
+magic-root-program = { workspace = true }
+nucleus = { workspace = true, features = ["config", "shutdown"] }
+processor = { workspace = true }
+
+derive_more = { workspace = true }
+num_cpus = { workspace = true }
+oneshot = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
+wincode = { workspace = true }
+
+agave-transaction-view = { workspace = true }
+solana-account = { workspace = true }
+solana-compute-budget-program = { workspace = true, features = ["agave-unstable-api"] }
+solana-instruction = { workspace = true }
+solana-keypair = { workspace = true }
+solana-message = { workspace = true }
+solana-program-runtime = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-sdk-ids = { workspace = true }
+solana-signer = { workspace = true }
+solana-system-program = { workspace = true, features = ["agave-unstable-api"] }
+solana-transaction = { workspace = true, features = ["wincode"] }
+
+[dev-dependencies]
+keeper = { workspace = true, features = ["testkit"] }
+magicblock-engine = { path = ".", features = ["testkit"] }
+nucleus = { workspace = true, features = ["testkit"] }
+v42-calculator-interface = { workspace = true, features = ["builder"] }
+
+solana-instruction-error = { workspace = true }
+solana-packet = { workspace = true }
+solana-signer = { workspace = true }
+solana-system-interface = { workspace = true, features = ["bincode"] }
+solana-sysvar = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true
