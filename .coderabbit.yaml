@@ -10,10 +10,14 @@ reviews:
   poem: false
   request_changes_workflow: true
 
+  
+  
   auto_review:
-    enabled: true
+    enabled: true               # Disables automatic reviews on push
     drafts: true
-  auto_incremental_review: true
+    base_branches:
+      - ".*"
+    auto_incremental_review: true
 
   # Never pause after repeated pushes.
   auto_pause_after_reviewed_commits: 0
