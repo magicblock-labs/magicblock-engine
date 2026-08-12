@@ -15,6 +15,10 @@ additional framing.
 Handshake requests and responses are signed with the sender's local key and
 must be within 30 seconds of the receiver's clock. A server accepts only local
 follower identities in its allowlist; an empty allowlist denies all followers.
+A follower identity may hold only one active transfer at a time; its reservation
+is released when that connection's worker exits. Stream workers detect peer
+disconnects through writes triggered by durable cursor updates, which are
+published at least every time block is produced while the engine is running.
 A follower verifies responses against `Engine::authority()`, which must be
 configured with the source authority through `nucleus::config::Authority::remote`.
 

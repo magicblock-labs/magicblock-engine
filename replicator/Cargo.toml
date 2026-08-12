@@ -19,6 +19,7 @@ ledger = { workspace = true }
 nucleus = { workspace = true, features = ["ledger", "service"] }
 
 derive_more = { workspace = true, features = ["from"] }
+scc = { workspace = true }
 snedfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "sync", "time"] }

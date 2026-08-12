@@ -2378,6 +2378,7 @@ dependencies = [
  "magicblock-engine-nucleus",
  "magicblock-keeper",
  "magicblock-ledger",
+ "scc",
  "snedfile",
  "solana-account",
  "solana-keypair",

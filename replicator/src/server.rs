@@ -13,6 +13,7 @@ use nucleus::{
     ledger::{ACCOUNTSDB_SNAPSHOT_FILE, BlockstorePosition},
     shutdown::{CancellationToken, Service, ShutdownHandle, ShutdownManager, ShutdownReason},
 };
+use scc::HashMap;
 use solana_keypair::Signer;
 use solana_pubkey::Pubkey;
 use tokio::{
@@ -37,7 +38,7 @@ pub struct ReplicationDispatcher {
     /// Engine whose local signer authenticates responses and whose ledger is served.
     engine: Engine,
     /// List of follower identities permitted to replicate.
-    allowed: Arc<[Pubkey]>,
+    allowed: Arc<HashMap<Pubkey, Arc<()>>>,
     /// Cancels the accept loop and parents every per-connection worker.
     shutdown: ShutdownHandle,
 }
@@ -53,7 +54,7 @@ struct ReplicationServer {
     #[deref]
     engine: Engine,
     /// Local follower identities permitted to replicate.
-    allowed: Arc<[Pubkey]>,
+    allowed: Arc<HashMap<Pubkey, Arc<()>>>,
     /// Fires when the dispatcher shuts down.
     cancellation: CancellationToken,
 }
@@ -91,6 +92,7 @@ impl ReplicationDispatcher {
         }
         let listener = TcpListener::bind(addr).await?;
         let shutdown = shutdown.handle(Service::ReplicationDispatcher);
+        let allowed = Arc::new(allowed.iter().map(|&identity| (identity, Arc::new(()))).collect());
         let service = Self {
             listener,
             engine,
@@ -143,7 +145,7 @@ impl ReplicationServer {
         connection: TcpStream,
         peer: SocketAddr,
         engine: Engine,
-        allowed: Arc<[Pubkey]>,
+        allowed: Arc<HashMap<Pubkey, Arc<()>>>,
         cancellation: CancellationToken,
     ) -> Result<()> {
         // Subscribe before sampling so racing cursor updates remain queued.
@@ -170,8 +172,10 @@ impl ReplicationServer {
 
     /// Negotiates an initial transfer, catches up immediately, then follows durable cursors.
     async fn run(mut self) -> Result<()> {
-        let action = match self.handshake() {
-            Ok(action) => action,
+        // Cursor updates arrive at every block and write new durable bytes. Those writes
+        // detect peer disconnects, exit this worker, and release its identity lease.
+        let (action, _lease) = match self.handshake() {
+            Ok(handshake) => handshake,
             Err(error) => {
                 warn!(?error, "replication handshake rejected");
                 let response = HandshakeResponse::Err(error.to_string());
@@ -230,14 +234,11 @@ impl ReplicationServer {
     }
 
     /// Selects retained streaming when possible, otherwise the newest ready snapshot.
-    fn handshake(&mut self) -> Result<ReplicationAction> {
+    fn handshake(&mut self) -> Result<(ReplicationAction, Arc<()>)> {
         let _timer = metrics::time(Operation::ServerHandshake);
         let handshake: Handshake<HandshakeRequest> = protocol::read(&mut self.connection)?;
         handshake.verify()?;
-        if !self.allowed.contains(&handshake.identity) {
-            let msg = "replication access not allowed";
-            return Err(ReplicationError::Handshake(msg.into()));
-        }
+        let lease = self.reserve(handshake.identity)?;
         if handshake.payload.version != PROTO_VERSION {
             return Err(ReplicationError::VersionMismatch(PROTO_VERSION));
         }
@@ -246,14 +247,15 @@ impl ReplicationServer {
         if requested > self.position.current {
             return Err(ReplicationError::PositionNotFound(requested));
         }
-        match self.ledger().cursor(requested.superblock) {
-            Some(end) if requested.offset <= end => Ok(ReplicationAction::Stream {
+        let action = match self.ledger().cursor(requested.superblock) {
+            Some(end) if requested.offset <= end => ReplicationAction::Stream {
                 from: requested,
                 blockstore: blockstore(self, requested.superblock)?,
-            }),
-            Some(_) => Err(ReplicationError::PositionNotFound(requested)),
-            None => self.snapshot(),
-        }
+            },
+            Some(_) => return Err(ReplicationError::PositionNotFound(requested)),
+            None => self.snapshot()?,
+        };
+        Ok((action, lease))
     }
 
     /// Falls back to the newest retained superblock that has a staged accountsdb
@@ -309,6 +311,19 @@ impl ReplicationServer {
         )?;
         self.position.current.offset = end;
         Ok(())
+    }
+
+    /// Reserves an allowed identity until the returned lease drops.
+    fn reserve(&self, identity: Pubkey) -> Result<Arc<()>> {
+        let Some(entry) = self.allowed.get_sync(&identity) else {
+            let msg = "replication access not allowed";
+            return Err(ReplicationError::Handshake(msg.into()));
+        };
+        if Arc::strong_count(entry.get()) > 1 {
+            let msg = "replication stream already active";
+            return Err(ReplicationError::Handshake(msg.into()));
+        }
+        Ok(entry.get().clone())
     }
 }
 
