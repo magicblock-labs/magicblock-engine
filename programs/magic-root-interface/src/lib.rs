@@ -15,7 +15,7 @@ pub enum MagicRootInstruction {
     /// Replace the target's complete flag value and, when executable, load it
     /// into the transaction's program cache. Does not change lamports.
     Finalize(StateFlags),
-    /// Close the target account.
+    /// Close the target account and hide any cached executable immediately.
     Delete,
     /// Run follow-up instructions immediately after finalizing the same target
     /// (e.g. initializing a freshly created account); each is invoked via CPI

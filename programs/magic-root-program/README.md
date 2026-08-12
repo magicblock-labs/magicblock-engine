@@ -27,7 +27,9 @@ authorization. The SVM's separate top-level-only privilege rule is unchanged.
   loads an executable target into the transaction program cache. It does not
   change lamports; failed executable loading rolls back the installed flags.
 - `Delete` transitions read-only, placeholder, or ephemeral targets to
-  `AccountMode::Closed`, and accountsdb removes them during writeback. Modes that
+  `AccountMode::Closed`, immediately hides any transaction-local cached program,
+  and removes its shared cache entry after successful execution and access
+  validation. Accountsdb removes closed accounts during writeback. Modes that
   cannot transition to closed are rejected.
 - `PostFinalize` invokes follow-up instructions through native CPI and is
   placed immediately after the target's `Finalize` by internal composers. It

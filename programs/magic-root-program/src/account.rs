@@ -72,7 +72,7 @@ pub(crate) fn finalize(
 
 /// Marks the target account closed for removal from storage.
 pub(crate) fn delete(
-    ctx: &InvokeContext<'_, '_>,
+    ctx: &mut InvokeContext<'_, '_>,
     target: IndexOfAccount,
 ) -> Result<(), InstructionError> {
     let mut acc = ctx.transaction_context.accounts().try_borrow_mut(target)?;
@@ -80,6 +80,11 @@ pub(crate) fn delete(
     if let Err(error) = acc.set_mode(AccountMode::Closed) {
         ic_msg!(ctx, "MagicRoot: {}", error);
         return Err(InstructionError::InvalidArgument);
+    }
+    let pubkey = *ctx.transaction_context.get_key_of_account_at_index(target)?;
+    if acc.executable() {
+        let entry = ProgramCacheEntry::default().into();
+        ctx.program_cache_for_tx_batch.store_modified_entry(pubkey, entry);
     }
     ic_msg!(ctx, "MagicRoot: removed");
     Ok(())

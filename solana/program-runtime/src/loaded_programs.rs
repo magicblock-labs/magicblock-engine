@@ -69,8 +69,6 @@ impl PartialEq for ProgramRuntimeEnvironment {
 
 impl Eq for ProgramRuntimeEnvironment {}
 
-pub const MAX_LOADED_ENTRY_COUNT: usize = 512;
-
 /// Actual payload of [ProgramCacheEntry].
 #[derive(Default)]
 pub enum ProgramCacheEntryType {
@@ -286,7 +284,11 @@ impl ProgramCache {
 
     pub fn merge(&self, modified_entries: &HashMap<Pubkey, Arc<ProgramCacheEntry>>) {
         for (key, entry) in modified_entries {
-            self.assign_program(*key, entry.clone());
+            if matches!(&entry.program, ProgramCacheEntryType::Closed) {
+                self.index.remove_sync(key);
+            } else {
+                self.assign_program(*key, entry.clone());
+            }
         }
     }
 }
