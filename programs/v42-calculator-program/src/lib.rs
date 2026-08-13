@@ -10,7 +10,7 @@ use solana_msg::msg;
 use solana_program_entrypoint::entrypoint;
 use solana_program_error::ProgramResult;
 use solana_pubkey::Pubkey;
-use v42_calculator_interface::TRANSFER;
+use v42_calculator_interface::opcodes::TRANSFER;
 
 entrypoint!(process_instruction);
 

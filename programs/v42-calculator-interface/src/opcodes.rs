@@ -28,3 +28,7 @@ pub const DIV: u8 = 0x13;
 /// Evaluate a nested program via self-CPI and push its return-data `i64`. A
 /// `u16` LE byte length follows, then that many bytes of nested program.
 pub const CALL: u8 = 0x20;
+
+/// Transfer lamports and calculator value between instruction accounts 0 and
+/// 1; an exact little-endian `i64` delta follows.
+pub const TRANSFER: u8 = 0x30;

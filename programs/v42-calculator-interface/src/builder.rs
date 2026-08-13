@@ -5,7 +5,7 @@ use core::ops::{Add, Div, Mul, Sub};
 use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
 
-use crate::{opcodes::*, ID, TRANSFER};
+use crate::{opcodes::*, ID};
 
 /// Build a transfer between distinct v42-owned accounts. A positive `delta`
 /// moves value from `from` to `to`; a negative delta reverses the direction.
