@@ -170,6 +170,7 @@ impl MappedStorage {
             unsafe { mmap.as_mut_ptr().cast::<DatabaseMeta>().write(meta) };
             mmap.flush()?;
         }
+        let len = file.metadata()?.len();
         // SAFETY: the mapping is at least `DATABASE_META_RESERVATION` bytes long,
         // so the meta header and account head pointers stay within the map.
         let (meta, head) = unsafe {
@@ -179,7 +180,9 @@ impl MappedStorage {
             (meta, head)
         };
         let file = Mutex::new(file);
-        Ok(Self { meta, mmap, head, file })
+        let storage = Self { meta, mmap, head, file };
+        storage.meta().len.store(len, Release);
+        Ok(storage)
     }
 
     /// Flushes dirty pages to durable storage.
@@ -197,6 +200,8 @@ impl MappedStorage {
         let meta = self.meta();
         if meta.version != VERSION {
             Err(AccountsDBError::UnsupportedVersion(meta.version))
+        } else if Self::bytes(meta.cursor.load(Acquire) as u64) > meta.len.load(Acquire) {
+            Err(AccountsDBError::Corruption)
         } else {
             Ok(())
         }
