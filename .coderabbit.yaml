@@ -13,7 +13,7 @@ reviews:
   
   
   auto_review:
-    enabled: true               # Disables automatic reviews on push
+    enabled: true              
     drafts: true
     base_branches:
       - ".*"
