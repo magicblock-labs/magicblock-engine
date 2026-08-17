@@ -19,7 +19,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 use super::{
     BlockHasher, Sequencer,
-    locks::AccountLock,
+    locks::{AccountLock, LockTable},
     pool::{AvailableExecutors, Executors},
 };
 use crate::{
@@ -70,21 +70,34 @@ fn executor(id: ExecutorId) -> ExecutorHandle {
     executor_with_rx(id).0
 }
 
-// Readers share a lock until a writer contends, then the writer waits for every
-// current reader and is granted before later readers.
+// A waiting writer follows the active reader leases and retains priority over
+// readers that arrive after it.
 #[test]
 fn read_locks_share_until_a_writer_arrives() {
-    let mut lock = AccountLock::default();
+    let account = Pubkey::new_unique();
+    let read0 = resolved(&[(account, false)]);
+    let read1 = resolved(&[(account, false)]);
+    let write = resolved(&[(account, true)]);
+    let late0 = resolved(&[(account, false)]);
+    let late1 = resolved(&[(account, false)]);
+    let mut locks = LockTable::default();
+    let mut e0 = executor(0);
+    let mut e1 = executor(1);
+    let mut e2 = executor(2);
+    let mut e3 = executor(3);
+    let mut e4 = executor(4);
 
-    assert_eq!(lock.read(0), Ok(()));
-    assert_eq!(lock.read(1), Ok(()));
-    assert_eq!(lock.write(2), Err(0));
-    assert!(lock.locked());
+    locks.acquire(&mut e0, &read0).unwrap();
+    locks.acquire(&mut e1, &read1).unwrap();
+    assert_eq!(locks.acquire(&mut e2, &write), Err(0));
+    assert_eq!(locks.acquire(&mut e3, &late0), Err(0));
 
-    lock.unlock(0);
-    assert_eq!(lock.write(2), Err(1));
-    lock.unlock(1);
-    assert_eq!(lock.write(2), Ok(()));
+    locks.release(&mut e0);
+    assert_eq!(locks.acquire(&mut e0, &write), Err(1));
+    assert_eq!(locks.acquire(&mut e4, &late1), Err(1));
+
+    locks.release(&mut e1);
+    locks.acquire(&mut e1, &write).unwrap();
 }
 
 // One executor may reacquire a lock it already owns and may upgrade its own read
@@ -102,6 +115,25 @@ fn same_executor_can_reenter_and_upgrade() {
     assert_eq!(lock.read(5), Ok(()));
 }
 
+/// A failed write upgrade must preserve the executor's existing read lock.
+#[test]
+fn failed_upgrade_preserves_existing_read() {
+    let account = Pubkey::new_unique();
+    let read0 = resolved(&[(account, false)]);
+    let read1 = resolved(&[(account, false)]);
+    let write = resolved(&[(account, true)]);
+    let mut locks = LockTable::default();
+    let mut e0 = executor(0);
+    let mut e1 = executor(1);
+    let mut e2 = executor(2);
+
+    locks.acquire(&mut e0, &read0).unwrap();
+    locks.acquire(&mut e1, &read1).unwrap();
+    assert_eq!(locks.acquire(&mut e0, &write), Err(1));
+    locks.release(&mut e1);
+    assert_eq!(locks.acquire(&mut e2, &write), Err(0));
+}
+
 // A contending executor keeps priority after it is queued, preventing unrelated
 // readers from slipping ahead while the current writer drains.
 #[test]
@@ -109,7 +141,7 @@ fn contender_gets_priority_until_granted() {
     let mut lock = AccountLock::default();
 
     assert_eq!(lock.write(0), Ok(()));
-    lock.contend(1);
+    lock.contend(1, 0);
     assert_eq!(lock.read(2), Err(1));
 
     lock.unlock(0);
@@ -167,6 +199,60 @@ fn available_executors_track_busy_and_idle_state() {
     available.insert(2);
     assert_eq!(available.get(), Some(2));
     assert_eq!(available.busy(), 2);
+}
+
+/// Proves a transaction migrated between blockers cannot be stranded behind a
+/// contender reservation owned by an executor that has already become idle.
+#[tokio::test(flavor = "current_thread")]
+async fn migrated_transaction_does_not_strand_on_idle_contender() {
+    let mut tk = TestKeeper::new().await;
+    let mut sequencer = sequencer(&mut tk);
+    let a = Pubkey::new_unique();
+    let b = Pubkey::new_unique();
+    let c = Pubkey::new_unique();
+    let (mut e0, rx0) = executor_with_rx(0);
+    let (mut e1, rx1) = executor_with_rx(1);
+    let e2 = executor(2);
+
+    let t0 = resolved(&[(c, true)]);
+    let t1 = resolved(&[(a, true)]);
+    sequencer.locks.acquire(&mut e0, &t0).unwrap();
+    sequencer.locks.acquire(&mut e1, &t1).unwrap();
+    e0.batch.push(t0);
+    e1.batch.push(t1);
+
+    let (_ready_tx, ready_rx) = tokio_mpsc::channel(1);
+    sequencer.executors = Executors::new(vec![e0, e1, e2], ready_rx);
+    sequencer.executors.dispatch(0).unwrap();
+    sequencer.executors.dispatch(1).unwrap();
+    rx0.try_recv().unwrap();
+    rx1.try_recv().unwrap();
+
+    let first = resolved(&[(a, true)]);
+    let migrated = resolved(&[(a, true), (b, true), (c, true)]);
+    assert_eq!(
+        sequencer.locks.acquire(&mut sequencer.executors.handles[2], &first),
+        Err(1)
+    );
+    sequencer.executors.enqueue(first, 1);
+    assert_eq!(
+        sequencer.locks.acquire(&mut sequencer.executors.handles[2], &migrated),
+        Err(1)
+    );
+    sequencer.executors.enqueue(migrated, 1);
+
+    sequencer.handle_ready(ExecutorReady { id: 1, batch: Vec::new() }).unwrap();
+    rx1.try_recv().expect("first waiter dispatched");
+    sequencer.handle_ready(ExecutorReady { id: 0, batch: Vec::new() }).unwrap();
+    sequencer.handle_ready(ExecutorReady { id: 1, batch: Vec::new() }).unwrap();
+
+    let ExecutorMessage::Transactions(batch) =
+        rx1.try_recv().expect("migrated transaction dispatched")
+    else {
+        panic!("dispatched a transaction batch");
+    };
+    assert_eq!(batch.len(), 1);
+    assert!(sequencer.executors.handles.iter().all(|e| e.blocked.is_empty()));
 }
 
 // When a freed executor retries a transaction queued behind it, and that
