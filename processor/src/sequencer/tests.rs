@@ -1,13 +1,6 @@
-//! Sequencer unit tests for account locks and executor availability.
-//!
-//! These tests stay below the public processor surface so they can exercise the
-//! scheduling invariants directly: lock fairness, partial-acquire behavior, and
-//! the bookkeeping that decides when executor work can be drained.
+//! Sequencer unit tests for deterministic dependency ordering and pool draining.
 
-use std::{
-    collections::VecDeque,
-    sync::{Arc, mpsc},
-};
+use std::sync::{Arc, mpsc};
 
 use keeper::{
     Keeper,
@@ -18,324 +11,170 @@ use solana_pubkey::Pubkey;
 use tokio::sync::mpsc as tokio_mpsc;
 
 use super::{
-    BlockHasher, Sequencer,
-    locks::{AccountLock, LockTable},
-    pool::{AvailableExecutors, Executors},
+    BlockHasher, MAX_PENDING_EXECUTOR_TXNS, Sequencer, order::OrderingTable, pool::Executors,
 };
-use crate::{
-    ExecutorMessage, ExecutorReady,
-    executor::{ExecutorHandle, ExecutorId, ExecutorWork},
-};
+use crate::executor::{ExecutorEvent, ExecutorHandle, ExecutorId, ExecutorMessage};
 
-/// Constructs a bare sequencer over `tk`'s keeper without spawning executors.
-///
-/// Tests fill only the fields needed to call scheduling helpers directly; the
-/// message channels are intentionally inert.
 fn sequencer(tk: &mut TestKeeper) -> Sequencer {
     let state: Arc<Keeper> = tk.clone();
     let (_tx, rx) = tokio_mpsc::channel(1);
-    let (_ready_tx, ready_rx) = tokio_mpsc::channel(1);
-    let hasher = BlockHasher::new(state.blockhash());
+    let (_event_tx, event_rx) = tokio_mpsc::channel(1);
     Sequencer {
         slot: state.blocks().current_slot(),
+        hasher: BlockHasher::new(state.blockhash()),
         state,
-        locks: Default::default(),
+        ordering: Default::default(),
         rx,
-        hasher,
-        executors: Executors::new(Vec::new(), ready_rx),
+        executors: Executors::new(Vec::new(), event_rx),
         shutdown: tk.shutdown.handle(Service::Sequencer),
         replay: false,
     }
 }
 
-/// Builds an idle executor handle plus the receiver end of its dispatch channel,
-/// so a test can observe the batch `dispatch` actually sends.
 fn executor_with_rx(id: ExecutorId) -> (ExecutorHandle, mpsc::Receiver<ExecutorMessage>) {
-    let (tx, rx) = mpsc::sync_channel(1);
-    let handle = ExecutorHandle {
-        id,
-        work: ExecutorWork {
-            batch: Vec::new(),
-            locks: Default::default(),
-            blocked: VecDeque::new(),
-        },
-        tx,
-        task: None,
-    };
-    (handle, rx)
+    ExecutorHandle::mock(id)
 }
 
-/// [`executor_with_rx`] for tests that never inspect what was dispatched.
-fn executor(id: ExecutorId) -> ExecutorHandle {
-    executor_with_rx(id).0
+fn take_ticket(ordering: &mut OrderingTable) -> usize {
+    ordering.take_ready().expect("transaction is ready").ticket
 }
 
-// A waiting writer follows the active reader leases and retains priority over
-// readers that arrive after it.
+/// Proves leading readers may run together, a following writer waits for both
+/// in either completion order, and a later reader waits for that writer.
 #[test]
-fn read_locks_share_until_a_writer_arrives() {
+fn readers_share_and_writer_excludes_in_completion_order() {
     let account = Pubkey::new_unique();
-    let read0 = resolved(&[(account, false)]);
-    let read1 = resolved(&[(account, false)]);
-    let write = resolved(&[(account, true)]);
-    let late0 = resolved(&[(account, false)]);
-    let late1 = resolved(&[(account, false)]);
-    let mut locks = LockTable::default();
-    let mut e0 = executor(0);
-    let mut e1 = executor(1);
-    let mut e2 = executor(2);
-    let mut e3 = executor(3);
-    let mut e4 = executor(4);
+    let mut ordering = OrderingTable::default();
 
-    locks.acquire(&mut e0, &read0).unwrap();
-    locks.acquire(&mut e1, &read1).unwrap();
-    assert_eq!(locks.acquire(&mut e2, &write), Err(0));
-    assert_eq!(locks.acquire(&mut e3, &late0), Err(0));
+    assert!(!ordering.register(resolved(&[(account, false)])));
+    assert!(!ordering.register(resolved(&[(account, false)])));
+    assert!(ordering.register(resolved(&[(account, true)])));
+    assert!(ordering.register(resolved(&[(account, false)])));
 
-    locks.release(&mut e0);
-    assert_eq!(locks.acquire(&mut e0, &write), Err(1));
-    assert_eq!(locks.acquire(&mut e4, &late1), Err(1));
-
-    locks.release(&mut e1);
-    locks.acquire(&mut e1, &write).unwrap();
+    assert_eq!(take_ticket(&mut ordering), 0);
+    assert_eq!(take_ticket(&mut ordering), 1);
+    assert!(ordering.take_ready().is_none());
+    assert_eq!(ordering.complete(1), 0);
+    assert_eq!(ordering.complete(0), 1);
+    assert_eq!(take_ticket(&mut ordering), 2);
+    assert!(ordering.take_ready().is_none());
+    assert_eq!(ordering.complete(2), 1);
+    assert_eq!(take_ticket(&mut ordering), 3);
 }
 
-// One executor may reacquire a lock it already owns and may upgrade its own read
-// lock to a write lock without blocking itself.
+/// Proves the X(A) -> Y(A,B) -> Z(B) regression always releases Y before Z.
 #[test]
-fn same_executor_can_reenter_and_upgrade() {
-    let mut lock = AccountLock::default();
-
-    assert_eq!(lock.read(4), Ok(()));
-    assert_eq!(lock.write(4), Ok(()));
-    assert_eq!(lock.read(4), Ok(()));
-
-    lock.unlock(4);
-    assert!(!lock.locked());
-    assert_eq!(lock.read(5), Ok(()));
-}
-
-/// A failed write upgrade must preserve the executor's existing read lock.
-#[test]
-fn failed_upgrade_preserves_existing_read() {
-    let account = Pubkey::new_unique();
-    let read0 = resolved(&[(account, false)]);
-    let read1 = resolved(&[(account, false)]);
-    let write = resolved(&[(account, true)]);
-    let mut locks = LockTable::default();
-    let mut e0 = executor(0);
-    let mut e1 = executor(1);
-    let mut e2 = executor(2);
-
-    locks.acquire(&mut e0, &read0).unwrap();
-    locks.acquire(&mut e1, &read1).unwrap();
-    assert_eq!(locks.acquire(&mut e0, &write), Err(1));
-    locks.release(&mut e1);
-    assert_eq!(locks.acquire(&mut e2, &write), Err(0));
-}
-
-// A contending executor keeps priority after it is queued, preventing unrelated
-// readers from slipping ahead while the current writer drains.
-#[test]
-fn contender_gets_priority_until_granted() {
-    let mut lock = AccountLock::default();
-
-    assert_eq!(lock.write(0), Ok(()));
-    lock.contend(1, 0);
-    assert_eq!(lock.read(2), Err(1));
-
-    lock.unlock(0);
-    assert_eq!(lock.read(1), Ok(()));
-    assert_eq!(lock.read(2), Ok(()));
-}
-
-// If acquiring a multi-account transaction fails partway through, already-held
-// locks keep the blocked executor marked as the contender until its turn.
-#[tokio::test(flavor = "current_thread")]
-async fn acquire_locks_preserves_contender_priority_after_partial_conflict() {
-    let mut tk = TestKeeper::new().await;
-    let mut sequencer = sequencer(&mut tk);
+fn multi_account_dependency_preserves_stream_order() {
     let a = Pubkey::new_unique();
     let b = Pubkey::new_unique();
-    let mut blocker = executor(0);
-    let mut blocked = executor(1);
+    let mut ordering = OrderingTable::default();
 
-    sequencer.locks.acquire(&mut blocker, &resolved(&[(b, true)])).unwrap();
-    let err = sequencer
-        .locks
-        .acquire(&mut blocked, &resolved(&[(a, true), (b, true)]))
-        .expect_err("b blocks the second transaction");
+    ordering.register(resolved(&[(a, true)]));
+    ordering.register(resolved(&[(a, true), (b, true)]));
+    ordering.register(resolved(&[(b, true)]));
 
-    assert_eq!(err, 0);
-    assert_eq!(blocked.locks.get(&a), None);
-    // `a` was released after `b` conflicted, but the blocker keeps contender
-    // priority so unrelated executors cannot acquire it before the retry.
-    let a_lock = sequencer.locks.get_mut(&a).expect("a lock remains");
-    assert!(a_lock.read(1).is_err());
-    assert_eq!(a_lock.read(0), Ok(()));
-    assert!(blocker.locks.contains_key(&b));
+    assert_eq!(take_ticket(&mut ordering), 0);
+    assert!(ordering.take_ready().is_none());
+    assert_eq!(ordering.complete(0), 1);
+    assert_eq!(take_ticket(&mut ordering), 1);
+    assert!(ordering.take_ready().is_none());
+    assert_eq!(ordering.complete(1), 1);
+    assert_eq!(take_ticket(&mut ordering), 2);
 }
 
-// Executor availability reports the first idle executor, the busy count, and the
-// all-idle/all-busy states used by sequencer drain logic.
-#[test]
-fn available_executors_track_busy_and_idle_state() {
-    let mut available = AvailableExecutors::new(3);
-
-    assert_eq!(available.get(), Some(0));
-    assert!(available.idle());
-    available.remove(0);
-    available.remove(2);
-
-    assert_eq!(available.get(), Some(1));
-    assert_eq!(available.busy(), 2);
-    assert!(!available.empty());
-    assert!(!available.idle());
-
-    available.remove(1);
-    assert!(available.empty());
-    assert_eq!(available.get(), None);
-
-    available.insert(2);
-    assert_eq!(available.get(), Some(2));
-    assert_eq!(available.busy(), 2);
-}
-
-/// Proves a transaction migrated between blockers cannot be stranded behind a
-/// contender reservation owned by an executor that has already become idle.
-#[tokio::test(flavor = "current_thread")]
-async fn migrated_transaction_does_not_strand_on_idle_contender() {
-    let mut tk = TestKeeper::new().await;
-    let mut sequencer = sequencer(&mut tk);
+fn bridge_order(first: usize, second: usize) -> Vec<usize> {
     let a = Pubkey::new_unique();
     let b = Pubkey::new_unique();
-    let c = Pubkey::new_unique();
-    let (mut e0, rx0) = executor_with_rx(0);
-    let (mut e1, rx1) = executor_with_rx(1);
-    let e2 = executor(2);
+    let mut ordering = OrderingTable::default();
+    ordering.register(resolved(&[(a, true)]));
+    ordering.register(resolved(&[(b, true)]));
+    ordering.register(resolved(&[(a, true), (b, true)]));
+    ordering.register(resolved(&[(a, false)]));
+    ordering.register(resolved(&[(b, true)]));
 
-    let t0 = resolved(&[(c, true)]);
-    let t1 = resolved(&[(a, true)]);
-    sequencer.locks.acquire(&mut e0, &t0).unwrap();
-    sequencer.locks.acquire(&mut e1, &t1).unwrap();
-    e0.batch.push(t0);
-    e1.batch.push(t1);
-
-    let (_ready_tx, ready_rx) = tokio_mpsc::channel(1);
-    sequencer.executors = Executors::new(vec![e0, e1, e2], ready_rx);
-    sequencer.executors.dispatch(0).unwrap();
-    sequencer.executors.dispatch(1).unwrap();
-    rx0.try_recv().unwrap();
-    rx1.try_recv().unwrap();
-
-    let first = resolved(&[(a, true)]);
-    let migrated = resolved(&[(a, true), (b, true), (c, true)]);
-    assert_eq!(
-        sequencer.locks.acquire(&mut sequencer.executors.handles[2], &first),
-        Err(1)
-    );
-    sequencer.executors.enqueue(first, 1);
-    assert_eq!(
-        sequencer.locks.acquire(&mut sequencer.executors.handles[2], &migrated),
-        Err(1)
-    );
-    sequencer.executors.enqueue(migrated, 1);
-
-    sequencer.handle_ready(ExecutorReady { id: 1, batch: Vec::new() }).unwrap();
-    rx1.try_recv().expect("first waiter dispatched");
-    sequencer.handle_ready(ExecutorReady { id: 0, batch: Vec::new() }).unwrap();
-    sequencer.handle_ready(ExecutorReady { id: 1, batch: Vec::new() }).unwrap();
-
-    let ExecutorMessage::Transactions(batch) =
-        rx1.try_recv().expect("migrated transaction dispatched")
-    else {
-        panic!("dispatched a transaction batch");
-    };
-    assert_eq!(batch.len(), 1);
-    assert!(sequencer.executors.handles.iter().all(|e| e.blocked.is_empty()));
+    assert_eq!(take_ticket(&mut ordering), 0);
+    assert_eq!(take_ticket(&mut ordering), 1);
+    assert_eq!(ordering.complete(first), 0);
+    assert_eq!(ordering.complete(second), 1);
+    let mut released = vec![take_ticket(&mut ordering)];
+    assert_eq!(ordering.complete(2), 2);
+    released.push(take_ticket(&mut ordering));
+    released.push(take_ticket(&mut ordering));
+    released
 }
 
-// When a freed executor retries a transaction queued behind it, and that
-// transaction re-acquires its now-free lock but then conflicts with a lock still
-// held by another executor, it rolls back and is re-queued behind the new blocker.
-#[tokio::test(flavor = "current_thread")]
-async fn handle_ready_requeues_behind_the_new_blocker() {
-    let mut tk = TestKeeper::new().await;
-    let mut sequencer = sequencer(&mut tk);
-    let x = Pubkey::new_unique();
-    let y = Pubkey::new_unique();
-
-    let mut e0 = executor(0);
-    let mut e1 = executor(1);
-    sequencer.locks.acquire(&mut e0, &resolved(&[(x, true)])).unwrap();
-    sequencer.locks.acquire(&mut e1, &resolved(&[(y, true)])).unwrap();
-    // A transaction needing both x and y is parked behind executor 0, the x holder.
-    e0.blocked.push_back(resolved(&[(x, true), (y, true)]));
-
-    let (_ready_tx, ready_rx) = tokio_mpsc::channel(1);
-    sequencer.executors = Executors::new(vec![e0, e1], ready_rx);
-
-    // Executor 0 finishes: x is released, but the retried transaction now conflicts
-    // with y (still held by executor 1) and is re-parked behind executor 1.
-    sequencer.handle_ready(ExecutorReady { id: 0, batch: Vec::new() }).unwrap();
-
-    assert_eq!(
-        sequencer.executors.handles[1].blocked.len(),
-        1,
-        "requeued behind y's holder"
-    );
-    assert!(
-        sequencer.executors.handles[0].blocked.is_empty(),
-        "no longer queued behind x"
-    );
-    assert!(
-        sequencer.executors.handles[0].batch.is_empty(),
-        "nothing dispatched to executor 0"
-    );
-    // x was rolled back (no holder) but keeps executor 1 as its priority contender.
-    let x_lock = sequencer.locks.get_mut(&x).expect("x lock retained");
-    assert!(!x_lock.locked());
-    assert_eq!(
-        x_lock.read(2),
-        Err(1),
-        "blocker keeps contender priority on x"
-    );
-    // y is still write-held by executor 1.
-    assert_eq!(
-        sequencer.locks.get_mut(&y).expect("y lock retained").read(2),
-        Err(1)
-    );
+/// Proves alternate executor completion orders produce the same transitive
+/// conflict order for a multi-account bridge and its dependents.
+#[test]
+fn executor_completion_order_does_not_change_conflict_order() {
+    assert_eq!(bridge_order(0, 1), vec![2, 3, 4]);
+    assert_eq!(bridge_order(1, 0), vec![2, 3, 4]);
 }
 
-// A freed executor re-dispatches a transaction queued behind it once it can fully
-// re-acquire its locks, handing it back to the executor in a fresh batch.
+/// Proves ready work fills the pool, pending work applies exact backpressure, a
+/// completed drain resets dependency state, and executor failure releases none.
 #[tokio::test(flavor = "current_thread")]
-async fn handle_ready_redispatches_unblocked_transaction() {
+async fn pool_backpressure_and_drain_reset_dependency_state() {
     let mut tk = TestKeeper::new().await;
     let mut sequencer = sequencer(&mut tk);
-    let x = Pubkey::new_unique();
+    let (e0, rx0) = executor_with_rx(0);
+    let (e1, rx1) = executor_with_rx(1);
+    let (_event_tx, event_rx) = tokio_mpsc::channel(1);
+    sequencer.executors = Executors::new(vec![e0, e1], event_rx);
 
-    let (mut e0, rx) = executor_with_rx(0);
-    sequencer.locks.acquire(&mut e0, &resolved(&[(x, true)])).unwrap();
-    e0.blocked.push_back(resolved(&[(x, true)]));
+    for _ in 0..MAX_PENDING_EXECUTOR_TXNS * 2 {
+        sequencer.ordering.register(resolved(&[(Pubkey::new_unique(), true)]));
+    }
+    assert!(!sequencer.accepting());
+    sequencer.dispatch_ready().unwrap();
+    assert!(matches!(
+        rx0.try_recv(),
+        Ok(ExecutorMessage::Transaction { .. })
+    ));
+    assert!(matches!(
+        rx1.try_recv(),
+        Ok(ExecutorMessage::Transaction { .. })
+    ));
 
-    let (_ready_tx, ready_rx) = tokio_mpsc::channel(1);
-    sequencer.executors = Executors::new(vec![e0], ready_rx);
+    // Complete all tickets while consuming each singular dispatch so the fake
+    // executor channels model workers becoming ready again.
+    for ticket in 0..MAX_PENDING_EXECUTOR_TXNS * 2 {
+        let id = (ticket % 2) as ExecutorId;
+        sequencer.handle_event(ExecutorEvent::Completed { id, ticket }).unwrap();
+        if ticket + 2 < MAX_PENDING_EXECUTOR_TXNS * 2 {
+            let rx = if id == 0 { &rx0 } else { &rx1 };
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(ExecutorMessage::Transaction { .. })
+            ));
+        }
+    }
+    sequencer.drain().await.unwrap();
+    assert!(sequencer.ordering.is_empty());
+    assert!(sequencer.accepting());
 
-    // Executor 0 finishes: x is released, the queued transaction re-acquires it and
-    // is dispatched straight back to executor 0.
-    sequencer.handle_ready(ExecutorReady { id: 0, batch: Vec::new() }).unwrap();
-
-    let ExecutorMessage::Transactions(batch) = rx.try_recv().expect("batch dispatched") else {
-        panic!("dispatched a transaction batch");
+    let account = Pubkey::new_unique();
+    assert!(!sequencer.ordering.register(resolved(&[(account, true)])));
+    assert!(sequencer.ordering.register(resolved(&[(account, true)])));
+    sequencer.dispatch_ready().unwrap();
+    let Ok(ExecutorMessage::Transaction(ready)) = rx0.try_recv() else {
+        panic!("first transaction was not dispatched after drain");
     };
-    assert_eq!(batch.len(), 1);
-    assert!(batch[0].static_account_keys().contains(&x));
-    // x is held again for the redispatched transaction, and its queue is empty.
+    assert_eq!(ready.ticket, 0, "tickets reset at drain");
+    assert!(matches!(rx1.try_recv(), Err(mpsc::TryRecvError::Empty)));
+
+    let error = sequencer
+        .handle_event(ExecutorEvent::Failed { id: 0 })
+        .expect_err("executor failure must fail-stop the sequencer");
+    assert!(matches!(
+        error,
+        crate::ProcessorError::ServiceUnavailable(Service::TransactionExecutor(0))
+    ));
     assert_eq!(
-        sequencer.locks.get_mut(&x).expect("x lock").read(2),
-        Err(0),
-        "x re-held by executor 0"
+        sequencer.ordering.len(),
+        2,
+        "failed ticket remains outstanding"
     );
-    assert!(sequencer.executors.handles[0].blocked.is_empty());
+    assert!(sequencer.ordering.take_ready().is_none());
+    assert!(matches!(rx1.try_recv(), Err(mpsc::TryRecvError::Empty)));
 }
