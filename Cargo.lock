@@ -2150,7 +2150,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "magic-root-interface"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "solana-account",
  "solana-instruction",
@@ -2160,7 +2160,7 @@ dependencies = [
 
 [[package]]
 name = "magic-root-program"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "magic-root-interface",
  "magicblock-engine-nucleus",
@@ -2179,7 +2179,7 @@ dependencies = [
 
 [[package]]
 name = "magicblock-accountsdb"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ahash",
  "assert_matches",
@@ -2202,7 +2202,7 @@ dependencies = [
 
 [[package]]
 name = "magicblock-engine"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "agave-transaction-view",
  "derive_more",
@@ -2239,7 +2239,7 @@ dependencies = [
 
 [[package]]
 name = "magicblock-engine-nucleus"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "agave-transaction-view",
  "derive_more",
@@ -2271,7 +2271,7 @@ dependencies = [
 
 [[package]]
 name = "magicblock-keeper"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "agave-feature-set",
  "ahash",
@@ -2310,7 +2310,7 @@ dependencies = [
 
 [[package]]
 name = "magicblock-ledger"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "agave-transaction-view",
  "bitcode",
@@ -2337,7 +2337,7 @@ dependencies = [
 
 [[package]]
 name = "magicblock-processor"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "agave-feature-set",
  "agave-precompiles",
@@ -2373,7 +2373,7 @@ dependencies = [
 
 [[package]]
 name = "magicblock-replicator"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "derive_more",
  "magicblock-engine",
@@ -4959,7 +4959,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "v42-calculator-interface"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "solana-instruction",
  "solana-pubkey",
@@ -4967,7 +4967,7 @@ dependencies = [
 
 [[package]]
 name = "v42-calculator-program"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "solana-account-info",
  "solana-cpi",
