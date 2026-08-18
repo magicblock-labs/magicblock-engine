@@ -13,20 +13,20 @@ const OPERATION_TIME: MetricSpec = MetricSpec {
     name: "processor_operation_duration_micros",
     help: "Processor operation duration distribution in microseconds.",
 };
-/// Executors currently running transaction batches.
+/// Executors currently running transactions.
 const BUSY_EXECUTORS: MetricSpec = MetricSpec {
     name: "processor_busy_executors",
-    help: "Current processor executors running transaction batches.",
+    help: "Current processor executors running transactions.",
 };
-/// Transactions queued behind account-lock conflicts.
+/// Transactions waiting for input-order dependencies.
 const BLOCKED_TRANSACTIONS: MetricSpec = MetricSpec {
     name: "processor_blocked_transactions",
-    help: "Current processor transactions queued behind account-lock conflicts.",
+    help: "Current processor transactions with unfinished ordering dependencies.",
 };
-/// Account lock conflict counter.
-const LOCK_CONFLICTS: MetricSpec = MetricSpec {
-    name: "processor_lock_conflicts",
-    help: "Processor account-lock conflicts.",
+/// Transactions registered with an ordering dependency.
+const ORDERING_DEPENDENCIES: MetricSpec = MetricSpec {
+    name: "processor_ordering_dependencies",
+    help: "Processor transactions registered with an account ordering dependency.",
 };
 /// Failed transaction counter grouped by terminal failure kind.
 const FAILED_TRANSACTIONS: MetricSpec = MetricSpec {
@@ -79,19 +79,21 @@ pub(crate) fn busy_executors(count: usize) {
     });
 }
 
-/// Records one transaction queued behind an executor.
+/// Records one transaction waiting for ordering dependencies.
 pub(crate) fn blocked_transaction() {
     metric::with_metrics(&METRICS, |m| m.blocked_transactions.inc());
 }
 
-/// Records one queued transaction leaving an executor backlog.
-pub(crate) fn unblocked_transaction() {
-    metric::with_metrics(&METRICS, |m| m.blocked_transactions.dec());
+/// Records transactions whose ordering dependencies completed together.
+pub(crate) fn unblocked_transactions(count: usize) {
+    metric::with_metrics(&METRICS, |m| {
+        m.blocked_transactions.sub(metric::gauge_value(count))
+    });
 }
 
-/// Records one account-lock conflict.
-pub(crate) fn lock_conflict() {
-    metric::with_metrics(&METRICS, |m| m.lock_conflicts.inc());
+/// Records one transaction registered with an ordering dependency.
+pub(crate) fn ordering_dependency() {
+    metric::with_metrics(&METRICS, |m| m.ordering_dependencies.inc());
 }
 
 /// Records one terminal transaction failure.
@@ -103,12 +105,12 @@ pub(crate) fn failed_transaction(kind: FailureKind) {
 struct Metrics {
     /// Runtime operation duration and completion counters.
     operations: OperationCounters,
-    /// Executors currently running transaction batches.
+    /// Executors currently running transactions.
     busy_executors: IntGauge,
-    /// Transactions queued behind account-lock conflicts.
+    /// Transactions waiting for input-order dependencies.
     blocked_transactions: IntGauge,
-    /// Account-lock conflict counter.
-    lock_conflicts: IntCounter,
+    /// Transactions registered with an ordering dependency.
+    ordering_dependencies: IntCounter,
     /// Per-kind failed transaction counters resolved during initialization.
     failed_transactions: [IntCounter; 2],
 }
@@ -125,7 +127,7 @@ impl Default for Metrics {
             operations: OperationCounters::new(OPERATION_TIME),
             busy_executors: metric::gauge(BUSY_EXECUTORS, 0),
             blocked_transactions: metric::gauge(BLOCKED_TRANSACTIONS, 0),
-            lock_conflicts: metric::counter(LOCK_CONFLICTS, 0),
+            ordering_dependencies: metric::counter(ORDERING_DEPENDENCIES, 0),
             failed_transactions,
         }
     }

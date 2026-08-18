@@ -3,10 +3,14 @@
 The processor schedules transactions across a fixed pool of SVM executors and
 commits their results through keeper.
 
-The sequencer tracks each static account key with executor-holder bits and an
-exclusive-write bit. Transactions with non-conflicting read/write sets run in
-parallel. Conflicting transactions queue behind the executor holding the
-blocking account and are retried when that executor becomes available.
+The sequencer preserves canonical stream order for account conflicts while
+retaining parallel execution for disjoint transactions and read/read access.
+Block-local dependency tracking is independent of executor completion order.
+
+Lookahead is bounded at 16 pending transactions per executor, applying
+backpressure to the input stream once the bound is reached. Every full drain
+resets the ordering state and block-local tickets: block boundaries, quiescence
+barriers, and orderly shutdown all start the next scheduling epoch cleanly.
 
 Block hashes chain the prior block hash with each appended transaction's
 canonical signature. Finalization drains executor work before publishing the

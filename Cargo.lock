@@ -2349,6 +2349,7 @@ dependencies = [
  "magicblock-engine-nucleus",
  "magicblock-keeper",
  "oneshot",
+ "smallvec",
  "solana-account",
  "solana-compute-budget-instruction",
  "solana-hash",

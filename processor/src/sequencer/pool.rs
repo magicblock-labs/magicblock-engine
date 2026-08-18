@@ -1,137 +1,80 @@
-//! Executor-pool bookkeeping for the sequencer.
+//! Executor-pool availability, dispatch, and lifecycle bookkeeping.
 
-use std::mem;
-
-use keeper::ResolvedTransaction;
-use nucleus::shutdown::Service;
+use nucleus::ledger::Block;
 use tokio::sync::mpsc::Receiver;
-use tracing::warn;
 
-use super::MAX_BLOCKED_EXECUTOR_TXNS;
+use super::ReadyTransaction;
 use crate::{
-    ExecutorMessage, ExecutorReady, Result,
-    executor::{ExecutorHandle, ExecutorId},
+    Result,
+    executor::{ExecutorEvent, ExecutorHandle, ExecutorId, ExecutorMessage},
     metrics,
 };
 
-/// The pool of executors and the state needed to dispatch work to them.
-pub(super) struct Executors {
-    /// One handle per executor worker, indexed by [`ExecutorId`].
-    pub(super) handles: Vec<ExecutorHandle>,
-    /// Channel on which executors signal they have finished a batch.
-    pub(super) ready: Receiver<ExecutorReady>,
-    /// Bitset of executors currently free to accept a batch.
-    available: AvailableExecutors,
-}
+/// Maximum executor count represented by the availability bitset.
+pub(super) const MAX_EXECUTORS: u32 = u64::BITS;
 
-/// Bitset of free executors, one bit per [`ExecutorId`].
-pub(super) struct AvailableExecutors {
-    /// Set bits are executor IDs currently free to accept work.
-    bitflags: u64,
-    /// Number of executor slots represented by `bitflags`.
-    total: u32,
+/// Executor handles and one availability bit per contiguous executor ID.
+pub(super) struct Executors {
+    /// Worker handles indexed by their executor IDs.
+    handles: Vec<ExecutorHandle>,
+    /// Channel on which workers report transaction completion or failure.
+    pub(super) events: Receiver<ExecutorEvent>,
+    /// Set bits identify executors available for immediate dispatch.
+    available: u64,
 }
 
 impl Executors {
-    /// Builds the pool from spawned executor handles and their readiness channel.
-    pub(super) fn new(handles: Vec<ExecutorHandle>, ready: Receiver<ExecutorReady>) -> Self {
-        let available = AvailableExecutors::new(handles.len() as u32);
-        Self { handles, ready, available }
+    /// Builds an idle pool from handles with contiguous IDs starting at zero.
+    pub(super) fn new(handles: Vec<ExecutorHandle>, events: Receiver<ExecutorEvent>) -> Self {
+        let count = handles.len() as u32;
+        let available = if count == 0 { 0 } else { u64::MAX >> (u64::BITS - count) };
+        Self { handles, events, available }
     }
 
-    /// Whether the pool can accept more work: at least one executor is free and
-    /// no executor's blocked queue has reached the backpressure threshold.
-    pub(super) fn ready(&self) -> bool {
-        let saturated = |h: &ExecutorHandle| h.blocked.len() >= MAX_BLOCKED_EXECUTOR_TXNS;
-        !(self.available.empty() || self.handles.iter().any(saturated))
+    /// Number of executors in the pool.
+    pub(super) fn capacity(&self) -> usize {
+        self.handles.len()
     }
 
-    /// Returns whether every executor is currently free.
-    pub(super) fn idle(&self) -> bool {
-        self.available.idle()
+    /// First available executor, if all workers are not already busy.
+    pub(super) fn available(&self) -> Option<ExecutorId> {
+        let id = self.available.trailing_zeros();
+        (id != u64::BITS).then_some(id)
     }
 
-    /// Queues a transaction behind the executor that currently blocks it, to be
-    /// retried once that executor releases its conflicting locks.
-    pub(super) fn enqueue(&mut self, txn: ResolvedTransaction, executor: ExecutorId) {
-        self.handles[executor as usize].blocked.push_back(txn);
-        metrics::blocked_transaction();
-    }
-
-    /// Returns a handle to a currently free executor, or `None` if all are busy.
-    /// The executor is not yet marked busy; the caller does that once it commits
-    /// a batch to it.
-    pub(super) fn available(&mut self) -> Option<&mut ExecutorHandle> {
-        self.available.get().and_then(|idx| self.get(idx))
-    }
-
-    /// Returns the handle for executor `idx`, if such an executor exists.
-    fn get(&mut self, idx: ExecutorId) -> Option<&mut ExecutorHandle> {
-        self.handles.get_mut(idx as usize)
-    }
-
-    /// Marks executor `idx` as available again and returns its handle.
-    pub(super) fn release(&mut self, idx: ExecutorId) -> Option<&mut ExecutorHandle> {
-        self.available.insert(idx);
-        metrics::busy_executors(self.available.busy());
-        self.get(idx)
-    }
-
-    /// Sends executor `idx`'s accumulated batch to its worker and marks it busy.
-    /// A no-op if the executor is unknown or its batch is empty.
-    pub(super) fn dispatch(&mut self, idx: ExecutorId) -> Result<()> {
-        let Some(executor) = self.get(idx) else {
-            warn!(idx, "dispatch to unknown executor; ignoring");
-            return Ok(());
-        };
-        if executor.batch.is_empty() {
-            return Ok(());
-        }
-        let msg = ExecutorMessage::Transactions(mem::take(&mut executor.batch));
-        executor.tx.send(msg).map_err(|_| Service::TransactionExecutor(idx))?;
-        self.available.remove(idx);
-        metrics::busy_executors(self.available.busy());
+    /// Dispatches one dependency-free transaction to an available executor.
+    pub(super) fn dispatch(&mut self, id: ExecutorId, ready: ReadyTransaction) -> Result<()> {
+        debug_assert_ne!(self.available & (1 << id), 0);
+        self.handles[id as usize].send(ExecutorMessage::Transaction(ready))?;
+        self.available &= !(1 << id);
+        self.update_metrics();
         Ok(())
     }
-}
 
-impl AvailableExecutors {
-    /// Starts with every executor marked available.
-    pub(super) fn new(executors: u32) -> Self {
-        Self {
-            bitflags: (1u64 << executors) - 1,
-            total: executors,
+    /// Returns a worker to the available set after its trusted completion signal.
+    pub(super) fn release(&mut self, id: ExecutorId) {
+        debug_assert_eq!(self.available & (1 << id), 0);
+        self.available |= 1 << id;
+        self.update_metrics();
+    }
+
+    /// Advances every idle worker to a new block environment.
+    pub(super) fn transition(&self, block: Block) -> Result<()> {
+        for executor in &self.handles {
+            executor.send(ExecutorMessage::Block(block))?;
+        }
+        Ok(())
+    }
+
+    /// Closes worker channels and joins every executor thread.
+    pub(super) fn join(&mut self) {
+        for executor in self.handles.drain(..) {
+            executor.join();
         }
     }
 
-    /// Returns the id of an available executor, or `None` if all are busy.
-    pub(super) fn get(&self) -> Option<ExecutorId> {
-        let position = self.bitflags.trailing_zeros();
-        (position != u64::BITS).then_some(position)
-    }
-
-    /// Returns whether no executor is currently available.
-    pub(super) fn empty(&self) -> bool {
-        self.bitflags == 0
-    }
-
-    /// Returns whether every executor is currently free.
-    pub(super) fn idle(&self) -> bool {
-        self.bitflags.count_ones() == self.total
-    }
-
-    /// Returns how many executors are currently busy.
-    pub(super) fn busy(&self) -> usize {
-        (self.total - self.bitflags.count_ones()) as usize
-    }
-
-    /// Marks an executor as busy.
-    pub(super) fn remove(&mut self, executor: ExecutorId) {
-        self.bitflags &= !(1 << executor)
-    }
-
-    /// Marks an executor as available again.
-    pub(super) fn insert(&mut self, executor: ExecutorId) {
-        self.bitflags |= 1 << executor
+    /// Refreshes the busy gauge from the pool's sole availability state.
+    fn update_metrics(&self) {
+        metrics::busy_executors(self.handles.len() - self.available.count_ones() as usize);
     }
 }

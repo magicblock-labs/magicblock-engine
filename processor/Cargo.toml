@@ -20,6 +20,7 @@ nucleus = { workspace = true, features = ["runtime"] }
 ahash = { workspace = true }
 blake3 = { workspace = true }
 derive_more = { workspace = true, features = ["deref", "deref_mut", "from"] }
+smallvec = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing = { workspace = true }
