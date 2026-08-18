@@ -65,7 +65,8 @@ pub struct Ledger {
 }
 
 impl Ledger {
-    /// Opens the ledger and starts one appender plus the reader worker pool.
+    /// Opens ledger files and starts one appender plus the reader worker pool.
+    /// The appender opens the active index and reports recovery failures through shutdown.
     pub fn init(
         directory: impl AsRef<Path>,
         size_limit: u64,
@@ -79,11 +80,16 @@ impl Ledger {
         tokio::spawn(async move { maintenance.maintain(sh).await });
         let (appender_tx, rx) = flume::bounded(SERVICE_QUEUE_CAPACITY);
         let (position, _) = broadcast::channel(256);
-        let appender = LedgerAppender::new(ledger.clone(), rx, position.clone())?;
-        let sh = shutdown.handle(Service::LedgerAppender);
-        thread::Builder::new()
-            .name("ledger-appender".into())
-            .spawn(|| appender.run(sh))?;
+        let mut sh = shutdown.handle(Service::LedgerAppender);
+        let appender_ledger = ledger.clone();
+        let appender_position = position.clone();
+        thread::Builder::new().name("ledger-appender".into()).spawn(move || {
+            let reason = match LedgerAppender::run(appender_ledger, rx, appender_position) {
+                Ok(()) => ShutdownReason::Signalled,
+                Err(error) => ShutdownReason::Error(Box::new(error)),
+            };
+            sh.terminate(reason);
+        })?;
         let (reader_tx, rx) = flume::bounded(SERVICE_QUEUE_CAPACITY);
 
         #[cfg(not(feature = "testkit"))]
@@ -188,7 +194,7 @@ impl Ledger {
     /// over its size limit; calling it directly forces a single retention pass
     /// regardless of that limit.
     pub fn truncate(&self) -> Result<()> {
-        let _timer = metrics::time(metrics::Operation::Truncate);
+        let timer = metrics::time(metrics::Operation::Truncate);
         let mut superblocks = self.superblocks.write();
         let Some((&id, _)) = superblocks.first_key_value() else {
             return Ok(());
@@ -201,19 +207,22 @@ impl Ledger {
         };
 
         let end = superblock.meta.range.end.load(Acquire);
-        let start = self.meta.range.start.load(Acquire);
         self.meta.superblocks.fetch_sub(1, Release);
         self.meta.range.start.store(end + 1, Release);
-        if let Err(error) = self.meta.flush() {
-            self.meta.superblocks.fetch_add(1, Release);
-            self.meta.range.start.store(start, Release);
-            superblocks.insert(id, superblock);
-            return Err(error);
-        }
+        self.meta.flush()?;
         drop(superblocks);
-        superblock.index.evict();
-        superblock.purge()?;
-        info!(id, end, "purged oldest superblock");
+        // index drop and directory cleanup can take a few seconds,
+        // we don't want to block ledger appender during that time
+        thread::spawn(move || {
+            {
+                superblock.index.evict();
+                superblock.purge()?;
+                info!(id, end, "purged oldest superblock");
+                drop(timer);
+                Ok::<(), LedgerError>(())
+            }
+            .inspect_err(|error| tracing::error!(%error, "failed to purge superblock"))
+        });
         Ok(())
     }
 
@@ -314,7 +323,7 @@ impl Superblock {
     /// Opens a superblock directory, creating its data files when needed.
     fn open(root: &Path, id: u64, active: bool) -> Result<Arc<Self>> {
         let directory = Self::init_dir(root, id)?;
-        let index = IndexSlot::new(&directory, active)?;
+        let index = IndexSlot::new(&directory, active);
         let meta = unsafe { MetaMap::<SuperblockMeta>::new(&directory.join(SUPERBLOCK_META)) }?;
         let blockstore = Self::file(&directory.join(BLOCKSTORE_DB))?;
         let executions = Self::file(&directory.join(EXECUTIONS_DB))?;
