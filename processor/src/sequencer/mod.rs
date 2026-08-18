@@ -183,7 +183,7 @@ impl Sequencer {
             self.hasher.update(&txn.signatures()[0]);
         }
         if self.ordering.register(txn) {
-            metrics::lock_conflict();
+            metrics::ordering_dependency();
             metrics::blocked_transaction();
         }
         self.dispatch_ready()

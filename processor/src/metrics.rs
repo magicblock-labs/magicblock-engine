@@ -24,8 +24,8 @@ const BLOCKED_TRANSACTIONS: MetricSpec = MetricSpec {
     help: "Current processor transactions with unfinished ordering dependencies.",
 };
 /// Transactions registered with an ordering dependency.
-const LOCK_CONFLICTS: MetricSpec = MetricSpec {
-    name: "processor_lock_conflicts",
+const ORDERING_DEPENDENCIES: MetricSpec = MetricSpec {
+    name: "processor_ordering_dependencies",
     help: "Processor transactions registered with an account ordering dependency.",
 };
 /// Failed transaction counter grouped by terminal failure kind.
@@ -92,8 +92,8 @@ pub(crate) fn unblocked_transactions(count: usize) {
 }
 
 /// Records one transaction registered with an ordering dependency.
-pub(crate) fn lock_conflict() {
-    metric::with_metrics(&METRICS, |m| m.lock_conflicts.inc());
+pub(crate) fn ordering_dependency() {
+    metric::with_metrics(&METRICS, |m| m.ordering_dependencies.inc());
 }
 
 /// Records one terminal transaction failure.
@@ -110,7 +110,7 @@ struct Metrics {
     /// Transactions waiting for input-order dependencies.
     blocked_transactions: IntGauge,
     /// Transactions registered with an ordering dependency.
-    lock_conflicts: IntCounter,
+    ordering_dependencies: IntCounter,
     /// Per-kind failed transaction counters resolved during initialization.
     failed_transactions: [IntCounter; 2],
 }
@@ -127,7 +127,7 @@ impl Default for Metrics {
             operations: OperationCounters::new(OPERATION_TIME),
             busy_executors: metric::gauge(BUSY_EXECUTORS, 0),
             blocked_transactions: metric::gauge(BLOCKED_TRANSACTIONS, 0),
-            lock_conflicts: metric::counter(LOCK_CONFLICTS, 0),
+            ordering_dependencies: metric::counter(ORDERING_DEPENDENCIES, 0),
             failed_transactions,
         }
     }
