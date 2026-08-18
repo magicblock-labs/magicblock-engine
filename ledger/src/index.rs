@@ -156,14 +156,14 @@ impl Iterator for AccountIter {
 
 /// Databases used to locate ledger data inside one superblock.
 pub(crate) struct Index {
-    /// Owning Fjall database.
-    db: Database,
     /// Signature prefix to transaction and execution spans.
     transactions: Keyspace,
     /// Slot to blockstore span.
     blocks: Keyspace,
     /// Account prefix and execution span keys.
     accounts: Keyspace,
+    /// Owning Fjall database.
+    db: Database,
 }
 
 /// Atomic index mutations accumulated for one published ledger boundary.
@@ -246,16 +246,12 @@ impl Index {
 }
 
 impl IndexSlot {
-    /// Creates an active slot eagerly or a sealed slot for on-demand opening.
-    pub(crate) fn new(directory: &Path, active: bool) -> Result<Self> {
-        let cached = active
-            .then(|| Index::new(directory, ACTIVE_WORKERS).map(Arc::new))
-            .transpose()?
-            .map(CachedIndex::new);
-        Ok(Self {
+    /// Creates a lazy index slot with its superblock lifecycle state.
+    pub(crate) fn new(directory: &Path, active: bool) -> Self {
+        Self {
             directory: directory.to_owned(),
-            state: Mutex::new(IndexState { active, cached }),
-        })
+            state: Mutex::new(IndexState { active, cached: None }),
+        }
     }
 
     /// Opens or leases this superblock's index.

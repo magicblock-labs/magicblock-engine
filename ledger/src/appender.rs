@@ -8,11 +8,7 @@ use std::{
 use agave_transaction_view::transaction_view::TransactionView;
 use bitcode::Buffer;
 use flume::Receiver;
-use nucleus::{
-    Slot,
-    ledger::BlockstorePosition,
-    shutdown::{ShutdownHandle, ShutdownReason},
-};
+use nucleus::{Slot, ledger::BlockstorePosition};
 use solana_signature::Signature;
 use tokio::sync::broadcast::Sender;
 use tracing::{info, warn};
@@ -59,12 +55,12 @@ pub(crate) struct LedgerAppender {
 }
 
 impl LedgerAppender {
-    /// Opens the active superblock and registers it on the ledger handle.
-    pub(crate) fn new(
+    /// Opens the active superblock and processes events until the stream closes.
+    pub(crate) fn run(
         ledger: Arc<Ledger>,
         rx: Receiver<Event>,
         position: Sender<BlockstorePosition>,
-    ) -> Result<Self> {
+    ) -> Result<()> {
         let head = ledger.meta.head();
         metrics::pending_transactions(0);
         let superblock = ledger
@@ -76,7 +72,7 @@ impl LedgerAppender {
         let writer = SuperblockWriter::new(superblock.clone())?;
         let index = superblock.index.get()?.writer();
 
-        Ok(Self {
+        let mut appender = Self {
             ledger,
             writer,
             index,
@@ -84,33 +80,25 @@ impl LedgerAppender {
             pending: HashMap::new(),
             transactions: 0,
             position,
-        })
-    }
-
-    /// Runs until shutdown (when the event stream closes).
-    pub(crate) fn run(mut self, mut shutdown: ShutdownHandle) {
-        let reason = loop {
-            match self.run_epoch() {
-                Ok(Epoch::Rotate) => (),
-                Ok(Epoch::Shutdown) => break ShutdownReason::Signalled,
-                Err(err) => break ShutdownReason::Error(Box::new(err)),
-            }
         };
-        // Release ledger ownership before the manager can reopen it.
-        drop(self);
-        shutdown.terminate(reason);
-    }
 
-    /// Processes events against one stable superblock environment.
-    fn run_epoch(&mut self) -> Result<Epoch> {
-        loop {
-            let Ok(event) = self.rx.recv() else {
-                return Ok(Epoch::Shutdown);
-            };
-            if let Some(epoch) = self.process(event)? {
-                return Ok(epoch);
+        while let Ok(event) = appender.rx.recv() {
+            match event {
+                Event::Transaction(transaction) => appender.write_transaction(transaction)?,
+                Event::Execution(execution) => appender.write_execution(execution)?,
+                Event::Block(block) => appender.write_block(block)?,
+                Event::Superblock(seal) => appender.seal(seal, false)?,
+                Event::Bootstrap(seal) => appender.seal(seal, true)?,
+                Event::Reset(slot) => appender.write_reset(slot)?,
+                Event::Sync { response, is_final } => {
+                    let _ = response.send(appender.sync(None));
+                    if is_final {
+                        break;
+                    }
+                }
             }
         }
+        Ok(())
     }
 
     /// Rotates to the next superblock directory.
@@ -139,39 +127,6 @@ impl LedgerAppender {
         self.index = index;
         info!(head, "opened active superblock");
         Ok(())
-    }
-
-    /// Processes one append event, rotating after a superblock seal.
-    fn process(&mut self, event: Event) -> Result<Option<Epoch>> {
-        match event {
-            Event::Transaction(transaction) => {
-                self.write_transaction(transaction)?;
-            }
-            Event::Execution(execution) => {
-                self.write_execution(execution)?;
-            }
-            Event::Block(block) => {
-                self.write_block(block)?;
-            }
-            Event::Superblock(seal) => {
-                self.seal(seal, false)?;
-                return Ok(Some(Epoch::Rotate));
-            }
-            Event::Bootstrap(seal) => {
-                self.seal(seal, true)?;
-                return Ok(Some(Epoch::Rotate));
-            }
-            Event::Reset(slot) => {
-                self.write_reset(slot)?;
-            }
-            Event::Sync { response, is_final } => {
-                let _ = response.send(self.sync(None));
-                if is_final {
-                    return Ok(Some(Epoch::Shutdown));
-                }
-            }
-        }
-        Ok(None)
     }
 
     /// Seals the active superblock, optionally adopting a restored snapshot's
@@ -274,12 +229,6 @@ impl LedgerAppender {
         let _ = self.position.send(position);
         Ok(())
     }
-}
-
-/// Boundary reached while processing one superblock environment.
-enum Epoch {
-    Rotate,
-    Shutdown,
 }
 
 /// Transaction bytes already written but not yet paired with execution details.
