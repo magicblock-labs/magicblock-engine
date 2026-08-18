@@ -16,20 +16,19 @@ name = "ledger"
 testkit = []
 
 [dependencies]
-nucleus = { workspace = true, features = ["heed", "ledger", "service"] }
+nucleus = { workspace = true, features = ["ledger", "service"] }
 
 bitcode = { workspace = true }
-bytemuck = { workspace = true, features = ["derive", "extern_crate_std"] }
 derive_more = { workspace = true, features = ["deref", "from"] }
+fjall = { workspace = true }
 flume = { workspace = true }
-heed = { workspace = true }
 memmap2 = { workspace = true }
 num_cpus = { workspace = true }
 oneshot = { workspace = true, features = ["std"] }
 parking_lot = { workspace = true }
 rustix = { workspace = true, features = ["fs"] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing = { workspace = true }
 wincode = { workspace = true }
 zstd = { workspace = true }

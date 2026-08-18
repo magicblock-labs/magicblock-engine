@@ -1,30 +1,35 @@
 //! Index unit tests.
 
+use std::sync::Arc;
+
 use nucleus::{
     Slot,
-    heed::DatabaseIndex,
     testkit::{TempDir, init_tracing, tempdir},
 };
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 
-use crate::index::{Index, Span, TxSpan};
+use crate::{
+    index::{Index, Span, TxSpan},
+    storage::Durability,
+};
 
 /// Opens a fresh index on a throwaway directory kept alive by the returned guard.
-fn index() -> (TempDir, Index) {
+fn index() -> (TempDir, Arc<Index>) {
     init_tracing();
     let dir = tempdir();
-    let index = Index::new(dir.path()).unwrap();
+    let index = Arc::new(Index::new(dir.path(), 2).unwrap());
     (dir, index)
 }
 
 /// Drains every execution span the account index holds for `pubkey`.
-fn account_spans(index: &Index, pubkey: &Pubkey) -> Vec<Span> {
-    let mut txn = None;
-    let Some(iter) = index.accounts(pubkey, &mut txn).unwrap() else {
-        return Vec::new();
-    };
-    iter.map(|entry| entry.unwrap().1).collect()
+fn account_spans(index: &Arc<Index>, pubkey: &Pubkey) -> Vec<Span> {
+    index
+        .clone()
+        .reader()
+        .accounts(pubkey, None)
+        .map(|entry| entry.unwrap())
+        .collect()
 }
 
 #[test]
@@ -58,22 +63,27 @@ fn transaction_and_block_roundtrip() {
     let block_a = Span::new(0, 8);
     let block_b = Span::new(8, 16);
 
-    let mut txn = index.env().write_txn().unwrap();
-    index.insert_transaction(&mut txn, &signature, &txspan).unwrap();
-    index.insert_block(&mut txn, &slot_a, &block_a).unwrap();
-    index.insert_block(&mut txn, &slot_b, &block_b).unwrap();
-    txn.commit().unwrap();
+    let mut writer = index.clone().writer();
+    writer.insert_transaction(&signature, txspan);
+    writer.insert_block(slot_a, block_a);
+    writer.insert_block(slot_b, block_b);
+    writer.persist(Durability::Buffer).unwrap();
 
-    let mut txn = None;
-    let got = index.transaction(&signature, &mut txn).unwrap().expect("transaction present");
+    let reader = index.clone().reader();
+    let got = reader.transaction(&signature).unwrap().expect("transaction present");
     assert_eq!(got.blockstore, txspan.blockstore);
     assert_eq!(got.execution, txspan.execution);
-    assert_eq!(index.block(&slot_a, &mut txn).unwrap(), Some(block_a));
-    assert_eq!(index.block(&slot_b, &mut txn).unwrap(), Some(block_b));
+    assert_eq!(reader.block(slot_a).unwrap(), Some(block_a));
+    assert_eq!(reader.block(slot_b).unwrap(), Some(block_b));
+    assert_eq!(
+        reader.blocks(slot_a..=slot_b).map(|entry| entry.unwrap().0).collect::<Vec<_>>(),
+        vec![slot_b, slot_a],
+        "big-endian slot keys scan newest first"
+    );
 
     // Absent keys resolve to nothing rather than a stale or default hit.
-    assert!(index.transaction(&Signature::from([9; 64]), &mut txn).unwrap().is_none());
-    assert_eq!(index.block(&99, &mut txn).unwrap(), None);
+    assert!(reader.transaction(&Signature::from([9; 64])).unwrap().is_none());
+    assert_eq!(reader.block(99).unwrap(), None);
 }
 
 #[test]
@@ -84,12 +94,12 @@ fn account_signature_duplicates() {
     let spans = [Span::new(100, 10), Span::new(200, 20), Span::new(300, 30)];
     let other_span = Span::new(400, 40);
 
-    let mut txn = index.env().write_txn().unwrap();
+    let mut writer = index.clone().writer();
     for span in &spans {
-        index.insert_accounts(&mut txn, &[account], span).unwrap();
+        writer.insert_accounts(&[account], *span);
     }
-    index.insert_accounts(&mut txn, &[other], &other_span).unwrap();
-    txn.commit().unwrap();
+    writer.insert_accounts(&[other], other_span);
+    writer.persist(Durability::Buffer).unwrap();
 
     // Account duplicate spans are newest-first, so later execution offsets are returned first.
     assert_eq!(
@@ -99,4 +109,36 @@ fn account_signature_duplicates() {
 
     // Duplicates stay partitioned per account key.
     assert_eq!(account_spans(&index, &other), vec![other_span]);
+
+    let reader = index.clone().reader();
+    assert_eq!(
+        reader
+            .accounts(&account, Some(spans[2]))
+            .map(|entry| entry.unwrap())
+            .collect::<Vec<_>>(),
+        vec![spans[1], spans[0]],
+        "exclusive big-endian cutoff starts pagination below the requested span"
+    );
+}
+
+/// Proves sealed indexes open on demand and cannot close while a read lease exists.
+#[test]
+fn sealed_index_is_lazy_and_lease_safe() {
+    let dir = tempdir();
+    let superblock = crate::Superblock::open(dir.path(), 1, false).unwrap();
+    assert!(superblock.index.last_used().is_none());
+
+    let lease = superblock.index.get().unwrap();
+    assert!(superblock.index.last_used().is_some());
+    assert!(
+        !superblock.index.evict(),
+        "an outstanding lease prevents close"
+    );
+    drop(lease);
+    assert!(superblock.index.evict());
+    assert!(superblock.index.last_used().is_none());
+
+    // Reopening after a full close proves the exclusive Fjall lock was released.
+    drop(superblock.index.get().unwrap());
+    assert!(superblock.index.evict());
 }

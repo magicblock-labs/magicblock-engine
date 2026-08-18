@@ -7,9 +7,8 @@ use std::{fs, mem, path::Path};
 
 use heed::{
     Database, DatabaseFlags, Env, EnvFlags, EnvOpenOptions, IntegerComparator, Result, RoIter,
-    RoTxn, RwTxn, iteration_method::MoveOnCurrentKeyDuplicates,
+    RoTxn, RwTxn, WithTls, iteration_method::MoveOnCurrentKeyDuplicates,
 };
-use nucleus::heed::{DatabaseIndex, RoTxnTls};
 use solana_pubkey::Pubkey;
 
 use crate::store::kv::{KeyTail, Offset, OwnerAndOffset, PubkeyBytes, U32LE};
@@ -32,6 +31,29 @@ const FREELIST_INDEX: &str = "freelist";
 type RoAccountIter<'a> = RoIter<'a, PubkeyBytes, OwnerAndOffset>;
 /// Duplicate iterator over program-owned persisted accounts.
 type RoProgramIter<'a> = RoIter<'a, KeyTail, Offset, MoveOnCurrentKeyDuplicates>;
+/// Read-only transaction using heed thread-local storage.
+pub(crate) type RoTxnTls<'e> = RoTxn<'e, WithTls>;
+/// Optional write transaction used by batched updates.
+pub(crate) type OptRwTxn<'t, 'e> = &'t mut Option<RwTxn<'e>>;
+/// Optional read transaction used by batched reads.
+pub(crate) type OptRoTxn<'t, 'e> = &'t mut Option<RoTxnTls<'e>>;
+
+/// Uses the supplied write transaction or opens one against `env` on demand.
+pub(crate) fn write_txn<'t, 'e>(env: &'e Env, txn: OptRwTxn<'t, 'e>) -> Result<&'t mut RwTxn<'e>> {
+    if let Some(txn) = txn {
+        return Ok(txn);
+    }
+    Ok(txn.insert(env.write_txn()?))
+}
+
+/// Uses the supplied read transaction or opens one against `env` on demand.
+pub(crate) fn read_txn<'t, 'e>(env: &'e Env, txn: OptRoTxn<'t, 'e>) -> Result<&'t RoTxnTls<'e>> {
+    if let Some(txn) = txn {
+        return Ok(txn);
+    }
+    Ok(txn.insert(env.read_txn()?))
+}
+
 /// Iterator over persisted accounts.
 pub(crate) struct AccountIter<'a> {
     /// Iterator over `pubkey -> account` entries.
@@ -98,6 +120,16 @@ impl Index {
             programs,
             freelist,
         })
+    }
+
+    /// Returns the owning heed environment.
+    pub(crate) fn env(&self) -> &Env {
+        &self.env
+    }
+
+    /// Flushes the index databases to durable storage.
+    pub(crate) fn flush(&self) -> Result<()> {
+        self.env.force_sync()
     }
 
     /// Returns the persisted offset for `pubkey`.
@@ -197,11 +229,5 @@ impl Index {
         let OwnerAndOffset { owner, offset } = new;
         self.programs.delete_one_duplicate(txn, &owner, &old)?;
         self.programs.put(txn, &owner, &offset)
-    }
-}
-
-impl DatabaseIndex for Index {
-    fn env(&self) -> &Env {
-        &self.env
     }
 }

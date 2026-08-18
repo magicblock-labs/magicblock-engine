@@ -9,13 +9,12 @@ use std::{
 
 use derive_more::From;
 use nucleus::Slot;
-use nucleus::heed::RoTxnTls;
 use solana_account::{AccountSeqLock, AccountSharedData, CoWAccount};
 use solana_pubkey::Pubkey;
 use tracing::{info, warn};
 
 use crate::{
-    store::{DatabaseVersion, PersistedProgramIter, PersistedStore},
+    store::{DatabaseVersion, PersistedProgramIter, PersistedStore, index::RoTxnTls},
     volatile::VolatileStore,
 };
 
