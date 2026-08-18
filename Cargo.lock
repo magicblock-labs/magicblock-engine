@@ -43,6 +43,7 @@ name = "agave-transaction-view"
 version = "4.1.1"
 dependencies = [
  "agave-transaction-view",
+ "ahash",
  "bincode",
  "criterion",
  "solana-hash",

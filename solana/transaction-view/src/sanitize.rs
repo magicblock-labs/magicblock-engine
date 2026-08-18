@@ -6,8 +6,18 @@ use {
         transaction_version::TransactionVersion,
         transaction_view::UnsanitizedTransactionView,
     },
+    ahash::AHashSet,
     solana_program_runtime::execution_budget::{MAX_HEAP_FRAME_BYTES, MIN_HEAP_FRAME_BYTES},
+    solana_pubkey::Pubkey,
+    std::cell::RefCell,
 };
+
+const USE_STATIC_ACCOUNT_KEYS_SET_SIZE: usize = 32;
+
+thread_local! {
+    static STATIC_ACCOUNT_KEYS_SET: RefCell<AHashSet<Pubkey>> =
+        RefCell::new(AHashSet::with_capacity(MAX_MAGICBLOCK_ACCOUNT_LOCKS));
+}
 
 /// Maximum instruction trace length for an Engine-private transaction.
 pub const MAGICBLOCK_INSTRUCTION_TRACE_LENGTH: usize = 255;
@@ -129,9 +139,20 @@ fn sanitize_account_access(view: &UnsanitizedTransactionView<impl TransactionDat
         return Err(TransactionViewError::SanitizeError);
     }
 
-    // No duplicated accounts
-    // Note: This check is performed downstream in `validate_account_locks()`.
-    // It is skipped here to avoid redundant work on the hot path.
+    let keys = view.static_account_keys();
+    let has_duplicates = if keys.len() >= USE_STATIC_ACCOUNT_KEYS_SET_SIZE {
+        STATIC_ACCOUNT_KEYS_SET.with_borrow_mut(|set| {
+            let has_duplicates = keys.iter().any(|key| !set.insert(*key));
+            set.clear();
+            has_duplicates
+        })
+    } else {
+        keys.iter().enumerate().any(|(index, key)| keys[index + 1..].contains(key))
+    };
+
+    if has_duplicates {
+        return Err(TransactionViewError::SanitizeError);
+    }
 
     Ok(())
 }
@@ -645,6 +666,52 @@ mod tests {
                 sanitize_account_access(&view),
                 Err(TransactionViewError::SanitizeError)
             );
+        }
+    }
+
+    #[test]
+    /// Proves both uniqueness algorithms reject duplicate static keys, allow
+    /// repeated instruction indices, and clear the reusable large-key set.
+    fn test_sanitize_duplicate_static_keys_at_set_boundary() {
+        for num_keys in [31, 32] {
+            let account_keys = (0..num_keys).map(|_| Pubkey::new_unique()).collect::<Vec<_>>();
+            let header = MessageHeader {
+                num_required_signatures: 1,
+                num_readonly_signed_accounts: 0,
+                num_readonly_unsigned_accounts: num_keys - 1,
+            };
+            let instructions = vec![CompiledInstruction {
+                program_id_index: 1,
+                accounts: vec![2, 2],
+                data: vec![],
+            }];
+
+            let unique = create_v1_transaction(
+                1,
+                header,
+                account_keys.clone(),
+                instructions.clone(),
+                TransactionConfig::empty(),
+            );
+            let unique_data = wincode::serialize(&unique).unwrap();
+            assert!(TransactionView::try_new_sanitized(unique_data.as_slice(), true).is_ok());
+
+            let mut duplicate_keys = account_keys;
+            duplicate_keys[num_keys as usize - 1] = duplicate_keys[1];
+            let duplicate = create_v1_transaction(
+                1,
+                header,
+                duplicate_keys,
+                instructions,
+                TransactionConfig::empty(),
+            );
+            let duplicate_data = wincode::serialize(&duplicate).unwrap();
+            assert!(matches!(
+                TransactionView::try_new_sanitized(duplicate_data.as_slice(), true),
+                Err(TransactionViewError::SanitizeError)
+            ));
+
+            assert!(TransactionView::try_new_sanitized(unique_data.as_slice(), true).is_ok());
         }
     }
 

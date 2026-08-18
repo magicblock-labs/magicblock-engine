@@ -36,6 +36,10 @@ Fallible parsing validates additions, multiplications, ranges, and conversion to
 that representation before any unchecked iterator or typed-slice access. Code
 using a sanitized view may rely on those validated frame boundaries.
 
+Sanitization is the authoritative boundary for static account-key uniqueness.
+Every `SanitizedTransactionView` has unique static account keys, while an
+instruction may reference the same account index more than once.
+
 ## Address lookup tables
 
 Address lookup tables are unsupported. A transaction containing any lookup
@@ -51,6 +55,6 @@ addresses.
   and instruction-trace policies intentionally differ.
 - Keep the Magicblock prefix, signed message range, and Engine transaction
   composer synchronized.
-- Treat the sanitizer as the authoritative boundary for rejecting address
-  lookup tables.
+- Treat the sanitizer as the authoritative boundary for rejecting duplicate
+  static account keys and address lookup tables.
 - Validate new frame offsets before exposing them through unchecked accessors.
