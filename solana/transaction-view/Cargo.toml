@@ -15,6 +15,7 @@ agave-unstable-api = []
 dev-context-only-utils = []
 
 [dependencies]
+ahash = { workspace = true }
 solana-hash = { workspace = true }
 solana-message = { workspace = true }
 solana-packet = { workspace = true }

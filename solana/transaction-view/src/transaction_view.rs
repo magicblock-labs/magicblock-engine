@@ -17,6 +17,9 @@ use {
 
 // alias for convenience
 pub type UnsanitizedTransactionView<D> = TransactionView<false, D>;
+/// A structurally validated transaction view with unique static account keys.
+///
+/// Instruction account indices may repeat.
 pub type SanitizedTransactionView<D> = TransactionView<true, D>;
 
 /// A view into a serialized transaction.
