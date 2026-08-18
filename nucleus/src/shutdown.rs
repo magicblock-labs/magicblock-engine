@@ -31,6 +31,8 @@ pub enum Service {
     LedgerAppender,
     /// Ledger read worker.
     LedgerReader,
+    /// Ledger sealed-index cache maintenance task.
+    LedgerMaintenance,
     /// Ledger replay worker.
     LedgerReplayer,
     /// Transaction scheduler service.

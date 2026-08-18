@@ -8,12 +8,14 @@
 //! appender's account/signature extraction and the reader's block reconstruction
 //! exercise the real codecs.
 //!
-//! The appender only makes data durable at a block boundary (sync + index
-//! commit + cursor publish), so every append batch here ends with a `Block`;
+//! The appender publishes complete data at a block boundary (buffer flush +
+//! index commit + cursor publish), so every append batch here ends with a `Block`;
 //! that also mirrors how a caller must frame writes.
 
 use std::{
+    env,
     ops::Range,
+    process::Command,
     sync::{Arc, atomic::Ordering::Acquire},
 };
 
@@ -30,7 +32,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::{
     Ledger,
-    appender::LedgerAppender,
+    appender::{LedgerAppender, SIZE_CHECK_FREQUENCY},
     reader::LedgerReader,
     request::{
         AccountSignature, AccountSignaturesParams, BlockDetails, BlockParams, BlockResponse,
@@ -69,6 +71,36 @@ fn append(ledger: &Arc<Ledger>, events: Vec<Event>) {
     LedgerAppender::new(ledger.clone(), rx, position)
         .unwrap()
         .run(shutdown.handle(Service::LedgerAppender));
+}
+
+/// Proves a process crash recovers both the last strong boundary and a complete
+/// block published with Fjall `Buffer` durability.
+#[tokio::test]
+async fn test_process_crash_recovers_buffered_block() {
+    const CHILD_LEDGER: &str = "LEDGER_CRASH_TEST_DIR";
+    if let Some(directory) = env::var_os(CHILD_LEDGER) {
+        let ledger = Arc::new(Ledger::new(directory.into(), u64::MAX).unwrap());
+        block_of(&ledger, 1, 1);
+        append(&ledger, vec![seal(1)]);
+        block_of(&ledger, 2, 1);
+        std::process::exit(77);
+    }
+
+    let dir = tempdir();
+    let status = Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "tests::integration::test_process_crash_recovers_buffered_block",
+            "--nocapture",
+        ])
+        .env(CHILD_LEDGER, dir.path())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(77));
+
+    let ledger = Arc::new(Ledger::new(dir.path().to_owned(), u64::MAX).unwrap());
+    assert!(read_block(&ledger, 1, BlockDetails::None).await.is_some());
+    assert!(read_block(&ledger, 2, BlockDetails::None).await.is_some());
 }
 
 /// Execution metadata carrying a recognizable `fee`/`logs` for read assertions.
@@ -342,12 +374,12 @@ async fn test_block_detail_levels_partition_transactions() {
 }
 
 // A sealed superblock stays readable after the writer rotates to a new segment,
-// and retention purges the oldest sealed superblock — dropping its transactions
-// while preserving the active head and advancing the retained slot range.
+// and retention synchronously purges the oldest sealed superblock while
+// preserving the active head and range.
 #[tokio::test]
 async fn test_superblock_rotation_and_retention() {
     // size_limit 0 makes every block boundary trigger a retention pass.
-    let (_dir, ledger) = ledger(0);
+    let (dir, ledger) = ledger(0);
     let old = block_of(&ledger, 1, 1);
     // Seal superblock 1 and rotate to superblock 2.
     let events = vec![seal(1)];
@@ -358,7 +390,7 @@ async fn test_superblock_rotation_and_retention() {
     assert!(read_transaction(&ledger, old[0]).await.is_some());
 
     // Writing a block into the new head triggers truncation of superblock 1.
-    let new = block_of(&ledger, 2, 1);
+    let new = block_of(&ledger, SIZE_CHECK_FREQUENCY, 1);
     assert_eq!(ledger.meta.head(), 2, "active head is never purged");
     assert!(
         ledger.superblocks.read().get(&1).is_none(),
@@ -369,6 +401,12 @@ async fn test_superblock_rotation_and_retention() {
     assert!(read_transaction(&ledger, new[0]).await.is_some());
     // Retention advances the retained range past the purged superblock's end.
     assert_eq!(ledger.meta.range.start.load(Acquire), 2);
+
+    let purged = dir.path().join("superblock-000000001");
+    assert!(
+        !purged.exists(),
+        "truncation purges the directory before returning"
+    );
 }
 
 // A single-block read resolves a slot living in an older sealed superblock, not

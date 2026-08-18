@@ -11,14 +11,13 @@ use solana_account::{
 use solana_pubkey::Pubkey;
 use tracing::{error, warn};
 
-use nucleus::heed::{DatabaseIndex, OptRoTxn, OptRwTxn, read_txn, write_txn};
 use twox_hash::XxHash3_64;
 
 use crate::{
     AccountEntry, AccountsDBError, Result, StoreKind,
     metrics::{self, Operation},
     store::{
-        index::{Index, OwnerIter},
+        index::{Index, OptRoTxn, OptRwTxn, OwnerIter, read_txn, write_txn},
         kv::{Offset, OwnerAndOffset},
         mmap::{DatabaseMeta, MappedStorage},
     },

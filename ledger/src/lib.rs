@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering::*},
     thread,
+    time::{Duration, Instant},
 };
 
 pub use crate::error::{LedgerError, LedgerRequestError};
@@ -13,10 +14,10 @@ use derive_more::Deref;
 use nucleus::{
     Slot,
     ledger::BlockstorePosition,
-    shutdown::{Service, ShutdownManager},
+    shutdown::{Service, ShutdownHandle, ShutdownManager, ShutdownReason},
 };
 use parking_lot::RwLock;
-use tokio::sync::broadcast;
+use tokio::{sync::broadcast, time};
 use tracing::info;
 
 mod appender;
@@ -34,7 +35,7 @@ mod tests;
 use crate::{
     appender::{BLOCKSTORE_DB, EXECUTIONS_DB, LedgerAppender, SUPERBLOCK_META},
     error::Result,
-    index::Index,
+    index::IndexSlot,
     reader::LedgerReader,
     request::ReaderSender,
     schema::Event,
@@ -43,6 +44,10 @@ use crate::{
 
 const LEDGER_META: &str = "ledger.meta";
 const SERVICE_QUEUE_CAPACITY: usize = 128;
+/// Sealed indexes immediately preceding the active head kept open when cached.
+const HOT_SEALED_INDEXES: u64 = 2;
+/// Idle time after which a sealed index is closed.
+const SEALED_INDEX_TTL: Duration = Duration::from_secs(10 * 60);
 
 /// Top-level ledger handle.
 ///
@@ -69,6 +74,9 @@ impl Ledger {
         let directory = directory.as_ref().to_owned();
         let ledger = Arc::new(Self::new(directory, size_limit)?);
         metrics::init(&ledger);
+        let sh = shutdown.handle(Service::LedgerMaintenance);
+        let maintenance = ledger.clone();
+        tokio::spawn(async move { maintenance.maintain(sh).await });
         let (appender_tx, rx) = flume::bounded(SERVICE_QUEUE_CAPACITY);
         let (position, _) = broadcast::channel(256);
         let appender = LedgerAppender::new(ledger.clone(), rx, position.clone())?;
@@ -100,7 +108,7 @@ impl Ledger {
     }
 
     /// Iterates retained superblocks from newest to oldest.
-    pub fn iter(&self) -> impl Iterator<Item = Arc<Superblock>> {
+    pub fn iter(&self) -> impl Iterator<Item = Arc<Superblock>> + '_ {
         let range = self.meta.superblocks();
         range.rev().filter_map(|id| self.superblocks.read().get(&id).cloned())
     }
@@ -115,16 +123,24 @@ impl Ledger {
 
     /// Blockstore write offset of a retained superblock, `None` when it is not retained.
     pub fn cursor(&self, superblock: u64) -> Option<u64> {
-        self.iter().find_map(|sb| {
-            (sb.id == superblock).then_some(sb.meta.cursors.blockstore.load(Acquire))
-        })
+        if !self.meta.superblocks().contains(&superblock) {
+            return None;
+        }
+        self.superblocks
+            .read()
+            .get(&superblock)
+            .map(|superblock| superblock.meta.cursors.blockstore.load(Acquire))
     }
 
     /// Iterates retained superblocks after `superblock` through the active head,
     /// so replay excludes the sealed snapshot state but includes the unsealed head.
-    fn iter_after(&self, superblock: u64) -> impl Iterator<Item = Arc<Superblock>> {
-        let range = superblock + 1..=self.meta.head();
-        range.filter_map(|id| self.superblocks.read().get(&id).cloned())
+    fn iter_after(&self, superblock: u64) -> impl Iterator<Item = Arc<Superblock>> + '_ {
+        let head = self.meta.head();
+        superblock
+            .checked_add(1)
+            .into_iter()
+            .flat_map(move |start| start..=head)
+            .filter_map(|id| self.superblocks.read().get(&id).cloned())
     }
 
     /// Opens ledger metadata and retained superblocks without starting services.
@@ -135,9 +151,11 @@ impl Ledger {
         // and all fields that can change while mapped are atomic. This process
         // exclusively creates and updates the metadata file at `meta`.
         let meta = unsafe { MetaMap::<LedgerMeta>::new(&meta) }?;
+        let retained = meta.superblocks();
         let mut superblocks = BTreeMap::new();
-        for id in meta.superblocks() {
-            let superblock = Superblock::open(&directory, id)?;
+        let head = meta.head();
+        for id in retained {
+            let superblock = Superblock::open(&directory, id, id == head)?;
             superblocks.insert(id, superblock);
         }
 
@@ -171,26 +189,57 @@ impl Ledger {
     /// regardless of that limit.
     pub fn truncate(&self) -> Result<()> {
         let _timer = metrics::time(metrics::Operation::Truncate);
-        let Some((id, superblock)) = self
-            .superblocks
-            .read()
-            .first_key_value()
-            .map(|(id, superblock)| (*id, superblock.clone()))
-        else {
+        let mut superblocks = self.superblocks.write();
+        let Some((&id, _)) = superblocks.first_key_value() else {
             return Ok(());
         };
         if id >= self.meta.head() {
             return Ok(());
         }
+        let Some((_, superblock)) = superblocks.pop_first() else {
+            return Ok(());
+        };
 
         let end = superblock.meta.range.end.load(Acquire);
-        superblock.purge()?;
-        self.superblocks.write().remove(&id);
+        let start = self.meta.range.start.load(Acquire);
         self.meta.superblocks.fetch_sub(1, Release);
         self.meta.range.start.store(end + 1, Release);
-        self.meta.flush()?;
-        info!(id, end, "purged oldest superblock for retention");
+        if let Err(error) = self.meta.flush() {
+            self.meta.superblocks.fetch_add(1, Release);
+            self.meta.range.start.store(start, Release);
+            superblocks.insert(id, superblock);
+            return Err(error);
+        }
+        drop(superblocks);
+        superblock.index.evict();
+        superblock.purge()?;
+        info!(id, end, "purged oldest superblock");
         Ok(())
+    }
+
+    /// Maintains the sealed-index cache.
+    async fn maintain(&self, mut shutdown: ShutdownHandle) {
+        loop {
+            self.expire_indexes();
+            if time::timeout(Duration::from_secs(1), shutdown.signalled()).await.is_ok() {
+                break;
+            }
+        }
+        shutdown.terminate(ShutdownReason::Signalled);
+    }
+
+    /// Closes expired indexes except the two sealed predecessors of the head.
+    fn expire_indexes(&self) {
+        let expiry = Instant::now() - SEALED_INDEX_TTL;
+        let cold = ..self.meta.head().saturating_sub(HOT_SEALED_INDEXES);
+        self.superblocks
+            .read()
+            .range(cold)
+            .map(|(_, superblock)| superblock)
+            .filter(|superblock| superblock.index.last_used().is_some_and(|used| used <= expiry))
+            .for_each(|superblock| {
+                superblock.index.evict();
+            });
     }
 }
 
@@ -211,7 +260,7 @@ pub struct LedgerHandle {
 }
 
 impl LedgerHandle {
-    /// Returns the number of transactions published at durable sync boundaries.
+    /// Returns the number of transactions published at complete block boundaries.
     pub fn transactions(&self) -> u64 {
         self.ledger.meta.transactions.load(Acquire)
     }
@@ -221,7 +270,7 @@ impl LedgerHandle {
         self.ledger.meta.head()
     }
 
-    /// Position of the next byte to append: active superblock plus its durable cursor.
+    /// Position of the next byte to append: active superblock plus its published cursor.
     pub fn position(&self) -> BlockstorePosition {
         let superblock = self.head();
         let offset = self.cursor(superblock).unwrap_or_default();
@@ -239,8 +288,8 @@ pub struct Superblock {
     pub blockstore: File,
     /// Transaction execution metadata file.
     executions: File,
-    /// LMDB index for this superblock.
-    index: Arc<Index>,
+    /// Lazily opened Fjall index for this superblock.
+    index: IndexSlot,
     /// Superblock directory path.
     pub directory: PathBuf,
 }
@@ -263,9 +312,9 @@ impl Superblock {
     }
 
     /// Opens a superblock directory, creating its data files when needed.
-    fn open(root: &Path, id: u64) -> Result<Arc<Self>> {
+    fn open(root: &Path, id: u64, active: bool) -> Result<Arc<Self>> {
         let directory = Self::init_dir(root, id)?;
-        let index = Arc::new(Index::new(&directory)?);
+        let index = IndexSlot::new(&directory, active)?;
         let meta = unsafe { MetaMap::<SuperblockMeta>::new(&directory.join(SUPERBLOCK_META)) }?;
         let blockstore = Self::file(&directory.join(BLOCKSTORE_DB))?;
         let executions = Self::file(&directory.join(EXECUTIONS_DB))?;
