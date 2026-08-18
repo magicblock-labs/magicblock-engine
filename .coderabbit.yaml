@@ -9,6 +9,9 @@ reviews:
   review_details: false
   poem: false
   request_changes_workflow: true
+  changed_files_summary: false
+  sequence_diagrams: false
+  estimate_code_review_effort: false
 
   
   
