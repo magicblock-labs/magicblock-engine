@@ -261,7 +261,9 @@ impl LedgerAppender {
         if let Some(txn) = txn.take() {
             txn.commit()?;
         }
-        self.index.flush()?;
+        if slot.is_none() {
+            self.index.flush()?;
+        }
         self.writer.publish(cursors, slot)?;
         self.ledger.meta.transactions.fetch_add(self.transactions, Release);
         if let Some(slot) = slot {
