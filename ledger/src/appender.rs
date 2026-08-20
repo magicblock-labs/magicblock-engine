@@ -212,6 +212,7 @@ impl LedgerAppender {
         self.writer.write_blockstore(&BlockstoreEntry::Superblock(seal))?;
         self.sync(None)?;
         self.writer.finalize()?;
+        self.index.rotate_memtable()?;
         info!(superblock = seal.id, "sealed superblock");
         Ok(())
     }

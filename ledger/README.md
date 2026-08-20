@@ -33,7 +33,7 @@ self-describing after retention removes the preceding blockstore.
 
 Reader requests run on a worker pool. Each worker owns its decode buffers and
 reads only through published cursors. The ledger-wide Fjall index uses two
-background workers and one 8 MiB cache across all superblock keyspaces. The
+background workers and one 64 MiB cache across all superblock keyspaces. The
 optional `testkit` feature uses one reader worker without changing the on-disk
 format. Point lookups read the latest visible value, while range and prefix
 iterators carry their own Fjall snapshot guard; the append-only index does not
@@ -45,7 +45,9 @@ system with `Buffer` durability before publishing cursors. Explicit syncs,
 seals, resets, shutdown, and retention boundaries additionally use file
 `sync_data` and Fjall `SyncData` before synchronously flushing metadata. Thus a
 process crash recovers complete published blocks, while an OS or power failure
-may discard the active tail after the last strong boundary.
+may discard the active tail after the last strong boundary. Sealing also queues
+the immutable keyspace's active memtable for background SST flushing so its
+journal history can be reclaimed.
 
 Within each superblock keyspace, a leading byte namespaces transaction, block,
 and account entries. The account index stores

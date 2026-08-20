@@ -42,6 +42,8 @@ const ACCOUNT_PREFIX_BYTES: usize = 1 + PREFIX_BYTES;
 const ACCOUNT_KEY_BYTES: usize = ACCOUNT_PREFIX_BYTES + SPAN_BYTES;
 /// Ledger-wide block cache capacity.
 const CACHE_SIZE: u64 = 64 * MB as u64;
+/// Retained journal bytes before Fjall flushes keyspaces blocking reclamation.
+const JOURNAL_SIZE: u64 = 256 * MB as u64;
 /// Fjall maintenance workers assigned to the ledger index.
 const WORKERS: usize = 2;
 
@@ -181,6 +183,7 @@ impl Index {
     pub(crate) fn new(path: &Path) -> Result<Self> {
         let db = Database::builder(path.join(INDEX_SUBDIR))
             .cache_size(CACHE_SIZE)
+            .max_journaling_size(JOURNAL_SIZE)
             .worker_threads(WORKERS)
             .manual_journal_persist(true)
             .journal_compression(CompressionType::None)
@@ -291,6 +294,12 @@ impl IndexWriter {
             Durability::SyncData => PersistMode::SyncData,
         };
         batch.durability(Some(mode)).commit().map_err(Into::into)
+    }
+
+    /// Queues the immutable keyspace's active memtable for background flushing.
+    pub(crate) fn rotate_memtable(&self) -> Result<()> {
+        self.keyspace.rotate_memtable()?;
+        Ok(())
     }
 }
 
