@@ -1,6 +1,6 @@
 //! Ledger test modules.
 //!
-//! `index` covers the LMDB codec/index in isolation; `integration` drives the
+//! `index` covers the Fjall codec/index in isolation; `integration` drives the
 //! append→seal→read pipeline end to end through the appender and reader.
 
 mod index;

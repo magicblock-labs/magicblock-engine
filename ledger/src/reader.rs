@@ -14,7 +14,6 @@ use bitcode::Buffer;
 use flume::Receiver;
 use nucleus::{
     Slot,
-    heed::OptRoTxn,
     shutdown::{ShutdownHandle, ShutdownReason},
 };
 use solana_signature::Signature;
@@ -24,7 +23,7 @@ use zstd::bulk::Decompressor;
 
 use crate::{
     Ledger, LedgerError, Result, Superblock,
-    index::{AccountIter, Span},
+    index::{IndexReader, Span},
     metrics::{self, Operation},
     request::{
         AccountSignature, AccountSignaturesParams, AccountSignaturesPayload,
@@ -113,7 +112,8 @@ impl LedgerReader {
             if request.cancelled() {
                 return Ok(None);
             }
-            let Some(spans) = superblock.index.transaction(&request.params, &mut None)? else {
+            let index = IndexReader::new(&superblock.index);
+            let Some(spans) = index.transaction(&request.params)? else {
                 continue;
             };
             return Ok(Some(TransactionResponse {
@@ -133,7 +133,8 @@ impl LedgerReader {
             if request.cancelled() {
                 return Ok(None);
             }
-            let Some(spans) = superblock.index.transaction(&request.params, &mut None)? else {
+            let index = IndexReader::new(&superblock.index);
+            let Some(spans) = index.transaction(&request.params)? else {
                 continue;
             };
             let header = self.header(&superblock, spans.execution)?;
@@ -160,33 +161,19 @@ impl LedgerReader {
             if request.cancelled() {
                 return Ok(signatures);
             }
-            let mut txn = None;
-            let Some(iter) = superblock.index.accounts(&pubkey, &mut txn)? else {
-                continue;
-            };
-            // SAFETY: `iter` borrows the read transaction stored in `txn`.
-            // `txn` was populated by `accounts`, remains in this stack frame,
-            // is not replaced or dropped while `iter` is used, and every later
-            // index read only reuses that already-open read transaction.
-            let iter = unsafe { mem::transmute::<AccountIter<'_>, AccountIter<'_>>(iter) };
-
+            let index = IndexReader::new(&superblock.index);
             let mut upper = None;
             if let Some(signature) = &before {
                 // Skip newest-first segments until `before`, then include every older segment.
-                let Some(cutoff) = superblock.index.transaction(signature, &mut txn)? else {
+                let Some(cutoff) = index.transaction(signature)? else {
                     continue;
                 };
                 upper.replace(cutoff.execution);
                 before.take();
             }
 
-            for result in iter {
-                let span = result?.1;
-                if let Some(s) = upper
-                    && span >= s
-                {
-                    continue;
-                };
+            for result in index.accounts(&pubkey, upper) {
+                let span = result?;
                 let header = self.header(&superblock, span)?;
                 let sig: Signature = header.signature;
                 if let Some(signature) = until
@@ -198,7 +185,7 @@ impl LedgerReader {
                 let blocktime = match blocktimes.get(&header.slot) {
                     Some(time) => *time,
                     None => {
-                        let time = self.blocktime(&superblock, header.slot, &mut txn)?;
+                        let time = self.blocktime(&superblock, &index, header.slot)?;
                         blocktimes.insert(header.slot, time);
                         time
                     }
@@ -232,7 +219,8 @@ impl LedgerReader {
             if !superblock.meta.range.contains(&slot) {
                 continue;
             }
-            let Some(span) = superblock.index.block(&slot, &mut None)? else {
+            let index = IndexReader::new(&superblock.index);
+            let Some(span) = index.block(slot)? else {
                 return Ok(None);
             };
             position.replace((superblock, span));
@@ -245,22 +233,19 @@ impl LedgerReader {
     /// Reads block boundaries for a slot range in ascending slot order.
     fn blocks(&mut self, range: Range<Slot>) -> Result<Vec<Block>> {
         let mut blocks = Vec::with_capacity(range.clone().count());
-        let mut range = range.into_iter().rev().peekable();
+        let Some(last) = range.end.checked_sub(1) else { return Ok(blocks) };
 
         for superblock in self.ledger.clone().iter() {
-            let mut txn = None;
             let start = superblock.meta.range.start.load(Acquire);
-            while let Some(&slot) = range.peek() {
-                // Slots descend and superblocks go newest to oldest, so a slot
-                // below this segment's start belongs to an older superblock;
-                // leave it in the iterator rather than consuming it here.
-                if slot < start {
-                    break;
-                }
-                range.next();
-                let Some(span) = superblock.index.block(&slot, &mut txn)? else {
-                    continue;
-                };
+            let end = superblock.meta.range.end.load(Acquire);
+            let start = start.max(range.start);
+            let end = end.min(last);
+            if start > end {
+                continue;
+            }
+            let index = IndexReader::new(&superblock.index);
+            for entry in index.blocks(start..=end) {
+                let (_, span) = entry?;
                 if let BlockstoreEntry::Block(b) = self.blockstore_entry(&superblock, span)? {
                     blocks.push(b);
                 }
@@ -353,9 +338,11 @@ impl LedgerReader {
         if matches!(details, BlockDetails::None) {
             return Ok(BlockResponse::Bare(block));
         }
-        let mut txn = None;
-        // Slots are contiguous, so the previous block boundary is always `slot - 1`.
-        let start = match superblock.index.block(&(slot - 1), &mut txn)? {
+        let index = IndexReader::new(&superblock.index);
+        // Slots are contiguous, so the previous block boundary is `slot - 1`
+        // when this is not the first possible slot.
+        let previous = slot.checked_sub(1).map(|slot| index.block(slot)).transpose()?.flatten();
+        let start = match previous {
             Some(previous) => previous.offset() + previous.size(),
             None => 0,
         };
@@ -391,7 +378,7 @@ impl LedgerReader {
                     signatures.push(signature);
                     continue;
                 }
-                let Some(spans) = superblock.index.transaction(&signature, &mut txn)? else {
+                let Some(spans) = index.transaction(&signature)? else {
                     continue;
                 };
                 let execution = self.execution(superblock, spans.execution)?;
@@ -416,13 +403,13 @@ impl LedgerReader {
     }
 
     /// Reads the timestamp from a block boundary entry.
-    fn blocktime<'t, 'e>(
+    fn blocktime(
         &mut self,
-        superblock: &'e Superblock,
+        superblock: &Superblock,
+        index: &IndexReader<'_>,
         slot: Slot,
-        txn: OptRoTxn<'t, 'e>,
     ) -> Result<i64> {
-        let Some(span) = superblock.index.block(&slot, txn)? else {
+        let Some(span) = index.block(slot)? else {
             return Ok(0);
         };
         let entry = self.blockstore_entry(superblock, span)?;

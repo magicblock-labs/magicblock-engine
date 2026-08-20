@@ -5,9 +5,6 @@ use std::time::{Duration, UNIX_EPOCH};
 #[cfg(feature = "config")]
 pub mod config;
 
-#[cfg(feature = "heed")]
-pub mod heed;
-
 #[cfg(feature = "shutdown")]
 pub mod shutdown;
 

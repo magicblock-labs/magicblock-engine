@@ -57,6 +57,8 @@ pub(crate) enum Operation {
     Truncate,
     /// Data-file sync path.
     FileSync,
+    /// Data sync to OS buffers
+    BufferSync,
     /// Data-file finalization path.
     FileFinalize,
 }
@@ -75,6 +77,7 @@ impl MetricOperation for Operation {
             Operation::Truncate => "truncate",
             Operation::FileSync => "file_sync",
             Operation::FileFinalize => "file_finalize",
+            Operation::BufferSync => "buffer_sync",
         }
     }
 }

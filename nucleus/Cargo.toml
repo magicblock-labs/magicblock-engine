@@ -21,7 +21,6 @@ config = [
     "dep:solana-signer"
 ]
 default = []
-heed = ["dep:heed"]
 ledger = ["solana-hash/copy", "solana-hash/wincode", "wincode/derive"]
 metrics = ["dep:prometheus", "dep:tracing"]
 notifier = ["tokio/sync"]
@@ -56,7 +55,6 @@ tls = ["dep:solana-instruction-error", "dep:solana-pubkey", "dep:wincode"]
 [dependencies]
 derive_more = { workspace = true, optional = true, features = ["deref", "from"] }
 futures = { workspace = true, features = ["alloc"], optional = true }
-heed = { workspace = true, optional = true }
 oneshot = { workspace = true, features = ["async"], optional = true }
 prometheus = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }

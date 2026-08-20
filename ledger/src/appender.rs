@@ -2,20 +2,14 @@
 
 use std::{
     collections::HashMap,
-    path::Path,
     sync::{Arc, atomic::Ordering::*},
+    thread::JoinHandle,
 };
 
 use agave_transaction_view::transaction_view::TransactionView;
 use bitcode::Buffer;
 use flume::Receiver;
-use heed::{Env, RwTxn};
-use nucleus::{
-    Slot,
-    heed::{DatabaseIndex, OptRwTxn, write_txn},
-    ledger::BlockstorePosition,
-    shutdown::{ShutdownHandle, ShutdownReason},
-};
+use nucleus::{Slot, ledger::BlockstorePosition};
 use solana_signature::Signature;
 use tokio::sync::broadcast::Sender;
 use tracing::{info, warn};
@@ -25,13 +19,13 @@ use zstd::bulk::Compressor;
 use crate::{
     Ledger, Superblock,
     error::{LedgerError, Result},
-    index::{Index, Span, TxSpan},
+    index::{IndexWriter, Span, TxSpan},
     metrics::{self, Operation},
     schema::{
         Block, BlockstoreEntry, Event, Execution, ExecutionDetails, MAX_EXECUTION_DETAILS_SIZE,
         SuperblockSeal, TransactionEntry, blockstore,
     },
-    storage::{AppendFile, MetaMap, SuperblockMeta},
+    storage::{AppendFile, Durability},
 };
 
 /// Blockstore stream file name inside a superblock.
@@ -40,6 +34,8 @@ pub(crate) const BLOCKSTORE_DB: &str = "blockstore.db";
 pub(crate) const EXECUTIONS_DB: &str = "executions.db";
 /// Superblock metadata file name.
 pub(crate) const SUPERBLOCK_META: &str = "superblock.meta";
+/// Frequency of ledger size checks in slots.
+pub(crate) const SIZE_CHECK_FREQUENCY: u64 = 128;
 
 /// Background service that appends ledger events into the active superblock.
 pub(crate) struct LedgerAppender {
@@ -49,135 +45,103 @@ pub(crate) struct LedgerAppender {
     writer: SuperblockWriter,
     /// Transactions waiting for their matching execution details.
     pending: HashMap<Signature, PendingTx>,
-    /// Active superblock index.
-    index: Arc<Index>,
+    /// Active superblock index writer and pending atomic boundary.
+    index: IndexWriter,
+    /// Outstanding physical cleanup for the last truncated superblock.
+    truncation: Option<JoinHandle<Result<()>>>,
     /// Event stream from the execution pipeline.
     rx: Receiver<Event>,
-    /// Transactions written since the last durable sync.
+    /// Transactions written since the last published boundary.
     transactions: u64,
     /// Broadcasts the blockstore write position after each committed block.
     position: Sender<BlockstorePosition>,
 }
 
 impl LedgerAppender {
-    /// Opens the active superblock and registers it on the ledger handle.
-    pub(crate) fn new(
+    /// Opens the active superblock and processes events until the stream closes.
+    pub(crate) fn run(
         ledger: Arc<Ledger>,
         rx: Receiver<Event>,
         position: Sender<BlockstorePosition>,
-    ) -> Result<Self> {
+    ) -> Result<()> {
         let head = ledger.meta.head();
-        let directory = Superblock::init_dir(&ledger.directory, head)?;
-        let writer = SuperblockWriter::new(&directory)?;
         metrics::pending_transactions(0);
-        let index = ledger
+        let superblock = ledger
             .superblocks
             .read()
             .get(&head)
-            .map(|s| s.index.clone())
+            .cloned()
             .ok_or(LedgerError::Corruption("active superblock missing"))?;
+        let writer = SuperblockWriter::new(superblock.clone())?;
+        let index = ledger.index.writer(&superblock.index);
 
-        Ok(Self {
+        let mut appender = Self {
             ledger,
             writer,
             index,
+            truncation: None,
             rx,
             pending: HashMap::new(),
             transactions: 0,
             position,
-        })
-    }
-
-    /// Runs until shutdown (when the event stream closes).
-    pub(crate) fn run(mut self, mut shutdown: ShutdownHandle) {
-        let reason = loop {
-            let env = self.index.env().clone();
-            match self.run_epoch(&env) {
-                Ok(Epoch::Rotate) => (),
-                Ok(Epoch::Shutdown) => break ShutdownReason::Signalled,
-                Err(err) => break ShutdownReason::Error(Box::new(err)),
-            }
         };
-        // Release ledger ownership before the manager can reopen it.
-        drop(self);
-        shutdown.terminate(reason);
+
+        let result = appender.serve();
+        let truncation = appender.join_truncation();
+        result.and(truncation)
     }
 
-    /// Processes events against one stable superblock environment.
-    fn run_epoch<'e>(&mut self, env: &'e Env) -> Result<Epoch> {
-        let mut txn: Option<RwTxn<'e>> = None;
-        loop {
-            let Ok(event) = self.rx.recv() else {
-                return Ok(Epoch::Shutdown);
-            };
-            if let Some(epoch) = self.process(event, env, &mut txn)? {
-                return Ok(epoch);
+    /// Processes append events until all senders close or a final sync arrives.
+    fn serve(&mut self) -> Result<()> {
+        while let Ok(event) = self.rx.recv() {
+            match event {
+                Event::Transaction(transaction) => self.write_transaction(transaction)?,
+                Event::Execution(execution) => self.write_execution(execution)?,
+                Event::Block(block) => self.write_block(block)?,
+                Event::Superblock(seal) => self.seal(seal, false)?,
+                Event::Bootstrap(seal) => self.seal(seal, true)?,
+                Event::Reset(slot) => self.write_reset(slot)?,
+                Event::Sync { response, is_final } => {
+                    self.sync(None)?;
+                    let _ = response.send(());
+                    if is_final {
+                        return Ok(());
+                    }
+                }
             }
         }
+        self.sync(None)
     }
 
     /// Rotates to the next superblock directory.
     fn rotate(&mut self, seal: SuperblockSeal) -> Result<()> {
         let _timer = metrics::time(Operation::Rotate);
         let head = seal.id + 1;
-        let superblock = Superblock::open(&self.ledger.directory, head)?;
+        let superblock = Superblock::open(&self.ledger.directory, head, &self.ledger.index)?;
         // Seal N opens N+1, which stores N's snapshot archive and seal metadata.
         superblock.meta.checksum.store(seal.checksum, Release);
         superblock.meta.transactions.store(seal.transactions, Release);
-        self.writer = SuperblockWriter::new(&superblock.directory)?;
+        superblock.meta.flush()?;
+        let writer = SuperblockWriter::new(superblock.clone())?;
+        let index = self.ledger.index.writer(&superblock.index);
+
+        let mut superblocks = self.ledger.superblocks.write();
+        superblocks.insert(head, superblock);
         self.ledger.meta.head.store(head, Release);
         self.ledger.meta.superblocks.fetch_add(1, Release);
         self.ledger.meta.flush()?;
-        self.index = superblock.index.clone();
-        superblock.meta.flush()?;
-        self.ledger.superblocks.write().insert(head, superblock);
+        drop(superblocks);
+
+        self.writer = writer;
+        self.index = index;
         info!(head, "opened active superblock");
         Ok(())
     }
 
-    /// Processes one append event, rotating after a superblock seal.
-    ///
-    fn process<'e>(
-        &mut self,
-        event: Event,
-        env: &'e Env,
-        txn: OptRwTxn<'_, 'e>,
-    ) -> Result<Option<Epoch>> {
-        match event {
-            Event::Transaction(transaction) => {
-                self.write_transaction(transaction)?;
-            }
-            Event::Execution(execution) => {
-                self.write_execution(execution, env, txn)?;
-            }
-            Event::Block(block) => {
-                self.write_block(block, env, txn)?;
-            }
-            Event::Superblock(seal) => {
-                self.seal(seal, false, txn)?;
-                return Ok(Some(Epoch::Rotate));
-            }
-            Event::Bootstrap(seal) => {
-                self.seal(seal, true, txn)?;
-                return Ok(Some(Epoch::Rotate));
-            }
-            Event::Reset(slot) => {
-                self.write_reset(slot, txn)?;
-            }
-            Event::Sync { response, is_final } => {
-                let _ = response.send(self.sync(None, txn));
-                if is_final {
-                    return Ok(Some(Epoch::Shutdown));
-                }
-            }
-        }
-        Ok(None)
-    }
-
     /// Seals the active superblock, optionally adopting a restored snapshot's
     /// cumulative transaction count before publishing the successor metadata.
-    fn seal(&mut self, seal: SuperblockSeal, bootstrap: bool, txn: OptRwTxn<'_, '_>) -> Result<()> {
-        self.write_superblock(seal, txn)?;
+    fn seal(&mut self, seal: SuperblockSeal, bootstrap: bool) -> Result<()> {
+        self.write_superblock(seal)?;
         if bootstrap {
             self.ledger.meta.transactions.store(seal.transactions, Release);
         }
@@ -199,12 +163,7 @@ impl LedgerAppender {
     }
 
     /// Writes execution details and adds transaction/account indexes.
-    fn write_execution<'e>(
-        &mut self,
-        execution: Execution,
-        env: &'e Env,
-        txn: OptRwTxn<'_, 'e>,
-    ) -> Result<()> {
+    fn write_execution(&mut self, execution: Execution) -> Result<()> {
         let signature: Signature = execution.header.signature;
         let Some(pending) = self.pending.remove(&signature) else {
             warn!(%signature, "ledger execution arrived without a pending transaction; skipping");
@@ -216,39 +175,53 @@ impl LedgerAppender {
             blockstore: pending.span,
             execution,
         };
-        let txn = write_txn(env, txn)?;
-        self.index.insert_transaction(txn, &signature, &span)?;
+        self.index.insert_transaction(&signature, span);
         let view = TransactionView::try_new_unsanitized(pending.transaction)?;
         let accounts = view.static_account_keys();
-        self.index.insert_accounts(txn, accounts, &span.execution)?;
+        self.index.insert_accounts(accounts, span.execution);
         Ok(())
     }
 
-    /// Writes a block boundary and publishes it after data and indexes are durable.
-    fn write_block<'e>(&mut self, block: Block, env: &'e Env, txn: OptRwTxn<'_, 'e>) -> Result<()> {
+    /// Writes a block boundary and publishes it after data and indexes reach the OS.
+    fn write_block(&mut self, block: Block) -> Result<()> {
         let span = self.writer.write_blockstore(&BlockstoreEntry::Block(block))?;
-        self.index.insert_block(write_txn(env, txn)?, &block.slot, &span)?;
-        self.sync(Some(block.slot), txn)?;
-        if self.ledger.size_exceeded()? {
-            self.ledger.truncate()?;
+        self.index.insert_block(block.slot, span);
+        self.publish(Some(block.slot), Durability::Buffer)?;
+        if block.slot.is_multiple_of(SIZE_CHECK_FREQUENCY) && self.ledger.size_exceeded()? {
+            self.sync(None)?;
+            self.truncate()?;
         }
         metrics::ledger_counts(&self.ledger);
         Ok(())
     }
 
+    /// Joins the previous cleanup before starting another truncation worker.
+    fn truncate(&mut self) -> Result<()> {
+        self.join_truncation()?;
+        self.truncation = self.ledger.truncate()?;
+        Ok(())
+    }
+
+    /// Joins and clears the outstanding truncation worker, if any.
+    fn join_truncation(&mut self) -> Result<()> {
+        let Some(worker) = self.truncation.take() else { return Ok(()) };
+        worker.join().map_err(|_| LedgerError::TruncationPanic)?
+    }
+
     /// Writes a superblock seal and prepares files for read-only access.
-    fn write_superblock(&mut self, seal: SuperblockSeal, txn: OptRwTxn<'_, '_>) -> Result<()> {
+    fn write_superblock(&mut self, seal: SuperblockSeal) -> Result<()> {
         self.writer.write_blockstore(&BlockstoreEntry::Superblock(seal))?;
-        self.sync(None, txn)?;
+        self.sync(None)?;
         self.writer.finalize()?;
+        self.index.rotate_memtable()?;
         info!(superblock = seal.id, "sealed superblock");
         Ok(())
     }
 
     /// Writes and publishes a volatile-state reset marker.
-    fn write_reset(&mut self, slot: Slot, txn: OptRwTxn<'_, '_>) -> Result<()> {
+    fn write_reset(&mut self, slot: Slot) -> Result<()> {
         self.writer.write_blockstore(&BlockstoreEntry::Reset(slot))?;
-        self.sync(None, txn)?;
+        self.sync(None)?;
         info!(slot, "appended volatile state reset");
         Ok(())
     }
@@ -256,35 +229,29 @@ impl LedgerAppender {
     /// Makes files and indexes durable, publishes their cursors and accumulated
     /// transaction count, and broadcasts the new blockstore position. When
     /// `slot` is supplied, the same boundary also publishes block metadata.
-    fn sync(&mut self, slot: Option<Slot>, txn: OptRwTxn<'_, '_>) -> Result<()> {
-        let cursors = self.writer.sync()?;
-        if let Some(txn) = txn.take() {
-            txn.commit()?;
-        }
-        if slot.is_none() {
-            self.index.flush()?;
-        }
-        self.writer.publish(cursors, slot)?;
+    fn sync(&mut self, slot: Option<Slot>) -> Result<()> {
+        self.publish(slot, Durability::SyncData)
+    }
+
+    /// Publishes one complete boundary with buffered or data-synced durability.
+    fn publish(&mut self, slot: Option<Slot>, durability: Durability) -> Result<()> {
+        let cursors = self.writer.persist(durability)?;
+        self.index.persist(durability)?;
+        self.writer.publish(cursors, slot, durability)?;
         self.ledger.meta.transactions.fetch_add(self.transactions, Release);
         if let Some(slot) = slot {
             self.ledger.meta.blocks.fetch_add(1, Release);
             self.ledger.meta.range.end.store(slot, Release);
         }
-        self.ledger.meta.flush()?;
+        self.ledger.meta.persist(durability)?;
         self.transactions = 0;
         let position = BlockstorePosition {
             superblock: self.ledger.meta.head(),
-            offset: cursors.0,
+            offset: cursors.blockstore,
         };
         let _ = self.position.send(position);
         Ok(())
     }
-}
-
-/// Boundary reached while processing one superblock environment.
-enum Epoch {
-    Rotate,
-    Shutdown,
 }
 
 /// Transaction bytes already written but not yet paired with execution details.
@@ -295,8 +262,17 @@ struct PendingTx {
     span: Span,
 }
 
+/// Published byte cursors for the active superblock data files.
+#[derive(Clone, Copy)]
+struct Cursors {
+    blockstore: u64,
+    executions: u64,
+}
+
 /// Writable superblock files and reusable execution-detail encoder.
 struct SuperblockWriter {
+    /// Active superblock whose metadata publishes these files.
+    superblock: Arc<Superblock>,
     /// Compressor reused for execution metadata payloads.
     compressor: Compressor<'static>,
     /// Scratch buffer owned by bitcode while encoding metadata.
@@ -305,28 +281,22 @@ struct SuperblockWriter {
     blockstore: AppendFile,
     /// Buffered execution details stream.
     executions: AppendFile,
-    /// Mmap-backed metadata for this superblock.
-    metadata: MetaMap<SuperblockMeta>,
 }
 
 impl SuperblockWriter {
-    /// Opens writable files and metadata under `directory`.
-    fn new(directory: &Path) -> Result<Self> {
-        // SAFETY: `SuperblockMeta` and its nested headers have stable C layouts,
-        // and all fields that can change while mapped are atomic. The ledger
-        // exclusively creates and updates this superblock metadata file.
-        let metadata = unsafe { MetaMap::<SuperblockMeta>::new(&directory.join(SUPERBLOCK_META)) }?;
-
+    /// Opens writable files for the active `superblock`.
+    fn new(superblock: Arc<Superblock>) -> Result<Self> {
+        let directory = &superblock.directory;
         Ok(Self {
             blockstore: AppendFile::new(
                 &directory.join(BLOCKSTORE_DB),
-                &metadata.cursors.blockstore,
+                &superblock.meta.cursors.blockstore,
             )?,
             executions: AppendFile::new(
                 &directory.join(EXECUTIONS_DB),
-                &metadata.cursors.executions,
+                &superblock.meta.cursors.executions,
             )?,
-            metadata,
+            superblock,
             compressor: Compressor::new(0)?,
             buffer: Buffer::new(),
         })
@@ -355,25 +325,31 @@ impl SuperblockWriter {
         Ok(Span::new(offset, size))
     }
 
-    /// Syncs data files and returns durable cursors.
-    fn sync(&mut self) -> Result<(u64, u64)> {
-        let _timer = metrics::time(Operation::FileSync);
-        Ok((self.blockstore.sync()?, self.executions.sync()?))
+    /// Persists data files and returns their published cursors.
+    fn persist(&mut self, durability: Durability) -> Result<Cursors> {
+        let _timer = if durability.requires_sync() {
+            metrics::time(Operation::FileSync)
+        } else {
+            metrics::time(Operation::BufferSync)
+        };
+        Ok(Cursors {
+            blockstore: self.blockstore.persist(durability)?,
+            executions: self.executions.persist(durability)?,
+        })
     }
 
-    /// Publishes durable cursors into superblock metadata.
-    fn publish(&self, cursors: (u64, u64), slot: Option<u64>) -> Result<()> {
-        let (blockstore, executions) = cursors;
-        self.metadata.cursors.blockstore.store(blockstore, Release);
-        self.metadata.cursors.executions.store(executions, Release);
+    /// Publishes file cursors into superblock metadata at the selected durability.
+    fn publish(&self, cursors: Cursors, slot: Option<u64>, durability: Durability) -> Result<()> {
+        let metadata = &self.superblock.meta;
+        metadata.cursors.blockstore.store(cursors.blockstore, Release);
+        metadata.cursors.executions.store(cursors.executions, Release);
         if let Some(slot) = slot {
-            self.metadata.range.end.store(slot, Release);
+            metadata.range.end.store(slot, Release);
             // The first block of a segment fixes its start
             // slot; later blocks only extend the end.
-            let _ = self.metadata.range.start.compare_exchange(0, slot, Release, Relaxed);
+            let _ = metadata.range.start.compare_exchange(0, slot, Release, Relaxed);
         }
-        self.metadata.flush()?;
-        Ok(())
+        metadata.persist(durability)
     }
 
     /// Trims preallocated file space after the superblock cursors are durable.

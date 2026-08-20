@@ -36,6 +36,22 @@ const PREALLOCATION_SIZE: u64 = 4 * nucleus::GB as u64;
 /// Remaining allocation that triggers another reservation.
 const PREALLOCATION_THRESHOLD: u64 = PREALLOCATION_SIZE / 16;
 
+/// Persistence strength for a complete ledger boundary.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Durability {
+    /// Flushes through userspace into operating-system buffers.
+    Buffer,
+    /// Additionally synchronizes file data to the storage device.
+    SyncData,
+}
+
+impl Durability {
+    /// Returns whether persistence must synchronize data to the storage device.
+    pub(crate) fn requires_sync(self) -> bool {
+        matches!(self, Self::SyncData)
+    }
+}
+
 /// Buffered append writer that tracks logical file position.
 pub(crate) struct AppendFile {
     /// Backing file.
@@ -92,13 +108,15 @@ impl AppendFile {
         Ok(())
     }
 
-    /// Flushes buffered bytes, syncs file data, and returns the durable cursor.
-    pub(crate) fn sync(&mut self) -> Result<u64> {
+    /// Persists buffered bytes at `durability` and returns the published cursor.
+    pub(crate) fn persist(&mut self, durability: Durability) -> Result<u64> {
         if self.len.saturating_sub(self.cursor) < PREALLOCATION_THRESHOLD {
             self.preallocate()?;
         }
         self.flush()?;
-        self.file.sync_data()?;
+        if durability.requires_sync() {
+            self.file.sync_data()?;
+        }
         Ok(self.cursor)
     }
 
@@ -114,7 +132,6 @@ impl AppendFile {
             offset,
             PREALLOCATION_SIZE,
         )?;
-        self.file.sync_all()?;
         self.len = offset + PREALLOCATION_SIZE;
         debug!(len = self.len, "preallocated ledger file space");
         Ok(())
@@ -200,6 +217,21 @@ impl<T: Default + Sized> MetaMap<T> {
     pub(crate) fn flush(&self) -> Result<()> {
         self.mmap.flush().map_err(Into::into)
     }
+
+    /// Schedules dirty metadata pages for asynchronous writeback.
+    #[inline]
+    pub(crate) fn flush_async(&self) -> Result<()> {
+        self.mmap.flush_async().map_err(Into::into)
+    }
+
+    /// Publishes metadata using the boundary's persistence strength.
+    #[inline]
+    pub(crate) fn persist(&self, durability: Durability) -> Result<()> {
+        match durability {
+            Durability::Buffer => self.flush_async(),
+            Durability::SyncData => self.flush(),
+        }
+    }
 }
 
 impl<T> Deref for MetaMap<T> {
@@ -264,7 +296,7 @@ impl LedgerMeta {
 #[derive(Default)]
 #[repr(C)]
 pub(crate) struct SuperblockMeta {
-    /// Durable append cursors for files in this superblock.
+    /// Published append cursors for files in this superblock.
     pub(crate) cursors: FileCursors,
     /// Slot range stored in this segment.
     pub(crate) range: BlockRange,
@@ -274,13 +306,13 @@ pub(crate) struct SuperblockMeta {
     pub(crate) transactions: AtomicU64,
 }
 
-/// Durable append cursors for superblock data files.
+/// Published append cursors for superblock data files.
 #[derive(Default)]
 #[repr(C)]
 pub(crate) struct FileCursors {
-    /// Durable byte cursor in `blockstore.db`.
+    /// Published byte cursor in `blockstore.db`.
     pub(crate) blockstore: AtomicU64,
-    /// Durable byte cursor in `executions.db`.
+    /// Published byte cursor in `executions.db`.
     pub(crate) executions: AtomicU64,
 }
 

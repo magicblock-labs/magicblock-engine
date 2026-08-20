@@ -367,6 +367,6 @@ impl SuperblockAccessor<'_> {
         let (response, ack) = oneshot::channel();
         let event = Event::Sync { response, is_final };
         self.keeper.ledger.appender.send(event)?;
-        ack.recv().map_err(LedgerRequestError::from)?.map_err(Into::into)
+        ack.recv().map_err(LedgerRequestError::from).map_err(Into::into)
     }
 }

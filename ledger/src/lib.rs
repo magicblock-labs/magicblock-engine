@@ -5,15 +5,16 @@ use std::{
     fs::{self, File},
     path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering::*},
-    thread,
+    thread::{self, JoinHandle},
 };
 
 pub use crate::error::{LedgerError, LedgerRequestError};
 use derive_more::Deref;
+use fjall::Keyspace;
 use nucleus::{
     Slot,
     ledger::BlockstorePosition,
-    shutdown::{Service, ShutdownManager},
+    shutdown::{Service, ShutdownManager, ShutdownReason},
 };
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
@@ -53,6 +54,8 @@ pub struct Ledger {
     meta: MetaMap<LedgerMeta>,
     /// Retained superblocks keyed by id.
     superblocks: RwLock<BTreeMap<u64, Arc<Superblock>>>,
+    /// Ledger-wide index partitioned by superblock keyspace.
+    index: Index,
     /// Root ledger directory.
     pub directory: PathBuf,
     /// Maximum used bytes allowed on the ledger filesystem before retention runs.
@@ -60,7 +63,7 @@ pub struct Ledger {
 }
 
 impl Ledger {
-    /// Opens the ledger and starts one appender plus the reader worker pool.
+    /// Opens ledger files and the global index, then starts the appender and reader pool.
     pub fn init(
         directory: impl AsRef<Path>,
         size_limit: u64,
@@ -71,11 +74,16 @@ impl Ledger {
         metrics::init(&ledger);
         let (appender_tx, rx) = flume::bounded(SERVICE_QUEUE_CAPACITY);
         let (position, _) = broadcast::channel(256);
-        let appender = LedgerAppender::new(ledger.clone(), rx, position.clone())?;
-        let sh = shutdown.handle(Service::LedgerAppender);
-        thread::Builder::new()
-            .name("ledger-appender".into())
-            .spawn(|| appender.run(sh))?;
+        let mut sh = shutdown.handle(Service::LedgerAppender);
+        let appender_ledger = ledger.clone();
+        let appender_position = position.clone();
+        thread::Builder::new().name("ledger-appender".into()).spawn(move || {
+            let reason = match LedgerAppender::run(appender_ledger, rx, appender_position) {
+                Ok(()) => ShutdownReason::Signalled,
+                Err(error) => ShutdownReason::Error(Box::new(error)),
+            };
+            sh.terminate(reason);
+        })?;
         let (reader_tx, rx) = flume::bounded(SERVICE_QUEUE_CAPACITY);
 
         #[cfg(not(feature = "testkit"))]
@@ -100,7 +108,7 @@ impl Ledger {
     }
 
     /// Iterates retained superblocks from newest to oldest.
-    pub fn iter(&self) -> impl Iterator<Item = Arc<Superblock>> {
+    pub fn iter(&self) -> impl Iterator<Item = Arc<Superblock>> + '_ {
         let range = self.meta.superblocks();
         range.rev().filter_map(|id| self.superblocks.read().get(&id).cloned())
     }
@@ -115,29 +123,39 @@ impl Ledger {
 
     /// Blockstore write offset of a retained superblock, `None` when it is not retained.
     pub fn cursor(&self, superblock: u64) -> Option<u64> {
-        self.iter().find_map(|sb| {
-            (sb.id == superblock).then_some(sb.meta.cursors.blockstore.load(Acquire))
-        })
+        if !self.meta.superblocks().contains(&superblock) {
+            return None;
+        }
+        self.superblocks
+            .read()
+            .get(&superblock)
+            .map(|superblock| superblock.meta.cursors.blockstore.load(Acquire))
     }
 
     /// Iterates retained superblocks after `superblock` through the active head,
     /// so replay excludes the sealed snapshot state but includes the unsealed head.
-    fn iter_after(&self, superblock: u64) -> impl Iterator<Item = Arc<Superblock>> {
-        let range = superblock + 1..=self.meta.head();
-        range.filter_map(|id| self.superblocks.read().get(&id).cloned())
+    fn iter_after(&self, superblock: u64) -> impl Iterator<Item = Arc<Superblock>> + '_ {
+        let head = self.meta.head();
+        superblock
+            .checked_add(1)
+            .into_iter()
+            .flat_map(move |start| start..=head)
+            .filter_map(|id| self.superblocks.read().get(&id).cloned())
     }
 
     /// Opens ledger metadata and retained superblocks without starting services.
     fn new(directory: PathBuf, size_limit: u64) -> Result<Self> {
         fs::create_dir_all(&directory)?;
+        let index = Index::new(&directory)?;
         let meta = directory.join(LEDGER_META);
         // SAFETY: `LedgerMeta` and its nested headers have stable C layouts,
         // and all fields that can change while mapped are atomic. This process
         // exclusively creates and updates the metadata file at `meta`.
         let meta = unsafe { MetaMap::<LedgerMeta>::new(&meta) }?;
+        let retained = meta.superblocks();
         let mut superblocks = BTreeMap::new();
-        for id in meta.superblocks() {
-            let superblock = Superblock::open(&directory, id)?;
+        for id in retained {
+            let superblock = Superblock::open(&directory, id, &index)?;
             superblocks.insert(id, superblock);
         }
 
@@ -145,6 +163,7 @@ impl Ledger {
         Ok(Self {
             meta,
             superblocks: superblocks.into(),
+            index,
             directory,
             size_limit,
         })
@@ -164,33 +183,36 @@ impl Ledger {
     /// Removes the oldest sealed superblock while keeping the active head.
     ///
     /// Superblock slot ranges are sequential and non-overlapping, so the next
-    /// retained start slot is the removed superblock end plus one.
-    ///
-    /// The appender runs this at a block boundary once the ledger filesystem is
-    /// over its size limit; calling it directly forces a single retention pass
-    /// regardless of that limit.
-    pub fn truncate(&self) -> Result<()> {
-        let _timer = metrics::time(metrics::Operation::Truncate);
-        let Some((id, superblock)) = self
-            .superblocks
-            .read()
-            .first_key_value()
-            .map(|(id, superblock)| (*id, superblock.clone()))
-        else {
-            return Ok(());
+    /// retained start slot is the removed superblock end plus one. Metadata is
+    /// flushed before returning the cleanup worker, which removes the keyspace
+    /// and directory. The caller must join the worker to observe cleanup errors.
+    pub fn truncate(&self) -> Result<Option<JoinHandle<Result<()>>>> {
+        let mut superblocks = self.superblocks.write();
+        let Some((&id, _)) = superblocks.first_key_value() else {
+            return Ok(None);
         };
         if id >= self.meta.head() {
-            return Ok(());
+            return Ok(None);
         }
+        let Some((_, superblock)) = superblocks.pop_first() else {
+            return Ok(None);
+        };
+        drop(superblocks);
 
+        let timer = metrics::time(metrics::Operation::Truncate);
         let end = superblock.meta.range.end.load(Acquire);
-        superblock.purge()?;
-        self.superblocks.write().remove(&id);
         self.meta.superblocks.fetch_sub(1, Release);
         self.meta.range.start.store(end + 1, Release);
         self.meta.flush()?;
-        info!(id, end, "purged oldest superblock for retention");
-        Ok(())
+
+        let index = self.index.clone();
+        Ok(Some(thread::spawn(move || {
+            index.delete(superblock.index.clone())?;
+            superblock.purge()?;
+            info!(id, end, "purged oldest superblock");
+            drop(timer);
+            Ok(())
+        })))
     }
 }
 
@@ -211,7 +233,7 @@ pub struct LedgerHandle {
 }
 
 impl LedgerHandle {
-    /// Returns the number of transactions published at durable sync boundaries.
+    /// Returns the number of transactions published at complete block boundaries.
     pub fn transactions(&self) -> u64 {
         self.ledger.meta.transactions.load(Acquire)
     }
@@ -221,7 +243,7 @@ impl LedgerHandle {
         self.ledger.meta.head()
     }
 
-    /// Position of the next byte to append: active superblock plus its durable cursor.
+    /// Position of the next byte to append: active superblock plus its published cursor.
     pub fn position(&self) -> BlockstorePosition {
         let superblock = self.head();
         let offset = self.cursor(superblock).unwrap_or_default();
@@ -239,16 +261,21 @@ pub struct Superblock {
     pub blockstore: File,
     /// Transaction execution metadata file.
     executions: File,
-    /// LMDB index for this superblock.
-    index: Arc<Index>,
+    /// Keyspace containing this superblock's namespaced index entries.
+    index: Keyspace,
     /// Superblock directory path.
     pub directory: PathBuf,
 }
 
 impl Superblock {
+    /// Canonical directory and keyspace name for one superblock.
+    fn name(id: u64) -> String {
+        format!("superblock-{id:0>9}")
+    }
+
     /// Returns the directory path for `id` under `root`.
     pub fn init_dir(root: &Path, id: u64) -> Result<PathBuf> {
-        let dir = root.join(format!("superblock-{id:0>9}"));
+        let dir = root.join(Self::name(id));
         fs::create_dir_all(&dir).map_err(Into::into).map(|()| dir)
     }
 
@@ -263,9 +290,9 @@ impl Superblock {
     }
 
     /// Opens a superblock directory, creating its data files when needed.
-    fn open(root: &Path, id: u64) -> Result<Arc<Self>> {
+    fn open(root: &Path, id: u64, index: &Index) -> Result<Arc<Self>> {
         let directory = Self::init_dir(root, id)?;
-        let index = Arc::new(Index::new(&directory)?);
+        let index = index.keyspace(id)?;
         let meta = unsafe { MetaMap::<SuperblockMeta>::new(&directory.join(SUPERBLOCK_META)) }?;
         let blockstore = Self::file(&directory.join(BLOCKSTORE_DB))?;
         let executions = Self::file(&directory.join(EXECUTIONS_DB))?;

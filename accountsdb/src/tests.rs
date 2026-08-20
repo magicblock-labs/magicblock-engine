@@ -8,17 +8,14 @@
 use std::sync::atomic::Ordering::{Relaxed, Release};
 
 use assert_matches::assert_matches;
-use nucleus::{
-    heed::{DatabaseIndex, read_txn},
-    testkit::{TempDir, init_tracing, tempdir},
-};
+use nucleus::testkit::{TempDir, init_tracing, tempdir};
 use solana_account::{
     AccountBuilder, AccountMode, AccountSharedData, ReadableAccount, WritableAccount,
 };
 use solana_pubkey::Pubkey;
 
 use super::*;
-use crate::{snapshot::VOLATILE_DB_FILE, store::MIN_REMAINDER};
+use crate::{snapshot::VOLATILE_DB_FILE, store::MIN_REMAINDER, store::index::read_txn};
 
 /// Fresh database on a throwaway directory; the `TempDir` must outlive the db.
 fn db() -> (TempDir, AccountsDB) {

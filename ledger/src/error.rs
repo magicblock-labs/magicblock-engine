@@ -3,7 +3,6 @@
 use std::io;
 
 use agave_transaction_view::result::TransactionViewError;
-use heed::BoxedError;
 use oneshot::RecvError;
 use tokio::time::error::Elapsed;
 
@@ -22,12 +21,9 @@ pub enum LedgerError {
     /// Bitcode failed while serializing execution details.
     #[error("ledger execution-details codec error: {0}")]
     Bitcode(#[source] bitcode::Error),
-    /// LMDB key/value codec failed while encoding or decoding an index value.
-    #[error("ledger index key/value codec error: {0}")]
-    IndexCodec(#[source] BoxedError),
-    /// LMDB failed while opening or accessing a ledger index.
+    /// Fjall failed while opening or accessing a ledger index.
     #[error("ledger index error: {0}")]
-    Index(#[source] heed::Error),
+    Index(#[source] fjall::Error),
     /// Sanitized transaction view could not be decoded.
     #[error("transaction view error: {0:?}")]
     TransactionView(TransactionViewError),
@@ -35,6 +31,9 @@ pub enum LedgerError {
     #[error("ledger corruption: {0}")]
     #[from(skip)]
     Corruption(&'static str),
+    /// The background superblock cleanup worker panicked.
+    #[error("ledger truncation worker panicked")]
+    TruncationPanic,
 }
 
 /// Errors returned while waiting for a ledger reader response.
