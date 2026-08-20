@@ -72,8 +72,8 @@ impl LedgerAppender {
             .get(&head)
             .cloned()
             .ok_or(LedgerError::Corruption("active superblock missing"))?;
-        let writer = SuperblockWriter::new(superblock.clone())?;
         let index = ledger.index.writer(&superblock.index);
+        let writer = SuperblockWriter::new(superblock)?;
 
         let mut appender = Self {
             ledger,
