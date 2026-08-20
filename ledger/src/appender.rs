@@ -102,14 +102,15 @@ impl LedgerAppender {
                 Event::Bootstrap(seal) => self.seal(seal, true)?,
                 Event::Reset(slot) => self.write_reset(slot)?,
                 Event::Sync { response, is_final } => {
-                    let _ = response.send(self.sync(None));
+                    self.sync(None)?;
+                    let _ = response.send(());
                     if is_final {
-                        break;
+                        return Ok(());
                     }
                 }
             }
         }
-        Ok(())
+        self.sync(None)
     }
 
     /// Rotates to the next superblock directory.

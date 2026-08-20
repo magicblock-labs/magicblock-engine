@@ -16,7 +16,7 @@ use solana_signature::Signature;
 use solana_transaction_error::TransactionResult;
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{error::Result, index::Span};
+use crate::index::Span;
 
 /// Byte offset into a ledger data file.
 pub(crate) type Offset = u64;
@@ -77,8 +77,8 @@ pub enum Event {
     Reset(Slot),
     /// Flush pending appends and optionally stop the appender after acknowledging.
     Sync {
-        /// Receives the durability result.
-        response: oneshot::Sender<Result<()>>,
+        /// Receives an acknowledgement after the append state is durable.
+        response: oneshot::Sender<()>,
         /// Whether this is the terminal engine sync.
         is_final: bool,
     },
