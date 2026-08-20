@@ -5,19 +5,19 @@ use std::{
     fs::{self, File},
     path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering::*},
-    thread,
-    time::{Duration, Instant},
+    thread::{self, JoinHandle},
 };
 
 pub use crate::error::{LedgerError, LedgerRequestError};
 use derive_more::Deref;
+use fjall::Keyspace;
 use nucleus::{
     Slot,
     ledger::BlockstorePosition,
-    shutdown::{Service, ShutdownHandle, ShutdownManager, ShutdownReason},
+    shutdown::{Service, ShutdownManager, ShutdownReason},
 };
 use parking_lot::RwLock;
-use tokio::{sync::broadcast, time};
+use tokio::sync::broadcast;
 use tracing::info;
 
 mod appender;
@@ -35,7 +35,7 @@ mod tests;
 use crate::{
     appender::{BLOCKSTORE_DB, EXECUTIONS_DB, LedgerAppender, SUPERBLOCK_META},
     error::Result,
-    index::IndexSlot,
+    index::Index,
     reader::LedgerReader,
     request::ReaderSender,
     schema::Event,
@@ -44,10 +44,6 @@ use crate::{
 
 const LEDGER_META: &str = "ledger.meta";
 const SERVICE_QUEUE_CAPACITY: usize = 128;
-/// Sealed indexes immediately preceding the active head kept open when cached.
-const HOT_SEALED_INDEXES: u64 = 2;
-/// Idle time after which a sealed index is closed.
-const SEALED_INDEX_TTL: Duration = Duration::from_secs(10 * 60);
 
 /// Top-level ledger handle.
 ///
@@ -58,6 +54,8 @@ pub struct Ledger {
     meta: MetaMap<LedgerMeta>,
     /// Retained superblocks keyed by id.
     superblocks: RwLock<BTreeMap<u64, Arc<Superblock>>>,
+    /// Ledger-wide index partitioned by superblock keyspace.
+    index: Index,
     /// Root ledger directory.
     pub directory: PathBuf,
     /// Maximum used bytes allowed on the ledger filesystem before retention runs.
@@ -65,8 +63,7 @@ pub struct Ledger {
 }
 
 impl Ledger {
-    /// Opens ledger files and starts one appender plus the reader worker pool.
-    /// The appender opens the active index and reports recovery failures through shutdown.
+    /// Opens ledger files and the global index, then starts the appender and reader pool.
     pub fn init(
         directory: impl AsRef<Path>,
         size_limit: u64,
@@ -75,9 +72,6 @@ impl Ledger {
         let directory = directory.as_ref().to_owned();
         let ledger = Arc::new(Self::new(directory, size_limit)?);
         metrics::init(&ledger);
-        let sh = shutdown.handle(Service::LedgerMaintenance);
-        let maintenance = ledger.clone();
-        tokio::spawn(async move { maintenance.maintain(sh).await });
         let (appender_tx, rx) = flume::bounded(SERVICE_QUEUE_CAPACITY);
         let (position, _) = broadcast::channel(256);
         let mut sh = shutdown.handle(Service::LedgerAppender);
@@ -152,6 +146,7 @@ impl Ledger {
     /// Opens ledger metadata and retained superblocks without starting services.
     fn new(directory: PathBuf, size_limit: u64) -> Result<Self> {
         fs::create_dir_all(&directory)?;
+        let index = Index::new(&directory)?;
         let meta = directory.join(LEDGER_META);
         // SAFETY: `LedgerMeta` and its nested headers have stable C layouts,
         // and all fields that can change while mapped are atomic. This process
@@ -159,9 +154,8 @@ impl Ledger {
         let meta = unsafe { MetaMap::<LedgerMeta>::new(&meta) }?;
         let retained = meta.superblocks();
         let mut superblocks = BTreeMap::new();
-        let head = meta.head();
         for id in retained {
-            let superblock = Superblock::open(&directory, id, id == head)?;
+            let superblock = Superblock::open(&directory, id, &index)?;
             superblocks.insert(id, superblock);
         }
 
@@ -169,6 +163,7 @@ impl Ledger {
         Ok(Self {
             meta,
             superblocks: superblocks.into(),
+            index,
             directory,
             size_limit,
         })
@@ -188,67 +183,36 @@ impl Ledger {
     /// Removes the oldest sealed superblock while keeping the active head.
     ///
     /// Superblock slot ranges are sequential and non-overlapping, so the next
-    /// retained start slot is the removed superblock end plus one.
-    ///
-    /// The appender runs this at a block boundary once the ledger filesystem is
-    /// over its size limit; calling it directly forces a single retention pass
-    /// regardless of that limit.
-    pub fn truncate(&self) -> Result<()> {
-        let timer = metrics::time(metrics::Operation::Truncate);
+    /// retained start slot is the removed superblock end plus one. Metadata is
+    /// flushed before returning the cleanup worker, which removes the keyspace
+    /// and directory. The caller must join the worker to observe cleanup errors.
+    pub fn truncate(&self) -> Result<Option<JoinHandle<Result<()>>>> {
         let mut superblocks = self.superblocks.write();
         let Some((&id, _)) = superblocks.first_key_value() else {
-            return Ok(());
+            return Ok(None);
         };
         if id >= self.meta.head() {
-            return Ok(());
+            return Ok(None);
         }
         let Some((_, superblock)) = superblocks.pop_first() else {
-            return Ok(());
+            return Ok(None);
         };
+        drop(superblocks);
 
+        let timer = metrics::time(metrics::Operation::Truncate);
         let end = superblock.meta.range.end.load(Acquire);
         self.meta.superblocks.fetch_sub(1, Release);
         self.meta.range.start.store(end + 1, Release);
         self.meta.flush()?;
-        drop(superblocks);
-        // index drop and directory cleanup can take a few seconds,
-        // we don't want to block ledger appender during that time
-        thread::spawn(move || {
-            {
-                superblock.index.evict();
-                superblock.purge()?;
-                info!(id, end, "purged oldest superblock");
-                drop(timer);
-                Ok::<(), LedgerError>(())
-            }
-            .inspect_err(|error| tracing::error!(%error, "failed to purge superblock"))
-        });
-        Ok(())
-    }
 
-    /// Maintains the sealed-index cache.
-    async fn maintain(&self, mut shutdown: ShutdownHandle) {
-        loop {
-            self.expire_indexes();
-            if time::timeout(Duration::from_secs(1), shutdown.signalled()).await.is_ok() {
-                break;
-            }
-        }
-        shutdown.terminate(ShutdownReason::Signalled);
-    }
-
-    /// Closes expired indexes except the two sealed predecessors of the head.
-    fn expire_indexes(&self) {
-        let expiry = Instant::now() - SEALED_INDEX_TTL;
-        let cold = ..self.meta.head().saturating_sub(HOT_SEALED_INDEXES);
-        self.superblocks
-            .read()
-            .range(cold)
-            .map(|(_, superblock)| superblock)
-            .filter(|superblock| superblock.index.last_used().is_some_and(|used| used <= expiry))
-            .for_each(|superblock| {
-                superblock.index.evict();
-            });
+        let index = self.index.clone();
+        Ok(Some(thread::spawn(move || {
+            index.delete(superblock.index.clone())?;
+            superblock.purge()?;
+            info!(id, end, "purged oldest superblock");
+            drop(timer);
+            Ok(())
+        })))
     }
 }
 
@@ -297,16 +261,21 @@ pub struct Superblock {
     pub blockstore: File,
     /// Transaction execution metadata file.
     executions: File,
-    /// Lazily opened Fjall index for this superblock.
-    index: IndexSlot,
+    /// Keyspace containing this superblock's namespaced index entries.
+    index: Keyspace,
     /// Superblock directory path.
     pub directory: PathBuf,
 }
 
 impl Superblock {
+    /// Canonical directory and keyspace name for one superblock.
+    fn name(id: u64) -> String {
+        format!("superblock-{id:0>9}")
+    }
+
     /// Returns the directory path for `id` under `root`.
     pub fn init_dir(root: &Path, id: u64) -> Result<PathBuf> {
-        let dir = root.join(format!("superblock-{id:0>9}"));
+        let dir = root.join(Self::name(id));
         fs::create_dir_all(&dir).map_err(Into::into).map(|()| dir)
     }
 
@@ -321,9 +290,9 @@ impl Superblock {
     }
 
     /// Opens a superblock directory, creating its data files when needed.
-    fn open(root: &Path, id: u64, active: bool) -> Result<Arc<Self>> {
+    fn open(root: &Path, id: u64, index: &Index) -> Result<Arc<Self>> {
         let directory = Self::init_dir(root, id)?;
-        let index = IndexSlot::new(&directory, active);
+        let index = index.keyspace(id)?;
         let meta = unsafe { MetaMap::<SuperblockMeta>::new(&directory.join(SUPERBLOCK_META)) }?;
         let blockstore = Self::file(&directory.join(BLOCKSTORE_DB))?;
         let executions = Self::file(&directory.join(EXECUTIONS_DB))?;

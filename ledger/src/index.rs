@@ -1,56 +1,53 @@
 //! Fjall index schema and codecs for ledger blockstore entries.
 
-use std::{
-    iter::Rev,
-    ops::RangeInclusive,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Instant,
-};
+use std::{iter::Rev, ops::RangeInclusive, path::Path};
 
 use fjall::{
     CompressionType, Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode,
-    Readable, Snapshot,
     config::{CompressionPolicy, FilterPolicy},
     util::prefixed_range,
 };
 use nucleus::{MB, Slot};
-use parking_lot::Mutex;
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 
 use crate::{
+    Superblock,
     error::{LedgerError, Result},
     schema::Offset,
     storage::Durability,
 };
 
-/// Index directory below each superblock directory.
+/// Ledger-wide index directory.
 const INDEX_SUBDIR: &str = "index";
-/// Transaction signature index name.
-const TRANSACTIONS_INDEX: &str = "transactions";
-/// Slot-to-offset index name.
-const SLOTS_INDEX: &str = "slots";
-/// Account-to-offset index name.
-const ACCOUNTS_INDEX: &str = "accounts";
+/// Transaction signature key namespace.
+const TRANSACTION: u8 = b't';
+/// Slot-to-offset key namespace.
+const BLOCK: u8 = b'b';
+/// Account-to-offset key namespace.
+const ACCOUNT: u8 = b'a';
 /// Bytes kept from wide keys in compact index keys.
 const PREFIX_BYTES: usize = 16;
 /// Bytes occupied by one encoded span.
 const SPAN_BYTES: usize = size_of::<u64>();
 /// Bytes occupied by a transaction's two spans.
 const TX_SPAN_BYTES: usize = 2 * SPAN_BYTES;
+/// Bytes occupied by a namespaced truncated signature.
+const TX_KEY_BYTES: usize = 1 + PREFIX_BYTES;
+/// Bytes occupied by a namespaced slot.
+const BLOCK_KEY_BYTES: usize = 1 + size_of::<Slot>();
+/// Bytes occupied by a namespaced account prefix.
+const ACCOUNT_PREFIX_BYTES: usize = 1 + PREFIX_BYTES;
 /// Bytes occupied by an account prefix and ordered execution span.
-const ACCOUNT_KEY_BYTES: usize = PREFIX_BYTES + SPAN_BYTES;
-/// Block cache capacity for one opened superblock index.
-const CACHE_SIZE: u64 = 8 * MB as u64;
-/// Fjall maintenance workers assigned to the active writable index.
-const ACTIVE_WORKERS: usize = 2;
-/// Fjall maintenance workers assigned to an on-demand sealed index.
-const SEALED_WORKERS: usize = 1;
+const ACCOUNT_KEY_BYTES: usize = ACCOUNT_PREFIX_BYTES + SPAN_BYTES;
+/// Ledger-wide block cache capacity.
+const CACHE_SIZE: u64 = 64 * MB as u64;
+/// Fjall maintenance workers assigned to the ledger index.
+const WORKERS: usize = 2;
 
 /// Truncated signature or account key.
 ///
-/// The 16-byte prefix is an index tag, not a collision-proof identity. The
+/// The 16-byte prefix is a compact identity, not a collision-proof one. The
 /// index accepts the negligible collision risk to keep keys compact.
 type Prefix = [u8; PREFIX_BYTES];
 
@@ -135,7 +132,8 @@ impl Iterator for BlockIter {
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next().map(|entry| {
             let (key, value) = entry.into_inner()?;
-            let key = fixed(&key, "invalid slot key")?;
+            let key = key.get(1..).ok_or(LedgerError::Corruption("invalid slot key"))?;
+            let key = fixed(key, "invalid slot key")?;
             Ok((u64::from_be_bytes(key), Span::from_value(&value)?))
         })
     }
@@ -147,173 +145,83 @@ impl Iterator for AccountIter {
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next().map(|entry| {
             let key = entry.key()?;
-            key.get(PREFIX_BYTES..)
+            key.get(ACCOUNT_PREFIX_BYTES..)
                 .ok_or(LedgerError::Corruption("invalid account index key"))
                 .and_then(Span::from_key)
         })
     }
 }
 
-/// Databases used to locate ledger data inside one superblock.
+/// Ledger-wide Fjall database partitioned by one keyspace per superblock.
+#[derive(Clone)]
 pub(crate) struct Index {
-    /// Signature prefix to transaction and execution spans.
-    transactions: Keyspace,
-    /// Slot to blockstore span.
-    blocks: Keyspace,
-    /// Account prefix and execution span keys.
-    accounts: Keyspace,
-    /// Owning Fjall database.
     db: Database,
 }
 
 /// Atomic index mutations accumulated for one published ledger boundary.
 pub(crate) struct IndexWriter {
-    /// Index receiving the pending mutations.
-    index: Arc<Index>,
     /// Mutations pending publication at the next boundary.
     batch: OwnedWriteBatch,
+    /// Active superblock keyspace.
+    keyspace: Keyspace,
+    /// Ledger-wide database receiving the pending mutations.
+    db: Database,
 }
 
-/// Consistent read snapshot that keeps its underlying index lease alive.
-pub(crate) struct IndexReader {
-    /// Index lease retained for the snapshot lifetime.
-    index: Arc<Index>,
-    /// Consistent view across every index keyspace.
-    snapshot: Snapshot,
-}
-
-/// Lazy per-superblock index slot with lease-safe eviction.
-pub(crate) struct IndexSlot {
-    /// Superblock directory containing the index.
-    directory: PathBuf,
-    /// Synchronized active and cached state.
-    state: Mutex<IndexState>,
-}
-
-/// Mutable state of a lazy index slot.
-struct IndexState {
-    /// Whether this index belongs to the writable head.
-    active: bool,
-    /// Open index, absent until a sealed index is first read.
-    cached: Option<CachedIndex>,
-}
-
-/// Open index and its most recent lease time.
-struct CachedIndex {
-    /// Shared index lease.
-    index: Arc<Index>,
-    /// Most recent call to [`IndexSlot::get`].
-    used: Instant,
-}
+/// Read access to one retained superblock's append-only index.
+///
+/// Point lookups use Fjall's latest visible sequence number. Range and prefix
+/// calls already return iterators carrying their own snapshot-tracker nonce, so
+/// retaining a database-wide snapshot here would add tracking work without
+/// strengthening these reads.
+pub(crate) struct IndexReader<'a>(&'a Keyspace);
 
 impl Index {
-    /// Opens or creates an index using `workers` Fjall maintenance threads.
-    pub(crate) fn new(path: &Path, workers: usize) -> Result<Self> {
+    /// Opens or creates the ledger-wide index.
+    pub(crate) fn new(path: &Path) -> Result<Self> {
         let db = Database::builder(path.join(INDEX_SUBDIR))
             .cache_size(CACHE_SIZE)
-            .worker_threads(workers)
+            .worker_threads(WORKERS)
             .manual_journal_persist(true)
             .journal_compression(CompressionType::None)
             .open()?;
-        let options = || {
-            KeyspaceCreateOptions::default()
-                .data_block_compression_policy(CompressionPolicy::disabled())
-                .index_block_compression_policy(CompressionPolicy::disabled())
-                .filter_policy(FilterPolicy::disabled())
-        };
-        let transactions = db.keyspace(TRANSACTIONS_INDEX, options)?;
-        let blocks = db.keyspace(SLOTS_INDEX, options)?;
-        let accounts = db.keyspace(ACCOUNTS_INDEX, options)?;
-        Ok(Self {
-            db,
-            transactions,
-            blocks,
-            accounts,
-        })
+        Ok(Self { db })
     }
 
-    /// Creates the single writer for this superblock index.
-    pub(crate) fn writer(self: Arc<Self>) -> IndexWriter {
+    /// Opens or creates one superblock keyspace.
+    pub(crate) fn keyspace(&self, id: u64) -> Result<Keyspace> {
+        let options = KeyspaceCreateOptions::default()
+            .data_block_compression_policy(CompressionPolicy::disabled())
+            .index_block_compression_policy(CompressionPolicy::disabled())
+            .filter_policy(FilterPolicy::disabled());
+        self.db.keyspace(&Superblock::name(id), || options).map_err(Into::into)
+    }
+
+    /// Destroys a truncated superblock keyspace.
+    pub(crate) fn delete(&self, keyspace: Keyspace) -> Result<()> {
+        self.db.delete_keyspace(keyspace).map_err(Into::into)
+    }
+
+    /// Creates the single writer for a superblock keyspace.
+    pub(crate) fn writer(&self, keyspace: &Keyspace) -> IndexWriter {
         let batch = self.db.batch();
-        IndexWriter { index: self, batch }
-    }
-
-    /// Opens a consistent read view across all logical keyspaces.
-    pub(crate) fn reader(self: Arc<Self>) -> IndexReader {
-        let snapshot = self.db.snapshot();
-        IndexReader { index: self, snapshot }
+        IndexWriter {
+            db: self.db.clone(),
+            keyspace: keyspace.clone(),
+            batch,
+        }
     }
 }
 
-impl IndexSlot {
-    /// Creates a lazy index slot with its superblock lifecycle state.
-    pub(crate) fn new(directory: &Path, active: bool) -> Self {
-        Self {
-            directory: directory.to_owned(),
-            state: Mutex::new(IndexState { active, cached: None }),
-        }
+impl<'a> IndexReader<'a> {
+    /// Borrows a retained superblock keyspace for point and iterator reads.
+    pub(crate) fn new(keyspace: &'a Keyspace) -> Self {
+        Self(keyspace)
     }
 
-    /// Opens or leases this superblock's index.
-    pub(crate) fn get(&self) -> Result<Arc<Index>> {
-        let mut state = self.state.lock();
-        if let Some(cached) = &mut state.cached {
-            cached.used = Instant::now();
-            return Ok(cached.index.clone());
-        }
-        let workers = if state.active { ACTIVE_WORKERS } else { SEALED_WORKERS };
-        let index = Arc::new(Index::new(&self.directory, workers)?);
-        state.cached = Some(CachedIndex::new(index.clone()));
-        Ok(index)
-    }
-
-    /// Marks the former writable index as sealed and cache-eligible.
-    pub(crate) fn seal(&self) {
-        let mut state = self.state.lock();
-        state.active = false;
-        if let Some(cached) = &mut state.cached {
-            cached.used = Instant::now();
-        }
-    }
-
-    /// Returns the last use of an opened sealed index.
-    pub(crate) fn last_used(&self) -> Option<Instant> {
-        let state = self.state.lock();
-        if state.active {
-            return None;
-        }
-        state.cached.as_ref().map(|cached| cached.used)
-    }
-
-    /// Closes the index when no external reader or writer lease remains.
-    pub(crate) fn evict(&self) -> bool {
-        let mut state = self.state.lock();
-        if state.active {
-            return false;
-        }
-        let Some(cached) = &state.cached else {
-            return true;
-        };
-        if Arc::strong_count(&cached.index) != 1 {
-            return false;
-        }
-        state.cached.take();
-        true
-    }
-}
-
-impl CachedIndex {
-    fn new(index: Arc<Index>) -> Self {
-        Self { index, used: Instant::now() }
-    }
-}
-
-impl IndexReader {
     /// Locates a transaction by its first signature.
     pub(crate) fn transaction(&self, signature: &Signature) -> Result<Option<TxSpan>> {
-        let Some(value) =
-            self.snapshot.get(&self.index.transactions, prefix(signature.as_array()))?
-        else {
+        let Some(value) = self.0.get(transaction_key(signature))? else {
             return Ok(None);
         };
         let value = fixed::<TX_SPAN_BYTES>(&value, "invalid transaction span value")?;
@@ -325,30 +233,24 @@ impl IndexReader {
 
     /// Locates a block boundary by slot.
     pub(crate) fn block(&self, slot: Slot) -> Result<Option<Span>> {
-        self.snapshot
-            .get(&self.index.blocks, slot.to_be_bytes())?
-            .map(|value| Span::from_value(&value))
-            .transpose()
+        self.0.get(block_key(slot))?.map(|value| Span::from_value(&value)).transpose()
     }
 
     /// Scans a bounded slot range newest first.
     pub(crate) fn blocks(&self, slots: RangeInclusive<Slot>) -> BlockIter {
-        let start = slots.start().to_be_bytes();
-        let end = slots.end().to_be_bytes();
+        let start = block_key(*slots.start());
+        let end = block_key(*slots.end());
         BlockIter {
-            inner: self.snapshot.range(&self.index.blocks, start..=end).rev(),
+            inner: self.0.range(start..=end).rev(),
         }
     }
 
     /// Returns execution spans that mention `pubkey`, newest first.
     pub(crate) fn accounts(&self, pubkey: &Pubkey, before: Option<Span>) -> AccountIter {
-        let prefix = prefix(pubkey.as_array());
+        let prefix = account_prefix(pubkey);
         let inner = match before {
-            Some(span) => self.snapshot.range(
-                &self.index.accounts,
-                prefixed_range(prefix, ..span.key_bytes()),
-            ),
-            None => self.snapshot.prefix(&self.index.accounts, prefix),
+            Some(span) => self.0.range(prefixed_range(prefix, ..span.key_bytes())),
+            None => self.0.prefix(prefix),
         };
         AccountIter { inner: inner.rev() }
     }
@@ -357,7 +259,7 @@ impl IndexReader {
 impl IndexWriter {
     /// Indexes a block boundary by slot.
     pub(crate) fn insert_block(&mut self, slot: Slot, span: Span) {
-        self.batch.insert(&self.index.blocks, slot.to_be_bytes(), span.value_bytes());
+        self.batch.insert(&self.keyspace, block_key(slot), span.value_bytes());
     }
 
     /// Indexes a transaction and its execution details.
@@ -365,29 +267,22 @@ impl IndexWriter {
         let mut value = [0; TX_SPAN_BYTES];
         value[..SPAN_BYTES].copy_from_slice(&span.blockstore.value_bytes());
         value[SPAN_BYTES..].copy_from_slice(&span.execution.value_bytes());
-        self.batch.insert(
-            &self.index.transactions,
-            prefix(signature.as_array()),
-            value,
-        );
+        self.batch.insert(&self.keyspace, transaction_key(signature), value);
     }
 
     /// Adds account-to-execution entries for all static transaction accounts.
     pub(crate) fn insert_accounts(&mut self, accounts: &[Pubkey], span: Span) {
         for account in accounts {
-            let mut key = [0; ACCOUNT_KEY_BYTES];
-            key[..PREFIX_BYTES].copy_from_slice(&prefix(account.as_array()));
-            key[PREFIX_BYTES..].copy_from_slice(&span.key_bytes());
-            self.batch.insert(&self.index.accounts, key, []);
+            self.batch.insert(&self.keyspace, account_key(account, span), []);
         }
     }
 
     /// Publishes the pending atomic batch at the requested durability.
     pub(crate) fn persist(&mut self, durability: Durability) -> Result<()> {
-        let batch = std::mem::replace(&mut self.batch, self.index.db.batch());
+        let batch = std::mem::replace(&mut self.batch, self.db.batch());
         if batch.is_empty() {
             if durability.requires_sync() {
-                self.index.db.persist(PersistMode::SyncData)?;
+                self.db.persist(PersistMode::SyncData)?;
             }
             return Ok(());
         }
@@ -397,6 +292,38 @@ impl IndexWriter {
         };
         batch.durability(Some(mode)).commit().map_err(Into::into)
     }
+}
+
+/// Returns the namespaced transaction key.
+fn transaction_key(signature: &Signature) -> [u8; TX_KEY_BYTES] {
+    let mut key = [0; TX_KEY_BYTES];
+    key[0] = TRANSACTION;
+    key[1..].copy_from_slice(&prefix(signature.as_array()));
+    key
+}
+
+/// Returns the namespaced, numerically ordered block key.
+fn block_key(slot: Slot) -> [u8; BLOCK_KEY_BYTES] {
+    let mut key = [0; BLOCK_KEY_BYTES];
+    key[0] = BLOCK;
+    key[1..].copy_from_slice(&slot.to_be_bytes());
+    key
+}
+
+/// Returns the namespaced prefix shared by one account's entries.
+fn account_prefix(pubkey: &Pubkey) -> [u8; ACCOUNT_PREFIX_BYTES] {
+    let mut key = [0; ACCOUNT_PREFIX_BYTES];
+    key[0] = ACCOUNT;
+    key[1..].copy_from_slice(&prefix(pubkey.as_array()));
+    key
+}
+
+/// Returns the namespaced account entry key ordered by execution span.
+fn account_key(pubkey: &Pubkey, span: Span) -> [u8; ACCOUNT_KEY_BYTES] {
+    let mut key = [0; ACCOUNT_KEY_BYTES];
+    key[..ACCOUNT_PREFIX_BYTES].copy_from_slice(&account_prefix(pubkey));
+    key[ACCOUNT_PREFIX_BYTES..].copy_from_slice(&span.key_bytes());
+    key
 }
 
 /// Returns the compact prefix used by signature and account indexes.

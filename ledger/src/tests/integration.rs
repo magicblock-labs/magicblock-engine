@@ -17,7 +17,6 @@ use std::{
     ops::Range,
     process::Command,
     sync::{Arc, atomic::Ordering::Acquire},
-    time::Duration,
 };
 
 use nucleus::{
@@ -29,10 +28,7 @@ use nucleus::{
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 use solana_transaction_error::TransactionResult;
-use tokio::{
-    sync::{broadcast, mpsc},
-    time,
-};
+use tokio::sync::{broadcast, mpsc};
 
 use crate::{
     Ledger,
@@ -375,8 +371,8 @@ async fn test_block_detail_levels_partition_transactions() {
 }
 
 // A sealed superblock stays readable after the writer rotates to a new segment,
-// and retention evicts the oldest sealed superblock before removing its files
-// in the background while preserving the active head and range.
+// and retention evicts the oldest sealed superblock before removing its index
+// and files in the background while preserving the active head and range.
 #[tokio::test]
 async fn test_superblock_rotation_and_retention() {
     // size_limit 0 makes every block boundary trigger a retention pass.
@@ -404,13 +400,10 @@ async fn test_superblock_rotation_and_retention() {
     assert_eq!(ledger.meta.range.start.load(Acquire), 2);
 
     let purged = dir.path().join("superblock-000000001");
-    time::timeout(Duration::from_secs(5), async {
-        while purged.exists() {
-            time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("background truncation purges the directory");
+    assert!(
+        !purged.exists(),
+        "appender exit joins background truncation"
+    );
 }
 
 // A single-block read resolves a slot living in an older sealed superblock, not

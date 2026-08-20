@@ -112,7 +112,7 @@ impl LedgerReader {
             if request.cancelled() {
                 return Ok(None);
             }
-            let index = superblock.index.get()?.reader();
+            let index = IndexReader::new(&superblock.index);
             let Some(spans) = index.transaction(&request.params)? else {
                 continue;
             };
@@ -133,7 +133,7 @@ impl LedgerReader {
             if request.cancelled() {
                 return Ok(None);
             }
-            let index = superblock.index.get()?.reader();
+            let index = IndexReader::new(&superblock.index);
             let Some(spans) = index.transaction(&request.params)? else {
                 continue;
             };
@@ -161,7 +161,7 @@ impl LedgerReader {
             if request.cancelled() {
                 return Ok(signatures);
             }
-            let index = superblock.index.get()?.reader();
+            let index = IndexReader::new(&superblock.index);
             let mut upper = None;
             if let Some(signature) = &before {
                 // Skip newest-first segments until `before`, then include every older segment.
@@ -219,7 +219,7 @@ impl LedgerReader {
             if !superblock.meta.range.contains(&slot) {
                 continue;
             }
-            let index = superblock.index.get()?.reader();
+            let index = IndexReader::new(&superblock.index);
             let Some(span) = index.block(slot)? else {
                 return Ok(None);
             };
@@ -243,7 +243,7 @@ impl LedgerReader {
             if start > end {
                 continue;
             }
-            let index = superblock.index.get()?.reader();
+            let index = IndexReader::new(&superblock.index);
             for entry in index.blocks(start..=end) {
                 let (_, span) = entry?;
                 if let BlockstoreEntry::Block(b) = self.blockstore_entry(&superblock, span)? {
@@ -338,7 +338,7 @@ impl LedgerReader {
         if matches!(details, BlockDetails::None) {
             return Ok(BlockResponse::Bare(block));
         }
-        let index = superblock.index.get()?.reader();
+        let index = IndexReader::new(&superblock.index);
         // Slots are contiguous, so the previous block boundary is `slot - 1`
         // when this is not the first possible slot.
         let previous = slot.checked_sub(1).map(|slot| index.block(slot)).transpose()?.flatten();
@@ -406,7 +406,7 @@ impl LedgerReader {
     fn blocktime(
         &mut self,
         superblock: &Superblock,
-        index: &IndexReader,
+        index: &IndexReader<'_>,
         slot: Slot,
     ) -> Result<i64> {
         let Some(span) = index.block(slot)? else {

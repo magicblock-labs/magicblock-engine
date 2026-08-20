@@ -31,6 +31,9 @@ pub enum LedgerError {
     #[error("ledger corruption: {0}")]
     #[from(skip)]
     Corruption(&'static str),
+    /// The background superblock cleanup worker panicked.
+    #[error("ledger truncation worker panicked")]
+    TruncationPanic,
 }
 
 /// Errors returned while waiting for a ledger reader response.

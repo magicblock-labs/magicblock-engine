@@ -1,7 +1,6 @@
 //! Index unit tests.
 
-use std::sync::Arc;
-
+use fjall::Keyspace;
 use nucleus::{
     Slot,
     testkit::{TempDir, init_tracing, tempdir},
@@ -10,23 +9,22 @@ use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 
 use crate::{
-    index::{Index, Span, TxSpan},
+    index::{Index, IndexReader, Span, TxSpan},
     storage::Durability,
 };
 
 /// Opens a fresh index on a throwaway directory kept alive by the returned guard.
-fn index() -> (TempDir, Arc<Index>) {
+fn index() -> (TempDir, Index, Keyspace) {
     init_tracing();
     let dir = tempdir();
-    let index = Arc::new(Index::new(dir.path(), 2).unwrap());
-    (dir, index)
+    let index = Index::new(dir.path()).unwrap();
+    let keyspace = index.keyspace(1).unwrap();
+    (dir, index, keyspace)
 }
 
 /// Drains every execution span the account index holds for `pubkey`.
-fn account_spans(index: &Arc<Index>, pubkey: &Pubkey) -> Vec<Span> {
-    index
-        .clone()
-        .reader()
+fn account_spans(keyspace: &Keyspace, pubkey: &Pubkey) -> Vec<Span> {
+    IndexReader::new(keyspace)
         .accounts(pubkey, None)
         .map(|entry| entry.unwrap())
         .collect()
@@ -53,7 +51,7 @@ fn span_pack_and_order() {
 
 #[test]
 fn transaction_and_block_roundtrip() {
-    let (_dir, index) = index();
+    let (_dir, index, keyspace) = index();
     let signature = Signature::from([7; 64]);
     let txspan = TxSpan {
         blockstore: Span::new(10, 20),
@@ -63,13 +61,13 @@ fn transaction_and_block_roundtrip() {
     let block_a = Span::new(0, 8);
     let block_b = Span::new(8, 16);
 
-    let mut writer = index.clone().writer();
+    let mut writer = index.writer(&keyspace);
     writer.insert_transaction(&signature, txspan);
     writer.insert_block(slot_a, block_a);
     writer.insert_block(slot_b, block_b);
     writer.persist(Durability::Buffer).unwrap();
 
-    let reader = index.clone().reader();
+    let reader = IndexReader::new(&keyspace);
     let got = reader.transaction(&signature).unwrap().expect("transaction present");
     assert_eq!(got.blockstore, txspan.blockstore);
     assert_eq!(got.execution, txspan.execution);
@@ -88,13 +86,13 @@ fn transaction_and_block_roundtrip() {
 
 #[test]
 fn account_signature_duplicates() {
-    let (_dir, index) = index();
+    let (_dir, index, keyspace) = index();
     let account = Pubkey::new_unique();
     let other = Pubkey::new_unique();
     let spans = [Span::new(100, 10), Span::new(200, 20), Span::new(300, 30)];
     let other_span = Span::new(400, 40);
 
-    let mut writer = index.clone().writer();
+    let mut writer = index.writer(&keyspace);
     for span in &spans {
         writer.insert_accounts(&[account], *span);
     }
@@ -103,14 +101,14 @@ fn account_signature_duplicates() {
 
     // Account duplicate spans are newest-first, so later execution offsets are returned first.
     assert_eq!(
-        account_spans(&index, &account),
+        account_spans(&keyspace, &account),
         vec![spans[2], spans[1], spans[0]]
     );
 
     // Duplicates stay partitioned per account key.
-    assert_eq!(account_spans(&index, &other), vec![other_span]);
+    assert_eq!(account_spans(&keyspace, &other), vec![other_span]);
 
-    let reader = index.clone().reader();
+    let reader = IndexReader::new(&keyspace);
     assert_eq!(
         reader
             .accounts(&account, Some(spans[2]))
@@ -121,24 +119,19 @@ fn account_signature_duplicates() {
     );
 }
 
-/// Proves sealed indexes open on demand and cannot close while a read lease exists.
+/// Proves deleting one superblock keyspace preserves in-flight reads and isolates reuse.
 #[test]
-fn sealed_index_is_lazy_and_lease_safe() {
-    let dir = tempdir();
-    let superblock = crate::Superblock::open(dir.path(), 1, false).unwrap();
-    assert!(superblock.index.last_used().is_none());
+fn superblock_keyspace_deletion_is_lease_safe() {
+    let (_dir, index, keyspace) = index();
+    let span = Span::new(10, 20);
+    let mut writer = index.writer(&keyspace);
+    writer.insert_block(1, span);
+    writer.persist(Durability::Buffer).unwrap();
 
-    let lease = superblock.index.get().unwrap();
-    assert!(superblock.index.last_used().is_some());
-    assert!(
-        !superblock.index.evict(),
-        "an outstanding lease prevents close"
-    );
-    drop(lease);
-    assert!(superblock.index.evict());
-    assert!(superblock.index.last_used().is_none());
+    let reader = IndexReader::new(&keyspace);
+    index.delete(keyspace.clone()).unwrap();
+    assert_eq!(reader.block(1).unwrap(), Some(span));
 
-    // Reopening after a full close proves the exclusive Fjall lock was released.
-    drop(superblock.index.get().unwrap());
-    assert!(superblock.index.evict());
+    let replacement = index.keyspace(1).unwrap();
+    assert_eq!(IndexReader::new(&replacement).block(1).unwrap(), None);
 }

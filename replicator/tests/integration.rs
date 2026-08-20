@@ -37,6 +37,13 @@ fn loopback_addr() -> SocketAddr {
     listener.local_addr().unwrap()
 }
 
+/// Truncates one sealed superblock and waits for its storage cleanup.
+fn truncate(ledger: &ledger::LedgerHandle) {
+    if let Some(worker) = ledger.truncate().unwrap() {
+        worker.join().expect("truncation worker panicked").unwrap();
+    }
+}
+
 /// Starts an engine over throwaway directories seeded with `accounts`.
 async fn engine(authority: Authority, accounts: &[AccountSeed], pacing: Pacing) -> TestEngine {
     let dirs = Dirs::default();
@@ -472,8 +479,8 @@ async fn restores_the_newest_snapshot_then_streams_its_tail() {
     leader.advance(1).await;
     let expected = leader.sync().await;
     // Make the newest snapshot the only possible handshake response.
-    leader.ledger().truncate().unwrap(); // superblock 0
-    leader.ledger().truncate().unwrap(); // superblock 1
+    truncate(leader.ledger()); // superblock 0
+    truncate(leader.ledger()); // superblock 1
     assert!(
         leader.ledger().cursor(0).is_none(),
         "follower cursor was retained away"
@@ -554,7 +561,7 @@ async fn cascades_replication_through_a_follower() {
     await_replication(&mut middle_positions, &middle, expected, state, 2).await;
 
     // The successor archive must become the only answer to the tail's cursor.
-    middle.ledger().truncate().unwrap(); // superblock 0
+    truncate(middle.ledger()); // superblock 0
     assert!(
         middle.ledger().cursor(0).is_none(),
         "tail cursor was retained away"

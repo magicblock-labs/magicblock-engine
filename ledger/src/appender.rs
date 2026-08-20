@@ -3,6 +3,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, atomic::Ordering::*},
+    thread::JoinHandle,
 };
 
 use agave_transaction_view::transaction_view::TransactionView;
@@ -34,7 +35,7 @@ pub(crate) const EXECUTIONS_DB: &str = "executions.db";
 /// Superblock metadata file name.
 pub(crate) const SUPERBLOCK_META: &str = "superblock.meta";
 /// Frequency of ledger size checks in slots.
-pub(crate) const SIZE_CHECK_FREQUENCY: u64 = 32;
+pub(crate) const SIZE_CHECK_FREQUENCY: u64 = 128;
 
 /// Background service that appends ledger events into the active superblock.
 pub(crate) struct LedgerAppender {
@@ -46,6 +47,8 @@ pub(crate) struct LedgerAppender {
     pending: HashMap<Signature, PendingTx>,
     /// Active superblock index writer and pending atomic boundary.
     index: IndexWriter,
+    /// Outstanding physical cleanup for the last truncated superblock.
+    truncation: Option<JoinHandle<Result<()>>>,
     /// Event stream from the execution pipeline.
     rx: Receiver<Event>,
     /// Transactions written since the last published boundary.
@@ -70,28 +73,36 @@ impl LedgerAppender {
             .cloned()
             .ok_or(LedgerError::Corruption("active superblock missing"))?;
         let writer = SuperblockWriter::new(superblock.clone())?;
-        let index = superblock.index.get()?.writer();
+        let index = ledger.index.writer(&superblock.index);
 
         let mut appender = Self {
             ledger,
             writer,
             index,
+            truncation: None,
             rx,
             pending: HashMap::new(),
             transactions: 0,
             position,
         };
 
-        while let Ok(event) = appender.rx.recv() {
+        let result = appender.serve();
+        let truncation = appender.join_truncation();
+        result.and(truncation)
+    }
+
+    /// Processes append events until all senders close or a final sync arrives.
+    fn serve(&mut self) -> Result<()> {
+        while let Ok(event) = self.rx.recv() {
             match event {
-                Event::Transaction(transaction) => appender.write_transaction(transaction)?,
-                Event::Execution(execution) => appender.write_execution(execution)?,
-                Event::Block(block) => appender.write_block(block)?,
-                Event::Superblock(seal) => appender.seal(seal, false)?,
-                Event::Bootstrap(seal) => appender.seal(seal, true)?,
-                Event::Reset(slot) => appender.write_reset(slot)?,
+                Event::Transaction(transaction) => self.write_transaction(transaction)?,
+                Event::Execution(execution) => self.write_execution(execution)?,
+                Event::Block(block) => self.write_block(block)?,
+                Event::Superblock(seal) => self.seal(seal, false)?,
+                Event::Bootstrap(seal) => self.seal(seal, true)?,
+                Event::Reset(slot) => self.write_reset(slot)?,
                 Event::Sync { response, is_final } => {
-                    let _ = response.send(appender.sync(None));
+                    let _ = response.send(self.sync(None));
                     if is_final {
                         break;
                     }
@@ -105,22 +116,19 @@ impl LedgerAppender {
     fn rotate(&mut self, seal: SuperblockSeal) -> Result<()> {
         let _timer = metrics::time(Operation::Rotate);
         let head = seal.id + 1;
-        let superblock = Superblock::open(&self.ledger.directory, head, true)?;
+        let superblock = Superblock::open(&self.ledger.directory, head, &self.ledger.index)?;
         // Seal N opens N+1, which stores N's snapshot archive and seal metadata.
         superblock.meta.checksum.store(seal.checksum, Release);
         superblock.meta.transactions.store(seal.transactions, Release);
         superblock.meta.flush()?;
         let writer = SuperblockWriter::new(superblock.clone())?;
-        let index = superblock.index.get()?.writer();
+        let index = self.ledger.index.writer(&superblock.index);
 
         let mut superblocks = self.ledger.superblocks.write();
         superblocks.insert(head, superblock);
         self.ledger.meta.head.store(head, Release);
         self.ledger.meta.superblocks.fetch_add(1, Release);
         self.ledger.meta.flush()?;
-        if let Some(sealed) = superblocks.get(&seal.id) {
-            sealed.index.seal();
-        }
         drop(superblocks);
 
         self.writer = writer;
@@ -180,10 +188,23 @@ impl LedgerAppender {
         self.publish(Some(block.slot), Durability::Buffer)?;
         if block.slot.is_multiple_of(SIZE_CHECK_FREQUENCY) && self.ledger.size_exceeded()? {
             self.sync(None)?;
-            self.ledger.truncate()?;
+            self.truncate()?;
         }
         metrics::ledger_counts(&self.ledger);
         Ok(())
+    }
+
+    /// Joins the previous cleanup before starting another truncation worker.
+    fn truncate(&mut self) -> Result<()> {
+        self.join_truncation()?;
+        self.truncation = self.ledger.truncate()?;
+        Ok(())
+    }
+
+    /// Joins and clears the outstanding truncation worker, if any.
+    fn join_truncation(&mut self) -> Result<()> {
+        let Some(worker) = self.truncation.take() else { return Ok(()) };
+        worker.join().map_err(|_| LedgerError::TruncationPanic)?
     }
 
     /// Writes a superblock seal and prepares files for read-only access.
