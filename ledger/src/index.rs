@@ -42,7 +42,7 @@ const ACCOUNT_PREFIX_BYTES: usize = 1 + PREFIX_BYTES;
 const ACCOUNT_KEY_BYTES: usize = ACCOUNT_PREFIX_BYTES + SPAN_BYTES;
 /// Ledger-wide block cache capacity.
 const CACHE_SIZE: u64 = 64 * MB as u64;
-/// Retained journal bytes before Fjall flushes keyspaces blocking reclamation.
+/// Maximum total size of all Fjall journals, as configured by `max_journaling_size`.
 const JOURNAL_SIZE: u64 = 256 * MB as u64;
 /// Fjall maintenance workers assigned to the ledger index.
 const WORKERS: usize = 2;
@@ -171,11 +171,6 @@ pub(crate) struct IndexWriter {
 }
 
 /// Read access to one retained superblock's append-only index.
-///
-/// Point lookups use Fjall's latest visible sequence number. Range and prefix
-/// calls already return iterators carrying their own snapshot-tracker nonce, so
-/// retaining a database-wide snapshot here would add tracking work without
-/// strengthening these reads.
 pub(crate) struct IndexReader<'a>(&'a Keyspace);
 
 impl Index {
