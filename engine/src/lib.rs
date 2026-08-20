@@ -129,6 +129,7 @@ impl Engine {
         T: IntoTransactionView,
     {
         let transaction = transaction.compose(self)?;
+        transaction::sigverify(&transaction)?;
         Ok(TransactionAccessor { engine: self, transaction })
     }
 
@@ -190,7 +191,12 @@ impl Engine {
             terminating: Default::default(),
         };
         while let Some(entry) = replayer.rx.recv().await {
-            engine.replay(entry).await?;
+            match entry {
+                OwnedBlockstoreEntry::Transaction(transaction) => {
+                    TransactionAccessor::replay(&engine, transaction)?.schedule().await?;
+                }
+                entry => engine.replay(entry).await?,
+            }
         }
         replayer
             .response
