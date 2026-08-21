@@ -179,7 +179,10 @@ impl ReplicationServer {
             Ok(handshake) => handshake,
             Err(error) => {
                 warn!(?error, "replication handshake rejected");
-                let response = HandshakeResponse::Err(error.to_string());
+                let response = match error {
+                    ReplicationError::StreamActive => HandshakeResponse::StreamActive,
+                    other => HandshakeResponse::Err(other.to_string()),
+                };
                 self.respond(response)?;
                 return Ok(());
             }
@@ -239,10 +242,10 @@ impl ReplicationServer {
         let _timer = metrics::time(Operation::ServerHandshake);
         let handshake: Handshake<HandshakeRequest> = protocol::read(&mut self.connection)?;
         handshake.verify()?;
-        let lease = self.reserve(handshake.identity)?;
         if handshake.payload.version != PROTO_VERSION {
             return Err(ReplicationError::VersionMismatch(PROTO_VERSION));
         }
+        let lease = self.reserve(handshake.identity)?;
 
         let requested = handshake.payload.position;
         if requested > self.position.current {
@@ -321,8 +324,7 @@ impl ReplicationServer {
             return Err(ReplicationError::Handshake(msg.into()));
         };
         if Arc::strong_count(entry.get()) > 1 {
-            let msg = "replication stream already active";
-            return Err(ReplicationError::Handshake(msg.into()));
+            return Err(ReplicationError::StreamActive);
         }
         Ok(entry.get().clone())
     }

@@ -10,10 +10,49 @@ use solana_message::{
     VersionedMessage,
     v1::{self, SIGNATURE_SIZE},
 };
+use solana_pubkey::Pubkey;
+use solana_signature::Signature;
 use solana_signer::Signer;
 use solana_transaction::{Message, Transaction, TransactionError, versioned::VersionedTransaction};
 
 use crate::{Engine, error::EngineError, error::Result};
+
+/// Opaque transaction admitted through the replication verifier trust boundary.
+pub struct VerifiedTransaction(pub(crate) TransactionView);
+
+/// Engine-authorized batch verifier for replicated transaction payloads.
+#[derive(Clone, Copy)]
+pub struct TransactionVerifier {
+    authority: Pubkey,
+}
+
+impl TransactionVerifier {
+    pub(crate) fn new(authority: Pubkey) -> Self {
+        Self { authority }
+    }
+
+    /// Sanitizes, validates, and batch-verifies every transaction atomically.
+    pub fn verify(&self, transactions: Vec<Vec<u8>>) -> Result<Vec<VerifiedTransaction>> {
+        let verified = transactions
+            .into_iter()
+            .map(|transaction| {
+                let view = TransactionView::try_new_sanitized(transaction.into(), true)?;
+                validate_authority(&view, self.authority)?;
+                Ok(VerifiedTransaction(view))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut signatures = Vec::with_capacity(verified.len());
+        for transaction in &verified {
+            signatures.extend(signature_data(&transaction.0));
+        }
+        if !Signature::batch_verify(signatures.into_iter()) {
+            return Err(EngineError::SignatureVerification);
+        }
+
+        Ok(verified)
+    }
+}
 
 /// Conversion of anything composable into an executable
 /// transaction into a sanitized [`TransactionView`].
@@ -59,13 +98,30 @@ impl IntoTransactionView for Vec<u8> {
 
 impl IntoTransactionView for TransactionView {
     fn compose(self, engine: &Engine) -> Result<TransactionView> {
-        if matches!(self.version(), TransactionVersion::Magicblock)
-            && self.static_account_keys()[0] != engine.authority()
-        {
-            return Err(EngineError::SignatureVerification);
-        }
+        validate_authority(&self, engine.authority())?;
         Ok(self)
     }
+}
+
+/// Enforces the authority encoded by private Magicblock transactions.
+fn validate_authority(view: &TransactionView, authority: Pubkey) -> Result<()> {
+    if matches!(view.version(), TransactionVersion::Magicblock)
+        && view.static_account_keys()[0] != authority
+    {
+        return Err(EngineError::SignatureVerification);
+    }
+    Ok(())
+}
+
+/// Iterates each signature with its signer key and shared serialized message.
+fn signature_data(
+    view: &TransactionView,
+) -> impl ExactSizeIterator<Item = (&Signature, &[u8], &[u8])> {
+    let message = view.message_data();
+    view.signatures()
+        .iter()
+        .zip(view.static_account_keys())
+        .map(move |(signature, key)| (signature, key.as_ref(), message))
 }
 
 /// The engine's sole signature-verification point.
@@ -73,10 +129,8 @@ impl IntoTransactionView for TransactionView {
 /// Every public transaction accessor verifies here; trusted local replay is
 /// the only bypass. TODO: Remove the bypass before replaying untrusted ledgers.
 pub(super) fn sigverify(view: &TransactionView) -> Result<()> {
-    // Sanitization guarantees one static key for every required signature.
-    let message = view.message_data();
-    for (signature, key) in view.signatures().iter().zip(view.static_account_keys()) {
-        if !signature.verify(key.as_ref(), message) {
+    for (signature, key, message) in signature_data(view) {
+        if !signature.verify(key, message) {
             return Err(EngineError::SignatureVerification);
         }
     }

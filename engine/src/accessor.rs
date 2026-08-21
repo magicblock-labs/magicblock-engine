@@ -14,7 +14,7 @@ use tokio::time;
 use crate::{
     Engine, IntoTransactionView,
     error::{EngineError, Result},
-    transaction,
+    transaction::{self, VerifiedTransaction},
 };
 
 /// Upper bound on awaiting a submitted transaction's committed result.
@@ -73,6 +73,13 @@ impl<'a> TransactionAccessor<'a> {
         let sanitized = TransactionView::try_new_sanitized(transaction.into(), true)?;
         let transaction = sanitized.compose(engine)?;
         Ok(Self { engine, transaction })
+    }
+
+    /// Enters the trusted replication path without repeating signature verification.
+    ///
+    /// The caller must only pass values produced by this Engine's verifier.
+    pub fn verified(engine: &'a Engine, verified: VerifiedTransaction) -> Self {
+        Self { engine, transaction: verified.0 }
     }
 
     /// Submits `transaction` for execution and awaits its committed result.

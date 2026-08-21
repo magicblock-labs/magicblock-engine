@@ -4,7 +4,7 @@ use agave_transaction_view::result::TransactionViewError;
 use derive_more::From;
 use keeper::error::KeeperError;
 use ledger::{LedgerError, LedgerRequestError};
-use nucleus::shutdown::Service;
+use nucleus::{Slot, shutdown::Service};
 use processor::ProcessorError;
 use solana_message::CompileError;
 use solana_transaction::{InstructionError, SignerError, TransactionError};
@@ -79,6 +79,9 @@ pub enum ReplayError {
     /// A retained transaction could not be sanitized into a transaction view.
     #[error("transaction sanitization: {0:?}")]
     Sanitization(TransactionViewError),
+    /// A replicated block boundary disagreed with the locally produced block hash.
+    #[error("replicated block hash mismatch at slot {0}")]
+    BlockhashMismatch(Slot),
     /// The replayed account state checksum diverged from the sealed superblock.
     #[error("replayed state checksum mismatch")]
     StateMismatch,

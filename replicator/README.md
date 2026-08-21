@@ -50,6 +50,15 @@ at startup before producing their first new block, so followers clear
 chain-mirrored volatile state at the same stream position while retaining
 internal system accounts.
 
+Ingest decodes transaction batches of at most 128 transactions and typically
+128 KiB, fencing them before every block, superblock, reset, or reconnect.
+A rendezvous channel assigns verification to an idle control thread; otherwise
+`Ingest::flush` verifies while Control schedules earlier work. Control alone
+schedules verified transactions and advances the block pacer. During the
+Control-held handshake, `Ingest::stage_snapshot` may write the snapshot archive
+and bootstrap durable superblock state. These roles preserve stream order
+without reordering state.
+
 A shared-key follower may also serve downstream followers. It derives and
 validates superblock seals from replicated block boundaries and archives its own
 snapshots, while downstream clients continue to verify every response against

@@ -33,6 +33,9 @@ pub enum ReplicationError {
     /// The leader rejected the client's handshake.
     #[error("replication handshake rejected: {0}")]
     Handshake(String),
+    /// The follower identity still owns an earlier replication stream.
+    #[error("replication stream already active")]
+    StreamActive,
     /// The snapshot connection ended before the advertised byte count arrived.
     #[error("incomplete replication snapshot: expected {0} bytes, received {1}")]
     Snapshot(u64, u64),

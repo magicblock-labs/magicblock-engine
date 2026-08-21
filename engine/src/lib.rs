@@ -36,7 +36,7 @@ pub mod testkit;
 
 pub use accessor::{AccountAccessor, TransactionAccessor};
 pub use error::{EngineError, ReplayError, Result};
-pub use transaction::IntoTransactionView;
+pub use transaction::{IntoTransactionView, TransactionVerifier, VerifiedTransaction};
 
 use crate::pacemaker::{ExternalPacer, PaceMaker};
 
@@ -131,6 +131,11 @@ impl Engine {
         let transaction = transaction.compose(self)?;
         transaction::sigverify(&transaction)?;
         Ok(TransactionAccessor { engine: self, transaction })
+    }
+
+    /// Returns an authority-bound verifier for replicated transaction batches.
+    pub fn verifier(&self) -> TransactionVerifier {
+        TransactionVerifier::new(self.authority())
     }
 
     /// Drains in-flight execution and keeps the sequencer paused until the handle is dropped.
