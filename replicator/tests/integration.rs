@@ -263,6 +263,71 @@ async fn replays_large_transactions_during_catch_up_and_live_streaming() {
     leader.close().await;
 }
 
+/// Proves a 128-plus-one catch-up batch preserves transaction order and its block fence.
+#[tokio::test(flavor = "multi_thread")]
+async fn batches_transactions_without_crossing_block_boundaries() {
+    const CATCH_UP_TRANSACTIONS: i64 = 129;
+
+    let state = Pubkey::new_unique();
+    let seed = [(state, 0, AccountMode::Delegated)];
+    let (mut leader, mut follower) = engines(&seed, &seed).await;
+
+    // Distinct assignments make any cross-batch reordering observable in final state.
+    for value in 1..=CATCH_UP_TRANSACTIONS {
+        let instruction = E::lit(value).compose(state, &[]);
+        leader.schedule(&[instruction]).await;
+    }
+    let catch_up_slot = leader.blocks().current_slot();
+    leader.advance(1).await;
+    let expected = leader.sync().await;
+    let expected_transactions = block_transactions(&leader, catch_up_slot).await;
+    assert_eq!(
+        expected_transactions.len(),
+        CATCH_UP_TRANSACTIONS as usize,
+        "the stream crosses the transaction-count batch limit exactly once"
+    );
+
+    let addr = loopback_addr();
+    let follower_identity = follower.signer().pubkey();
+    let mut dispatcher = dispatcher(addr, &leader, &[follower_identity]).await;
+    let mut positions = stream(addr, &mut follower);
+    await_replication(
+        &mut positions,
+        &follower,
+        expected,
+        state,
+        CATCH_UP_TRANSACTIONS,
+    )
+    .await;
+    assert_eq!(
+        block_transactions(&follower, catch_up_slot).await,
+        expected_transactions,
+        "the 128-plus-one split retains byte-exact ledger order"
+    );
+
+    // A following live transaction must remain behind the catch-up block fence.
+    let live_value = CATCH_UP_TRANSACTIONS + 1;
+    let instruction = E::lit(live_value).compose(state, &[]);
+    leader.schedule(&[instruction]).await;
+    let live_slot = leader.blocks().current_slot();
+    leader.advance(1).await;
+    let expected = leader.sync().await;
+    await_replication(&mut positions, &follower, expected, state, live_value).await;
+    assert_eq!(
+        block_transactions(&follower, live_slot).await,
+        block_transactions(&leader, live_slot).await,
+        "the live tail starts in the block after the catch-up fence"
+    );
+    assert_eq!(
+        follower.ledger().transactions(),
+        leader.ledger().transactions()
+    );
+
+    dispatcher.terminate().await;
+    follower.close().await;
+    leader.close().await;
+}
+
 /// An internally paced leader advances a follower whose delegated state survives restart.
 #[tokio::test(flavor = "multi_thread")]
 async fn internally_paced_replication_persists_across_restart() {

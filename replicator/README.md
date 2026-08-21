@@ -50,6 +50,13 @@ at startup before producing their first new block, so followers clear
 chain-mirrored volatile state at the same stream position while retaining
 internal system accounts.
 
+The follower uses persistent ingest and control threads joined at shutdown.
+Ingest decodes transaction batches of at most 128 transactions and typically
+128 KiB, fencing them before every block, superblock, reset, or reconnect.
+A rendezvous channel assigns verification to an idle control thread; otherwise
+ingest verifies while control schedules earlier work. Control alone advances
+the engine and block pacer, preserving stream order without reordering state.
+
 A shared-key follower may also serve downstream followers. It derives and
 validates superblock seals from replicated block boundaries and archives its own
 snapshots, while downstream clients continue to verify every response against

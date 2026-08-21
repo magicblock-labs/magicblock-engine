@@ -2,11 +2,16 @@ use std::{
     fs::{self, File},
     io::{self, BufReader, Read},
     net::{SocketAddr, TcpStream},
+    sync::mpsc,
     thread,
 };
 
 use derive_more::Deref;
-use engine::{Engine, EngineError, ReplayError, pacemaker::ExternalBlock};
+use engine::{
+    Engine, EngineError, ReplayError, TransactionAccessor, VerifiedTransaction,
+    pacemaker::ExternalBlock,
+};
+use flume::{Sender, TrySendError};
 use ledger::{
     Superblock,
     schema::{Block, OwnedBlockstoreEntry, blockstore},
@@ -14,11 +19,12 @@ use ledger::{
 use nucleus::{
     KB,
     ledger::{ACCOUNTSDB_SNAPSHOT_FILE, BlockstorePosition},
-    shutdown::{Service, ShutdownHandle, ShutdownManager, ShutdownReason},
+    runtime::BarrierHandle,
+    shutdown::{CancellationToken, Service, ShutdownHandle, ShutdownManager, ShutdownReason},
 };
 use tokio::{
     runtime,
-    sync::mpsc::{Receiver, Sender},
+    sync::mpsc::{Receiver as BlockReceiver, Sender as PacerSender},
     time,
 };
 use tracing::{error, info, warn};
@@ -32,6 +38,66 @@ use crate::{
 };
 
 type ReplicationStream = BufReader<TcpStream>;
+type ReconnectReply = mpsc::SyncSender<BlockstorePosition>;
+
+const MAX_BATCH_TRANSACTIONS: usize = 128;
+const MAX_BATCH_BYTES: usize = 128 * KB;
+
+/// Consecutive transaction payloads accumulated between ordered stream fences.
+struct TransactionsBatch {
+    transactions: Vec<Vec<u8>>,
+    bytes: usize,
+}
+
+impl Default for TransactionsBatch {
+    fn default() -> Self {
+        Self {
+            transactions: Vec::with_capacity(MAX_BATCH_TRANSACTIONS),
+            bytes: 0,
+        }
+    }
+}
+
+impl TransactionsBatch {
+    fn is_empty(&self) -> bool {
+        self.transactions.is_empty()
+    }
+
+    fn push(&mut self, transaction: Vec<u8>) {
+        self.bytes = self.bytes.saturating_add(transaction.len());
+        self.transactions.push(transaction);
+    }
+
+    fn is_full(&self) -> bool {
+        self.transactions.len() >= MAX_BATCH_TRANSACTIONS || self.bytes >= MAX_BATCH_BYTES
+    }
+
+    fn take(&mut self) -> Vec<Vec<u8>> {
+        self.bytes = 0;
+        std::mem::replace(
+            &mut self.transactions,
+            Vec::with_capacity(MAX_BATCH_TRANSACTIONS),
+        )
+    }
+}
+
+/// Ordered handoff from blocking stream ingest to asynchronous Engine control.
+enum ReplicationMessage {
+    Unverified(Vec<Vec<u8>>),
+    Verified(engine::Result<Vec<VerifiedTransaction>>),
+    Entry(OwnedBlockstoreEntry),
+    Connected,
+    Disconnected(ReconnectReply),
+}
+
+/// Owns stream decoding, bounded transaction accumulation, and opportunistic verification.
+struct Ingest {
+    engine: Engine,
+    addr: SocketAddr,
+    batch: TransactionsBatch,
+    tx: Sender<ReplicationMessage>,
+    shutdown: CancellationToken,
+}
 
 /// Pulls a leader blockstore stream into an externally paced follower engine.
 #[derive(Deref)]
@@ -42,9 +108,9 @@ pub struct ReplicationClient {
     /// Leader endpoint reused after transport loss.
     addr: SocketAddr,
     /// External pacemaker channel used to preserve block-boundary ordering.
-    pacer: Sender<ExternalBlock>,
+    pacer: PacerSender<ExternalBlock>,
     /// Locally committed block boundaries used to verify replicated output.
-    blocks: Receiver<Block>,
+    blocks: BlockReceiver<Block>,
 }
 
 impl ReplicationClient {
@@ -52,7 +118,7 @@ impl ReplicationClient {
     pub fn spawn(
         addr: SocketAddr,
         engine: Engine,
-        pacer: Sender<ExternalBlock>,
+        pacer: PacerSender<ExternalBlock>,
         shutdown: &mut ShutdownManager,
     ) -> Result<()> {
         metrics::init();
@@ -64,13 +130,13 @@ impl ReplicationClient {
         let rt = runtime::Builder::new_current_thread().enable_time().build()?;
         thread::Builder::new()
             .name("replication-client".into())
-            .spawn(move || rt.block_on(client.run(shutdown)))?;
+            .spawn(move || rt.block_on(client.serve(shutdown)))?;
         Ok(())
     }
 
     /// Consumes the leader stream and reports why the client stopped.
-    async fn run(self, mut shutdown: ShutdownHandle) {
-        let result = self.consume(&shutdown).await;
+    async fn serve(self, mut shutdown: ShutdownHandle) {
+        let result = self.run(&shutdown).await;
         if shutdown.requested() || result.is_ok() {
             shutdown.terminate(ShutdownReason::Signalled);
             return;
@@ -87,30 +153,89 @@ impl ReplicationClient {
         }
     }
 
-    /// Reads blockstore entries from the leader, reconnecting on transport loss,
-    /// until shutdown is requested or a non-recoverable error occurs.
-    async fn consume(mut self, shutdown: &ShutdownHandle) -> Result<()> {
-        let mut stream = self.reconnect(shutdown).await?;
-        let mut connected = metrics::client_connection();
+    /// Starts Ingest and joins it after Control stops consuming its ordered messages.
+    async fn run(self, shutdown: &ShutdownHandle) -> Result<()> {
+        let (guard, position) = self.resume().await?;
+        let (tx, rx) = flume::bounded(0);
+        let mut ingest = Ingest {
+            engine: self.engine.clone(),
+            addr: self.addr,
+            batch: Default::default(),
+            tx,
+            shutdown: shutdown.child(),
+        };
+        let rt = runtime::Builder::new_current_thread().enable_time().build()?;
+        let ingest = thread::Builder::new()
+            .name("replication-ingest".into())
+            .spawn(move || rt.block_on(ingest.run(position)))?;
+        let mut result = self.consume(shutdown, rx, guard).await;
+        match ingest.join() {
+            Ok(Ok(())) => info!("replication ingest has gracefully shutdown"),
+            Ok(Err(error)) => result = result.and(Err(error)),
+            Err(error) => error!(?error, "replication ingest panicked"),
+        }
+        result
+    }
+
+    /// Consumes ordered Ingest messages until shutdown or a terminal failure.
+    async fn consume(
+        mut self,
+        shutdown: &ShutdownHandle,
+        rx: flume::Receiver<ReplicationMessage>,
+        guard: BarrierHandle,
+    ) -> Result<()> {
+        let verifier = self.verifier();
+        let mut connected = None;
+        let mut barrier = Some(guard);
+
         loop {
             if shutdown.requested() {
                 return Ok(());
             }
-            match blockstore::decode(&mut stream) {
-                Ok(entry) => self.process(entry).await?,
-                Err(wincode::error::ReadError::Io(error)) => {
-                    warn!(?error, "replication stream disconnected");
-                    drop(connected);
-                    stream = self.reconnect(shutdown).await?;
-                    connected = metrics::client_connection();
+            // Complete a ready handoff before observing concurrent cancellation.
+            let message = tokio::select! {
+                biased;
+                message = rx.recv_async() => match message {
+                    Ok(m) => m,
+                    // Ingest has shutdown, the potential error will be captured by caller
+                    Err(_) => return Ok(()),
+                },
+                _ = shutdown.signalled() => break,
+
+            };
+            match message {
+                ReplicationMessage::Unverified(batch) => {
+                    let verified = verifier.verify(batch)?;
+                    self.schedule(verified).await?;
                 }
-                Err(error) => Err(wincode::Error::from(error))?,
+                ReplicationMessage::Verified(result) => self.schedule(result?).await?,
+                ReplicationMessage::Entry(entry) => self.process(entry).await?,
+                ReplicationMessage::Connected => {
+                    connected = Some(metrics::client_connection());
+                    barrier.take();
+                }
+                ReplicationMessage::Disconnected(reply) => {
+                    connected.take();
+                    let (guard, position) = self.resume().await?;
+                    barrier = Some(guard);
+                    if reply.send(position).is_err() {
+                        return Err(ReplicationError::StreamClosed);
+                    }
+                }
             }
         }
+        Ok(())
     }
 
-    /// Applies one blockstore entry to the follower engine, holding block-boundary
-    /// ordering through the pacemaker and flagging superblock seal mismatches.
+    /// Schedules a verified batch in stream order without repeating admission checks.
+    async fn schedule(&self, transactions: Vec<VerifiedTransaction>) -> Result<()> {
+        for transaction in transactions {
+            TransactionAccessor::verified(&self.engine, transaction).schedule().await?;
+        }
+        Ok(())
+    }
+
+    /// Applies one control entry after all preceding transactions are scheduled.
     async fn process(&mut self, entry: OwnedBlockstoreEntry) -> Result<()> {
         match entry {
             OwnedBlockstoreEntry::Block(block) => {
@@ -119,8 +244,8 @@ impl ReplicationClient {
                 let pending = time::timeout(IO_TIMEOUT, self.blocks.recv());
                 let observed = pending.await?.ok_or(ReplicationError::StreamClosed)?;
                 if block != observed {
-                    // Mismatches are diagnostic until recovery policy is implemented.
-                    error!(?block, ?observed, "replication block divergence detected");
+                    let error = ReplayError::BlockhashMismatch(block.slot);
+                    Err(EngineError::from(error))?;
                 }
                 guard.await.map_err(EngineError::from)?;
             }
@@ -133,24 +258,133 @@ impl ReplicationClient {
                     Err(EngineError::Replay(ReplayError::StateMismatch))?;
                 }
             }
-            entry => self.engine.replay(entry).await?,
+            OwnedBlockstoreEntry::Reset(slot) => {
+                self.engine.replay(OwnedBlockstoreEntry::Reset(slot)).await?;
+            }
+            OwnedBlockstoreEntry::Transaction(_) => (),
         }
         Ok(())
     }
 
-    /// Handshakes with the leader at `position`; either stages a snapshot and
-    /// signals a required restart, or returns the resumed byte stream.
+    /// Flushes prior work and returns its durable cursor under a sequencing barrier.
+    async fn resume(&self) -> Result<(BarrierHandle, BlockstorePosition)> {
+        let guard = self.barrier().await?;
+        self.sync(false)?;
+        Ok((guard, self.superblocks().position()))
+    }
+}
+
+impl Ingest {
+    /// Decodes the stream while preserving the order of transactions and control entries.
+    async fn run(&mut self, position: BlockstorePosition) -> Result<()> {
+        let mut stream = self.open(position).await?;
+        while !self.shutdown.is_cancelled() {
+            match blockstore::decode(&mut stream) {
+                Ok(OwnedBlockstoreEntry::Transaction(transaction)) => {
+                    if !self.push(transaction) {
+                        return Ok(());
+                    }
+                }
+                Ok(entry) => {
+                    if !self.flush() {
+                        return Ok(());
+                    }
+                    self.tx
+                        .send(ReplicationMessage::Entry(entry))
+                        .map_err(|_| ReplicationError::StreamClosed)?;
+                }
+                Err(wincode::error::ReadError::Io(error)) => {
+                    warn!(%error, "replication stream disconnected");
+                    if !self.flush() {
+                        return Ok(());
+                    }
+                    stream = self.open(self.request_position()?).await?;
+                }
+                Err(error) => {
+                    if !self.flush() {
+                        return Ok(());
+                    }
+                    return Err(wincode::Error::from(error).into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds a transaction and flushes once either batch bound is reached.
+    fn push(&mut self, transaction: Vec<u8>) -> bool {
+        self.batch.push(transaction);
+        !self.batch.is_full() || self.flush()
+    }
+
+    /// Offers the batch to Control, verifying it locally when Control is occupied.
+    fn flush(&mut self) -> bool {
+        if self.batch.is_empty() {
+            return true;
+        }
+        let batch = self.batch.take();
+        match self.tx.try_send(ReplicationMessage::Unverified(batch)) {
+            Ok(()) => true,
+            Err(TrySendError::Full(ReplicationMessage::Unverified(batch))) => {
+                let result = self.engine.verifier().verify(batch);
+                let valid = result.is_ok();
+                self.tx.send(ReplicationMessage::Verified(result)).is_ok() && valid
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Requests a durable resume cursor after Control finishes all preceding work.
+    fn request_position(&self) -> Result<BlockstorePosition> {
+        let (reply, response) = mpsc::sync_channel(0);
+        let _ = self.tx.send(ReplicationMessage::Disconnected(reply));
+        response.recv().map_err(|_| ReplicationError::StreamClosed)
+    }
+
+    /// Reconnects from `position` and tells Control it may release the barrier.
+    async fn open(&self, position: BlockstorePosition) -> Result<ReplicationStream> {
+        let stream = self.reconnect(position).await?;
+        let _ = self.tx.send(ReplicationMessage::Connected);
+        Ok(stream)
+    }
+
+    /// Retries transport establishment while the ordered resume cursor remains quiesced.
+    async fn reconnect(&self, position: BlockstorePosition) -> Result<ReplicationStream> {
+        for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
+            if self.shutdown.is_cancelled() {
+                return Err(ReplicationError::StreamClosed);
+            }
+            metrics::client_connection_attempt();
+            match self.connect(position) {
+                Ok(stream) => {
+                    info!(attempt, ?position, "replication stream connected");
+                    return Ok(stream);
+                }
+                Err(ReplicationError::IO(error)) => {
+                    warn!(attempt, ?error, "replication reconnect failed");
+                }
+                Err(error) => return Err(error),
+            }
+            let timeout = RETRY_DELAY * attempt as u32;
+            if time::timeout(timeout, self.shutdown.cancelled()).await.is_ok() {
+                Err(ReplicationError::StreamClosed)?;
+            }
+        }
+        Err(ReplicationError::ReconnectExhausted)
+    }
+
+    /// Handshakes at `position`, staging a snapshot when streaming cannot resume.
     fn connect(&self, position: BlockstorePosition) -> Result<ReplicationStream> {
         let _timer = metrics::time(Operation::ClientConnect);
         let mut connection = TcpStream::connect_timeout(&self.addr, IO_TIMEOUT)?;
         connection.set_read_timeout(Some(IO_TIMEOUT))?;
         connection.set_write_timeout(Some(IO_TIMEOUT))?;
         let request = HandshakeRequest { version: PROTO_VERSION, position };
-        let handshake = Handshake::new(self.signer(), request)?;
+        let handshake = Handshake::new(self.engine.signer(), request)?;
         protocol::write(&mut connection, &handshake)?;
         let handshake = protocol::read::<Handshake<HandshakeResponse>>(&mut connection)?;
         handshake.verify()?;
-        let expected = self.authority();
+        let expected = self.engine.authority();
         if handshake.identity != expected {
             let message = format!(
                 "unexpected replication server identity {}; expected {expected}",
@@ -172,41 +406,12 @@ impl ReplicationClient {
         }
     }
 
-    /// Reconnects from a quiesced local cursor.
-    async fn reconnect(&self, shutdown: &ShutdownHandle) -> Result<ReplicationStream> {
-        // Hold quiescence so every retry uses the same flushed position.
-        let _guard = self.barrier().await?;
-        self.sync(false)?;
-        let position = self.superblocks().position();
-        for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
-            if shutdown.requested() {
-                return Err(ReplicationError::StreamClosed);
-            }
-            metrics::client_connection_attempt();
-            match self.connect(position) {
-                Ok(stream) => {
-                    info!(attempt, ?position, "replication stream connected");
-                    return Ok(stream);
-                }
-                Err(ReplicationError::IO(error)) => {
-                    warn!(attempt, ?error, "replication reconnect failed");
-                }
-                Err(error) => return Err(error),
-            }
-            let timeout = RETRY_DELAY * attempt as u32;
-            if time::timeout(timeout, shutdown.signalled()).await.is_ok() {
-                return Err(ReplicationError::StreamClosed);
-            }
-        }
-        Err(ReplicationError::ReconnectExhausted)
-    }
-
-    /// Writes the incoming snapshot archive into a fresh superblock directory and
-    /// records its seal, readying the follower to restart from that state.
+    /// Stages a complete snapshot and installs its seal for the requested restart.
     fn stage_snapshot(&self, connection: &mut TcpStream, meta: SnapshotMetadata) -> Result<()> {
         let _timer = metrics::time(Operation::ClientStageSnapshot);
         // Stage in the successor before seal rotation so restart can find it.
-        let dir = Superblock::init_dir(self.superblocks().directory(), meta.id + 1)?;
+        let superblocks = self.engine.superblocks();
+        let dir = Superblock::init_dir(superblocks.directory(), meta.id + 1)?;
         let archive = dir.join(ACCOUNTSDB_SNAPSHOT_FILE);
         let temporary = dir.join(format!("{ACCOUNTSDB_SNAPSHOT_FILE}.tmp"));
         let mut file = File::options().write(true).create(true).truncate(true).open(&temporary)?;
@@ -217,7 +422,7 @@ impl ReplicationClient {
         file.sync_all()?;
         drop(file);
         fs::rename(temporary, archive)?;
-        self.superblocks().bootstrap(meta.superblock)?;
+        superblocks.bootstrap(meta.superblock)?;
         info!(?meta, "replication snapshot staged");
         Ok(())
     }

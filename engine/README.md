@@ -10,6 +10,12 @@ configured remote authority for a replica, or the local identity when no
 override is configured. Replication uses that distinction to sign locally while
 authenticating its immediate upstream.
 
+Normal transaction submission sanitizes and verifies each transaction.
+Replication instead uses `Engine::verifier` to sanitize, authority-check, and
+batch-verify payloads, then consumes the resulting opaque transactions through
+the trusted `TransactionAccessor::verified` path without repeating crypto.
+Retained local-ledger replay has a separate private verification bypass.
+
 ## Account replacement
 
 `AccountAccessor::{create, update}` composes complete-account MagicRoot patch
