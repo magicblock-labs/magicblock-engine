@@ -50,7 +50,6 @@ at startup before producing their first new block, so followers clear
 chain-mirrored volatile state at the same stream position while retaining
 internal system accounts.
 
-The follower uses persistent ingest and control threads joined at shutdown.
 Ingest decodes transaction batches of at most 128 transactions and typically
 128 KiB, fencing them before every block, superblock, reset, or reconnect.
 A rendezvous channel assigns verification to an idle control thread; otherwise
