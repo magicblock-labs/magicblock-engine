@@ -64,19 +64,15 @@ impl IntoTransactionView for TransactionView {
         {
             return Err(EngineError::SignatureVerification);
         }
-        sigverify(&self)?;
         Ok(self)
     }
 }
 
 /// The engine's sole signature-verification point.
 ///
-/// Execution is trustless: every submission funnels through the
-/// [`TransactionView`] `compose` and is verified here, including replay and
-/// replication of already-committed transactions. No path reaches the
-/// sequencer unverified, so downstream code may assume the fee payer and every
-/// required signer actually signed.
-fn sigverify(view: &TransactionView) -> Result<()> {
+/// Every public transaction accessor verifies here; trusted local replay is
+/// the only bypass. TODO: Remove the bypass before replaying untrusted ledgers.
+pub(super) fn sigverify(view: &TransactionView) -> Result<()> {
     // Sanitization guarantees one static key for every required signature.
     let message = view.message_data();
     for (signature, key) in view.signatures().iter().zip(view.static_account_keys()) {

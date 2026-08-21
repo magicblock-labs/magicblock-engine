@@ -11,7 +11,11 @@ use solana_pubkey::Pubkey;
 use solana_transaction::TransactionResult;
 use tokio::time;
 
-use crate::{Engine, error::EngineError, error::Result, transaction};
+use crate::{
+    Engine, IntoTransactionView,
+    error::{EngineError, Result},
+    transaction,
+};
 
 /// Upper bound on awaiting a submitted transaction's committed result.
 const EXECUTION_TIMEOUT: Duration = Duration::from_secs(8);
@@ -63,7 +67,14 @@ impl AccountAccessor<'_> {
     }
 }
 
-impl TransactionAccessor<'_> {
+impl<'a> TransactionAccessor<'a> {
+    /// Composes a trusted local-ledger transaction without verifying its signatures.
+    pub(super) fn replay(engine: &'a Engine, transaction: Vec<u8>) -> Result<Self> {
+        let sanitized = TransactionView::try_new_sanitized(transaction.into(), true)?;
+        let transaction = sanitized.compose(engine)?;
+        Ok(Self { engine, transaction })
+    }
+
     /// Submits `transaction` for execution and awaits its committed result.
     /// A timeout does not cancel the submitted transaction.
     pub async fn execute(self) -> Result<TransactionResult<()>> {
