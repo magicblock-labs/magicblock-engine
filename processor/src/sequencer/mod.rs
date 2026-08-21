@@ -165,6 +165,11 @@ impl Sequencer {
         match msg {
             SequencerMessage::Transaction(txn) => self.schedule(txn).await,
             SequencerMessage::Block(block) => self.finalize(block).await,
+            SequencerMessage::Checkpoint(block, guard) => {
+                self.finalize(block).await?;
+                self.pause(guard).await;
+                Ok(())
+            }
             SequencerMessage::Barrier(guard) => self.barrier(guard).await,
         }
     }
@@ -227,12 +232,17 @@ impl Sequencer {
     /// released before resuming. Used to take a consistent state snapshot at
     /// superblock boundaries.
     async fn barrier(&mut self, guard: BarrierGuard) -> Result<()> {
-        info!("sequencer is halting operation");
         self.drain().await?;
+        self.pause(guard).await;
+        Ok(())
+    }
+
+    /// Acknowledges quiescence and holds the sequencer until released.
+    async fn pause(&self, guard: BarrierGuard) {
+        info!("sequencer is halting operation");
         let _ = guard.acknowledged.send(());
         let _ = guard.released.await;
         info!("sequencer is resuming operation");
-        Ok(())
     }
 
     /// Awaits executor-ready signals, reclaiming each finished executor

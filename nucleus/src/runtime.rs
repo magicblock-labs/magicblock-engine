@@ -44,6 +44,8 @@ pub enum SequencerMessage {
     Transaction(TransactionView),
     /// A block boundary to seal before scheduling further transactions.
     Block(Block),
+    /// Finalize a block boundary, then pause before accepting subsequent work.
+    Checkpoint(Block, BarrierGuard),
     /// Quiesce the sequencer and all its executors until released — used to take
     /// a consistent snapshot at superblock boundaries (see ledger replay and
     /// `finalize_superblock`).
