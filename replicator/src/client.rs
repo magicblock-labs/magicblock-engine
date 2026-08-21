@@ -40,12 +40,16 @@ use crate::{
 type ReplicationStream = BufReader<TcpStream>;
 type ReconnectReply = mpsc::SyncSender<BlockstorePosition>;
 
+/// Maximum transactions retained before offering a batch to Control.
 const MAX_BATCH_TRANSACTIONS: usize = 128;
+/// Maximum transaction payload bytes retained before offering a batch to Control.
 const MAX_BATCH_BYTES: usize = 128 * KB;
 
 /// Consecutive transaction payloads accumulated between ordered stream fences.
 struct TransactionsBatch {
+    /// Raw transaction payloads in stream order.
     transactions: Vec<Vec<u8>>,
+    /// Cumulative payload bytes used to enforce the batch bound.
     bytes: usize,
 }
 
@@ -83,19 +87,29 @@ impl TransactionsBatch {
 
 /// Ordered handoff from blocking stream ingest to asynchronous Engine control.
 enum ReplicationMessage {
+    /// Raw batch offered to Control for signature verification.
     Unverified(Vec<Vec<u8>>),
+    /// Verification result completed by Ingest while Control was occupied.
     Verified(engine::Result<Vec<VerifiedTransaction>>),
+    /// Control entry fenced behind every preceding transaction batch.
     Entry(OwnedBlockstoreEntry),
+    /// Successful handshake allowing Control to release its sequencing barrier.
     Connected,
+    /// Lost stream requesting Control's next durable resume position.
     Disconnected(ReconnectReply),
 }
 
 /// Owns stream decoding, bounded transaction accumulation, and opportunistic verification.
 struct Ingest {
+    /// Engine used for batch verification and authenticated stream recovery.
     engine: Engine,
+    /// Upstream replication endpoint reused across reconnects.
     addr: SocketAddr,
+    /// Consecutive transactions awaiting an ordered handoff.
     batch: TransactionsBatch,
+    /// Rendezvous sender preserving ingest-to-Control message order.
     tx: Sender<ReplicationMessage>,
+    /// Cancellation scoped to the ingest worker lifecycle.
     shutdown: CancellationToken,
 }
 
@@ -295,10 +309,12 @@ impl Ingest {
                 }
                 Err(wincode::error::ReadError::Io(error)) => {
                     warn!(%error, "replication stream disconnected");
+                    drop(stream);
                     if !self.flush() {
                         return Ok(());
                     }
-                    stream = self.open(self.request_position()?).await?;
+                    let position = self.request_position()?;
+                    stream = self.open(position).await?;
                 }
                 Err(error) => {
                     if !self.flush() {
@@ -342,7 +358,7 @@ impl Ingest {
     }
 
     /// Reconnects from `position` and tells Control it may release the barrier.
-    async fn open(&self, position: BlockstorePosition) -> Result<ReplicationStream> {
+    async fn open(&mut self, position: BlockstorePosition) -> Result<ReplicationStream> {
         let stream = self.reconnect(position).await?;
         let _ = self.tx.send(ReplicationMessage::Connected);
         Ok(stream)
@@ -362,6 +378,9 @@ impl Ingest {
                 }
                 Err(ReplicationError::IO(error)) => {
                     warn!(attempt, ?error, "replication reconnect failed");
+                }
+                Err(ReplicationError::StreamActive) => {
+                    warn!(attempt, "previous replication stream is still active");
                 }
                 Err(error) => return Err(error),
             }
@@ -403,6 +422,7 @@ impl Ingest {
                 Ok(BufReader::with_capacity(256 * KB, connection))
             }
             HandshakeResponse::Err(message) => Err(ReplicationError::Handshake(message)),
+            HandshakeResponse::StreamActive => Err(ReplicationError::StreamActive),
         }
     }
 

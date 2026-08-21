@@ -54,6 +54,8 @@ pub(crate) enum HandshakeResponse {
     Stream(BlockstorePosition),
     /// Reason the leader rejected negotiation.
     Err(String),
+    /// The follower identity still owns an earlier stream.
+    StreamActive,
 }
 
 /// Describes the accountsdb snapshot a follower must stage before it can stream.
