@@ -171,18 +171,20 @@ impl ReplicationClient {
     async fn run(self, shutdown: &ShutdownHandle) -> Result<()> {
         let (guard, position) = self.resume().await?;
         let (tx, rx) = flume::bounded(0);
+        let cancellation = shutdown.child();
         let mut ingest = Ingest {
             engine: self.engine.clone(),
             addr: self.addr,
             batch: Default::default(),
             tx,
-            shutdown: shutdown.child(),
+            shutdown: cancellation.clone(),
         };
         let rt = runtime::Builder::new_current_thread().enable_time().build()?;
         let ingest = thread::Builder::new()
             .name("replication-ingest".into())
             .spawn(move || rt.block_on(ingest.run(position)))?;
         let mut result = self.consume(shutdown, rx, guard).await;
+        cancellation.cancel();
         match ingest.join() {
             Ok(Ok(())) => info!("replication ingest has gracefully shutdown"),
             Ok(Err(error)) => result = result.and(Err(error)),
