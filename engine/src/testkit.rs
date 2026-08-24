@@ -10,7 +10,7 @@ use derive_more::Deref;
 use keeper::{
     ExecutionRecord,
     builder::KeeperBuilder,
-    testkit::{Dirs, SUPERBLOCK, await_archive, block, keeper_builder},
+    testkit::{Dirs, SUPERBLOCK, block, keeper_builder, seal_and_archive_with},
 };
 use nucleus::{Slot, config::Authority, ledger::BlockstorePosition, shutdown::ShutdownManager};
 use solana_account::AccountSharedData;
@@ -157,13 +157,16 @@ impl TestEngine {
         }
     }
 
-    /// Seals the next superblock and waits for its snapshot archive.
+    /// Seals the next superblock and waits for its archive and durable rotation.
     pub async fn seal_and_archive(&mut self) -> PathBuf {
         let boundary = self.slot.next_multiple_of(SUPERBLOCK.into());
-        while self.slot <= boundary {
-            self.advance(1).await;
-        }
-        await_archive(self).await
+        let engine = self.engine.clone();
+        seal_and_archive_with(&engine, || async {
+            while self.slot <= boundary {
+                self.advance(1).await;
+            }
+        })
+        .await
     }
 
     /// Stops every service and returns the directories and authority for reopen.

@@ -602,8 +602,8 @@ async fn cascades_replication_through_a_follower() {
     let mut middle_positions = stream(leader_addr, &mut middle);
     let mut middle_dispatcher = dispatcher(middle_addr, &middle, &[tail_identity]).await;
 
-    // Subscribe before the boundary: the seal is driven by replication, so
-    // `await_archive` would subscribe after the archiver it means to observe.
+    // Subscribe before the boundary because this seal is driven by replication,
+    // outside the testkit's race-free seal-and-archive helper.
     let mut archives = middle.accounts().subscribe_snapshots();
 
     // Cross the seal live rather than during handshake catch-up.

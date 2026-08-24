@@ -8,14 +8,7 @@ use solana_sysvar::{
 };
 
 use super::TestKeeper;
-use crate::testkit::{Dirs, archived_snapshot, await_archive, corrupt, keeper_builder};
-
-/// Subscribes before finalization, then waits for both detached completion paths.
-async fn seal_and_archive(keeper: &TestKeeper) {
-    let finalization = keeper.finalize_superblock().expect("superblock finalizes");
-    await_archive(keeper).await;
-    finalization.await.expect("superblock seal completes");
-}
+use crate::testkit::{Dirs, archived_snapshot, corrupt, keeper_builder, seal_and_archive};
 
 // Startup seeds the engine's required feature gates, the configured upgradeable
 // programs, and the sysvars, with the exact ownership/rent/clock-offset shape the
