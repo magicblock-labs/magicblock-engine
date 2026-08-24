@@ -43,7 +43,8 @@ use crate::{
 };
 
 const LEDGER_META: &str = "ledger.meta";
-const SERVICE_QUEUE_CAPACITY: usize = 128;
+const APPENDER_QUEUE_CAPACITY: usize = 2_048;
+const READER_QUEUE_CAPACITY: usize = 128;
 
 /// Top-level ledger handle.
 ///
@@ -72,7 +73,7 @@ impl Ledger {
         let directory = directory.as_ref().to_owned();
         let ledger = Arc::new(Self::new(directory, size_limit)?);
         metrics::init(&ledger);
-        let (appender_tx, rx) = flume::bounded(SERVICE_QUEUE_CAPACITY);
+        let (appender_tx, rx) = flume::bounded(APPENDER_QUEUE_CAPACITY);
         let (position, _) = broadcast::channel(256);
         let mut sh = shutdown.handle(Service::LedgerAppender);
         let appender_ledger = ledger.clone();
@@ -84,7 +85,7 @@ impl Ledger {
             };
             sh.terminate(reason);
         })?;
-        let (reader_tx, rx) = flume::bounded(SERVICE_QUEUE_CAPACITY);
+        let (reader_tx, rx) = flume::bounded(READER_QUEUE_CAPACITY);
 
         #[cfg(not(feature = "testkit"))]
         let readers = num_cpus::get() as u32;
@@ -227,8 +228,8 @@ pub struct LedgerHandle {
     pub reader: ReaderSender,
     /// Append event queue consumed by the appender worker.
     pub appender: flume::Sender<Event>,
-    /// Blockstore write position broadcast after every committed block, so the
-    /// replication path can stream newly appended bytes.
+    /// Blockstore position broadcast after committed blocks and rotations, so
+    /// replication can stream bytes and follow successor boundaries.
     pub position: broadcast::Sender<BlockstorePosition>,
 }
 

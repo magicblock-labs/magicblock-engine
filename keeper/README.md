@@ -40,9 +40,11 @@ rejects a non-empty deployment whose configured authority account is absent.
 ## Superblock finalization
 
 `Keeper::finalize_superblock` snapshots accountsdb at the current ledger head,
-computes the persisted-account checksum, appends the corresponding
+computes the persisted-account checksum, queues the corresponding
 `SuperblockSeal`, and archives the snapshot in the successor superblock
-directory.
+directory. Its completion signal resolves after the appender durably seals the
+files and index and publishes the rotation. Events queued after the seal remain
+ordered into the successor while that work completes.
 
 Finalization requires exclusive account-store access. Engine obtains that
 exclusivity through the sequencer and simulator barriers before calling it.

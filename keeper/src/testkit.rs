@@ -11,6 +11,7 @@
 use std::{
     collections::HashMap,
     fs::{self, File},
+    future::Future,
     num::NonZeroU64,
     path::{Path, PathBuf},
     sync::Arc,
@@ -241,13 +242,35 @@ pub fn archived_snapshot(keeper: &Keeper) -> Option<PathBuf> {
         .find(|p| p.exists())
 }
 
-/// Waits until a subscribed detached snapshot archiver reports completion.
-pub async fn await_archive(keeper: &Keeper) -> PathBuf {
+/// Finalizes Keeper's current superblock after subscribing, then waits for its
+/// archive and durable rotation.
+pub async fn seal_and_archive(keeper: &Keeper) -> PathBuf {
+    seal_and_archive_with(keeper, || async {
+        // The shared helper fences the queued seal after archive completion.
+        drop(keeper.finalize_superblock().expect("superblock finalizes"));
+    })
+    .await
+}
+
+/// Runs `seal` after subscribing, then waits for its archive and durable rotation.
+///
+/// `seal` is not polled until the archive subscription is active. After the
+/// detached archiver reports completion, an explicit sync confirms that the
+/// appender has also sealed and rotated the ledger. The closure must not return
+/// before it has queued the seal.
+pub async fn seal_and_archive_with<F, Fut>(keeper: &Keeper, seal: F) -> PathBuf
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ()>,
+{
     let mut rx = keeper.accounts().subscribe_snapshots();
-    time::timeout(Duration::from_secs(8), rx.recv())
+    seal().await;
+    let archive = time::timeout(Duration::from_secs(8), rx.recv())
         .await
         .expect("snapshot archives in time")
-        .unwrap()
+        .expect("snapshot archive is published");
+    keeper.superblocks().sync(false).expect("superblock seal completes");
+    archive
 }
 
 /// Overwrites one `u64` metadata word in the closed persisted store.
