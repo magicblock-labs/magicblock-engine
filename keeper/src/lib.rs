@@ -144,11 +144,12 @@ impl Keeper {
         Ok(Some(handle))
     }
 
-    /// Seal the current superblock and archive the matching accounts snapshot.
+    /// Snapshot the current superblock, enqueue its seal, and archive the snapshot.
     ///
     /// Must run only when no account store can race the snapshot export; the
-    /// in-body `SAFETY` note relies on this exclusivity.
-    pub fn finalize_superblock(&self) -> Result<()> {
+    /// in-body `SAFETY` note relies on this exclusivity. The returned signal
+    /// resolves after the appender durably seals and rotates the ledger.
+    pub fn finalize_superblock(&self) -> Result<oneshot::Receiver<()>> {
         let _timer = metrics::time(Operation::FinalizeSuperblock);
         let head = self.ledger.head();
         let next = head + 1;
@@ -159,11 +160,11 @@ impl Keeper {
         let checksum = self.accountsdb.checksum();
         let transactions = self.accountsdb.transactions();
         let seal = SuperblockSeal { id: head, checksum, transactions };
-        self.superblocks().append(seal)?;
+        let completion = self.superblocks().append(seal)?;
         let dir = Superblock::init_dir(&self.ledger.directory, next)?;
         self.archive(snapshot, dir)?;
-        info!(head, "finalized superblock");
-        Ok(())
+        info!(head, "queued superblock seal");
+        Ok(completion)
     }
 
     /// Resolved once from the seeded feature accounts at startup and fixed for

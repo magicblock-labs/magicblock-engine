@@ -70,7 +70,12 @@ pub enum Event {
     /// Block boundary marker and block hash.
     Block(Block),
     /// Seal the active superblock and rotate to a fresh directory.
-    Superblock(SuperblockSeal),
+    Superblock {
+        /// Identity, checksum, and transaction count for the sealed state.
+        seal: SuperblockSeal,
+        /// Notified after the durable seal and successor rotation complete.
+        response: oneshot::Sender<()>,
+    },
     /// Install a snapshot seal and adopt its cumulative transaction count.
     Bootstrap(SuperblockSeal),
     /// Volatile accounts were discarded at `Slot` after upstream synchronization was lost.

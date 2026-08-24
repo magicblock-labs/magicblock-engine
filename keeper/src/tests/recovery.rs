@@ -10,6 +10,13 @@ use solana_sysvar::{
 use super::TestKeeper;
 use crate::testkit::{Dirs, archived_snapshot, await_archive, corrupt, keeper_builder};
 
+/// Subscribes before finalization, then waits for both detached completion paths.
+async fn seal_and_archive(keeper: &TestKeeper) {
+    let finalization = keeper.finalize_superblock().expect("superblock finalizes");
+    await_archive(keeper).await;
+    finalization.await.expect("superblock seal completes");
+}
+
 // Startup seeds the engine's required feature gates, the configured upgradeable
 // programs, and the sysvars, with the exact ownership/rent/clock-offset shape the
 // rest of the engine assumes.
@@ -96,16 +103,14 @@ async fn recovers_the_newest_snapshot() {
 
     // First snapshot captures marker == 1.
     store_marker(&keeper, marker, 1);
-    keeper.finalize_superblock().expect("first finalize");
-    await_archive(&keeper).await;
+    seal_and_archive(&keeper).await;
     assert!(
         archived_snapshot(&keeper).is_some(),
         "snapshot archived under superblock"
     );
     // Second snapshot, in a later superblock, captures marker == 2.
     store_marker(&keeper, marker, 2);
-    keeper.finalize_superblock().expect("second finalize");
-    await_archive(&keeper).await;
+    seal_and_archive(&keeper).await;
     // Past every archive: this value is what an un-restored store would keep.
     store_marker(&keeper, marker, 3);
     let dirs = keeper.close().await;

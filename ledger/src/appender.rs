@@ -98,7 +98,10 @@ impl LedgerAppender {
                 Event::Transaction(transaction) => self.write_transaction(transaction)?,
                 Event::Execution(execution) => self.write_execution(execution)?,
                 Event::Block(block) => self.write_block(block)?,
-                Event::Superblock(seal) => self.seal(seal, false)?,
+                Event::Superblock { seal, response } => {
+                    self.seal(seal, false)?;
+                    let _ = response.send(());
+                }
                 Event::Bootstrap(seal) => self.seal(seal, true)?,
                 Event::Reset(slot) => self.write_reset(slot)?,
                 Event::Sync { response, is_final } => {
@@ -134,6 +137,8 @@ impl LedgerAppender {
 
         self.writer = writer;
         self.index = index;
+        let position = BlockstorePosition { superblock: head, offset: 0 };
+        let _ = self.position.send(position);
         info!(head, "opened active superblock");
         Ok(())
     }

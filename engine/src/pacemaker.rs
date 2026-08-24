@@ -33,6 +33,8 @@ pub struct PaceMaker {
     pacer: Pacer,
     /// Number of slots sealed into each superblock.
     superblock: NonZeroU64,
+    /// Completion of the last queued seal, awaited before taking its successor.
+    sealed: Option<oneshot::Receiver<()>>,
 }
 
 /// Source of block boundaries.
@@ -80,7 +82,8 @@ pub struct ExternalBlock {
     /// Notified after the pacemaker handles the boundary locally.
     ///
     /// On ordinary slots this means the boundary was queued and the keeper slot
-    /// was advanced. On superblock slots it also includes the synchronous seal.
+    /// was advanced. On superblock slots it means the snapshot was taken and
+    /// its seal was queued, but the appender may still be sealing it.
     pub submitted: oneshot::Sender<()>,
 }
 
@@ -116,7 +119,12 @@ impl PaceMaker {
         };
         let shutdown = shutdown.handle(Service::PaceMaker);
         let superblock = blockstore.superblock;
-        let pacemaker = Self { engine, pacer, superblock };
+        let pacemaker = Self {
+            engine,
+            pacer,
+            superblock,
+            sealed: None,
+        };
         tokio::spawn(pacemaker.run(shutdown));
         Ok(())
     }
@@ -175,11 +183,11 @@ impl PaceMaker {
     /// Advances the execution and simulation environments to `block`, sealing a
     /// superblock when the slot lands on the configured interval.
     ///
-    /// The seal is taken behind a barrier and runs synchronously: it exports an
-    /// accountsdb snapshot, which is only coherent while no store operation can
-    /// race it. Holding the boundary here is what buys that exclusivity, at the
-    /// cost of stalling block production until the seal completes.
-    async fn handle(&self, block: Block) -> Result<()> {
+    /// The snapshot and seal submission run behind a barrier because the
+    /// accountsdb export is only coherent while no store operation can race it.
+    /// Once the seal is queued, appender FIFO ordering preserves the boundary
+    /// while execution resumes and the durable rotation completes in parallel.
+    async fn handle(&mut self, block: Block) -> Result<()> {
         self.sequencer.simulation.send(SimulatorMessage::Block(block)).await?;
         if !block.slot.is_multiple_of(self.superblock.get()) {
             self.sequencer.send(SequencerMessage::Block(block)).await?;
@@ -189,7 +197,10 @@ impl PaceMaker {
         let (controller, guard) = runtime::barrier();
         self.sequencer.send(SequencerMessage::Checkpoint(block, guard)).await?;
         controller.acknowledged.await?;
-        self.finalize_superblock()?;
+        if let Some(sealed) = self.sealed.take() {
+            sealed.await?;
+        }
+        self.sealed = Some(self.finalize_superblock()?);
         Ok(())
     }
 }

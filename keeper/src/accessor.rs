@@ -347,12 +347,15 @@ impl SuperblockAccessor<'_> {
         self.keeper.ledger.position()
     }
 
-    /// Enqueues a seal onto the append stream, sealing the current superblock and
-    /// rotating to the next. Used by a follower applying a seal received from the leader.
-    pub fn append(&self, seal: SuperblockSeal) -> Result<()> {
-        let event = Event::Superblock(seal);
+    /// Enqueues a seal onto the append stream and returns its completion signal.
+    ///
+    /// The signal resolves after the appender durably seals the current
+    /// superblock and rotates to its successor.
+    pub fn append(&self, seal: SuperblockSeal) -> Result<oneshot::Receiver<()>> {
+        let (response, completion) = oneshot::channel();
+        let event = Event::Superblock { seal, response };
         self.keeper.ledger.appender.send(event)?;
-        self.sync(false)
+        Ok(completion)
     }
 
     /// Installs a snapshot seal and adopts its cumulative transaction count.

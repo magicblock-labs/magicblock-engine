@@ -126,7 +126,11 @@ fn recorded(sig: Signature, payload: Arc<Vec<u8>>, slot: Slot) -> [Event; 2] {
 
 /// Ends superblock `id` and rotates the writer to the next one.
 fn seal(id: u64) -> Event {
-    Event::Superblock(SuperblockSeal { checksum: 0, id, transactions: 0 })
+    let (response, _) = oneshot::channel();
+    Event::Superblock {
+        seal: SuperblockSeal { checksum: 0, id, transactions: 0 },
+        response,
+    }
 }
 
 /// Serves one read request on a reader run synchronously on the test thread.
@@ -450,7 +454,7 @@ async fn test_replay_streams_superblocks_through_active_head() {
         .map(|e| match e {
             Transaction(_) => "tx",
             Block(_) => "block",
-            Superblock(_) => "seal",
+            Superblock { .. } => "seal",
             Reset(_) => "reset",
         })
         .collect();
