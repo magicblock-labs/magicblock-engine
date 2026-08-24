@@ -21,6 +21,7 @@ use tokio::sync::broadcast;
 use tracing::info;
 
 mod appender;
+mod codec;
 mod error;
 mod index;
 mod metrics;
@@ -45,6 +46,10 @@ use crate::{
 const LEDGER_META: &str = "ledger.meta";
 const APPENDER_QUEUE_CAPACITY: usize = 2_048;
 const READER_QUEUE_CAPACITY: usize = 128;
+/// Current on-disk superblock format version.
+const VERSION: LedgerVersion = 1;
+/// Version tag stored at the start of every superblock metadata header.
+pub type LedgerVersion = u64;
 
 /// Top-level ledger handle.
 ///
@@ -293,8 +298,11 @@ impl Superblock {
     /// Opens a superblock directory, creating its data files when needed.
     fn open(root: &Path, id: u64, index: &Index) -> Result<Arc<Self>> {
         let directory = Self::init_dir(root, id)?;
-        let index = index.keyspace(id)?;
         let meta = unsafe { MetaMap::<SuperblockMeta>::new(&directory.join(SUPERBLOCK_META)) }?;
+        if meta.version != VERSION {
+            return Err(LedgerError::UnsupportedVersion(meta.version));
+        }
+        let index = index.keyspace(id)?;
         let blockstore = Self::file(&directory.join(BLOCKSTORE_DB))?;
         let executions = Self::file(&directory.join(EXECUTIONS_DB))?;
 

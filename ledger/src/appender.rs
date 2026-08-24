@@ -17,7 +17,7 @@ use wincode::Error;
 use zstd::bulk::Compressor;
 
 use crate::{
-    Ledger, Superblock,
+    Ledger, Superblock, codec,
     error::{LedgerError, Result},
     index::{IndexWriter, Span, TxSpan},
     metrics::{self, Operation},
@@ -302,7 +302,7 @@ impl SuperblockWriter {
                 &superblock.meta.cursors.executions,
             )?,
             superblock,
-            compressor: Compressor::new(0)?,
+            compressor: codec::compressor()?,
             buffer: Buffer::new(),
         })
     }

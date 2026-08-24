@@ -22,7 +22,7 @@ use rustix::fs::{self, FallocateFlags};
 use tracing::debug;
 use zstd::bulk::Compressor;
 
-use crate::{Result, index::Span, schema::MAX_ENTRY_SIZE};
+use crate::{LedgerVersion, Result, VERSION, index::Span, schema::MAX_ENTRY_SIZE};
 
 /// Initial buffer size for append-heavy files.
 const FILE_BUFFER_SIZE: usize = 64 * MB;
@@ -293,9 +293,10 @@ impl LedgerMeta {
 }
 
 /// Metadata header for one superblock directory.
-#[derive(Default)]
 #[repr(C)]
 pub(crate) struct SuperblockMeta {
+    /// Immutable on-disk format version for this superblock.
+    pub(crate) version: LedgerVersion,
     /// Published append cursors for files in this superblock.
     pub(crate) cursors: FileCursors,
     /// Slot range stored in this segment.
@@ -304,6 +305,18 @@ pub(crate) struct SuperblockMeta {
     pub(crate) checksum: AtomicU64,
     /// Transaction count carried over from the seal that opened this superblock.
     pub(crate) transactions: AtomicU64,
+}
+
+impl Default for SuperblockMeta {
+    fn default() -> Self {
+        Self {
+            version: VERSION,
+            cursors: Default::default(),
+            range: Default::default(),
+            checksum: 0.into(),
+            transactions: 0.into(),
+        }
+    }
 }
 
 /// Published append cursors for superblock data files.

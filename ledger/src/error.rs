@@ -6,6 +6,8 @@ use agave_transaction_view::result::TransactionViewError;
 use oneshot::RecvError;
 use tokio::time::error::Elapsed;
 
+use crate::LedgerVersion;
+
 /// Errors returned by ledger storage, codecs, and indexes.
 #[derive(Debug, derive_more::From, thiserror::Error)]
 pub enum LedgerError {
@@ -31,6 +33,9 @@ pub enum LedgerError {
     #[error("ledger corruption: {0}")]
     #[from(skip)]
     Corruption(&'static str),
+    /// Opened superblock uses an unsupported on-disk format version.
+    #[error("unsupported ledger version: {0}")]
+    UnsupportedVersion(LedgerVersion),
     /// The background superblock cleanup worker panicked.
     #[error("ledger truncation worker panicked")]
     TruncationPanic,
