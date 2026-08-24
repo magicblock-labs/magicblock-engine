@@ -22,7 +22,8 @@ that contains it.
 The sequencer barrier drains all executor work, acknowledges the caller, and
 holds new execution until its guard is released. Engine uses the barrier for
 coherent superblock snapshots, replay seal checks, replication handshakes, and
-shutdown.
+shutdown. A superblock checkpoint finalizes its block and enters that pause as
+one sequencer message, so later transactions cannot enter the sealed snapshot.
 
 ## Simulation
 

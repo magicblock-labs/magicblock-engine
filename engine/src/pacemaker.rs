@@ -7,6 +7,7 @@ use ledger::schema::Block;
 use nucleus::{
     Slot,
     config::BlockstoreParams,
+    runtime,
     shutdown::{Service, ShutdownHandle, ShutdownManager, ShutdownReason},
     unix_time,
 };
@@ -179,12 +180,16 @@ impl PaceMaker {
     /// race it. Holding the boundary here is what buys that exclusivity, at the
     /// cost of stalling block production until the seal completes.
     async fn handle(&self, block: Block) -> Result<()> {
-        self.sequencer.send(SequencerMessage::Block(block)).await?;
         self.sequencer.simulation.send(SimulatorMessage::Block(block)).await?;
-        if block.slot.is_multiple_of(self.superblock.get()) {
-            let _guard = self.barrier().await?;
-            self.finalize_superblock()?;
+        if !block.slot.is_multiple_of(self.superblock.get()) {
+            self.sequencer.send(SequencerMessage::Block(block)).await?;
+            return Ok(());
         }
+
+        let (controller, guard) = runtime::barrier();
+        self.sequencer.send(SequencerMessage::Checkpoint(block, guard)).await?;
+        controller.acknowledged.await?;
+        self.finalize_superblock()?;
         Ok(())
     }
 }
