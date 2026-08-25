@@ -224,7 +224,7 @@ impl ReplicationServer {
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         error!("ledger position stream closed unexpectedly");
-                        return Err(ReplicationError::StreamClosed);
+                        return Err(ReplicationError::CursorStreamClosed);
                     }
                 }
             }

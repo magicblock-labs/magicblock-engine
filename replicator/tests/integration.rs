@@ -102,6 +102,20 @@ async fn restart_from_snapshot(addr: SocketAddr, mut follower: TestEngine) -> Te
     TestEngine::with(dirs, authority).await
 }
 
+/// Closes a follower after its producer publishes the boundary and Ingest-stop heartbeat.
+async fn close_follower(follower: TestEngine, producer: &mut TestEngine) -> (Dirs, Authority) {
+    let mut close = Box::pin(follower.close());
+    assert!(
+        time::timeout(Duration::from_millis(100), close.as_mut()).await.is_err(),
+        "follower waits for a replicated block boundary"
+    );
+    producer.advance(2).await;
+    producer.sync().await;
+    time::timeout(TIMEOUT, close)
+        .await
+        .expect("follower drains through the producer boundary in time")
+}
+
 /// Applies a non-idempotent mutation so duplicate replication changes the result.
 /// Calls must be separated by a block advance to produce distinct signatures.
 async fn increment(engine: &TestEngine, state: Pubkey) {
@@ -124,6 +138,17 @@ async fn await_replication(
     state: Pubkey,
     value: i64,
 ) {
+    await_position(positions, expected).await;
+    follower.sync().await;
+    assert_eq!(load_v42_data(follower, state), Some(value));
+    assert_eq!(follower.superblocks().position(), expected);
+}
+
+/// Waits until a follower publishes exactly the expected durable cursor.
+async fn await_position(
+    positions: &mut broadcast::Receiver<BlockstorePosition>,
+    expected: BlockstorePosition,
+) {
     time::timeout(TIMEOUT, async {
         loop {
             let observed = positions.recv().await.expect("position stream is open");
@@ -136,9 +161,6 @@ async fn await_replication(
     })
     .await
     .expect("replication reaches the synced cursor in time");
-    follower.sync().await;
-    assert_eq!(load_v42_data(follower, state), Some(value));
-    assert_eq!(follower.superblocks().position(), expected);
 }
 
 /// Loads the serialized transactions committed in `slot`, preserving ledger order.
@@ -258,8 +280,8 @@ async fn replays_large_transactions_during_catch_up_and_live_streaming() {
     .await;
     assert_eq!(follower.get_account(account), leader.get_account(account));
 
+    close_follower(follower, &mut leader).await;
     dispatcher.terminate().await;
-    follower.close().await;
     leader.close().await;
 }
 
@@ -323,8 +345,8 @@ async fn batches_transactions_without_crossing_block_boundaries() {
         leader.ledger().transactions()
     );
 
+    close_follower(follower, &mut leader).await;
     dispatcher.terminate().await;
-    follower.close().await;
     leader.close().await;
 }
 
@@ -470,8 +492,8 @@ async fn streams_and_resumes_without_duplicate_application() {
         "reset replenishes the follower sponsor"
     );
 
+    close_follower(follower, &mut leader).await;
     second_dispatcher.terminate().await;
-    follower.close().await;
     leader.close().await;
 }
 
@@ -520,8 +542,54 @@ async fn resumes_after_leader_restart() {
     let expected = commit_increment(&mut leader, state).await;
     await_replication(&mut positions, &follower, expected, state, 3).await;
 
+    close_follower(follower, &mut leader).await;
     second_dispatcher.terminate().await;
-    follower.close().await;
+    leader.close().await;
+}
+
+/// Proves shutdown reconnects, drains to a durable boundary, and reopens from it.
+#[tokio::test(flavor = "multi_thread")]
+async fn graceful_shutdown_drains_to_next_block_and_reopens() {
+    let (mut leader, mut follower) = engines(&[], &[]).await;
+    let addr = loopback_addr();
+    let follower_identity = follower.signer().pubkey();
+    let mut first_dispatcher = dispatcher(addr, &leader, &[follower_identity]).await;
+    let mut positions = stream(addr, &mut follower);
+    leader.advance(1).await;
+    let expected = leader.sync().await;
+    await_position(&mut positions, expected).await;
+
+    let mut shutdown = Box::pin(follower.shutdown().terminate());
+    assert!(
+        time::timeout(Duration::from_millis(100), shutdown.as_mut()).await.is_err(),
+        "shutdown waits while no replicated block boundary exists"
+    );
+
+    first_dispatcher.terminate().await;
+    let mut second_dispatcher = dispatcher(addr, &leader, &[follower_identity]).await;
+    leader.advance(1).await;
+    let expected = leader.sync().await;
+    // The next operational heartbeat lets Ingest observe the closed handoff
+    // without out-of-band socket interruption.
+    leader.advance(1).await;
+    leader.sync().await;
+    time::timeout(TIMEOUT, shutdown.as_mut())
+        .await
+        .expect("shutdown completes after the next leader block");
+    drop(shutdown);
+    assert_eq!(follower.superblocks().position(), expected);
+
+    let (dirs, authority) = follower.close().await;
+    let mut follower = TestEngine::with(dirs, authority).await;
+    assert_eq!(follower.superblocks().position(), expected);
+
+    let mut positions = stream(addr, &mut follower);
+    leader.advance(1).await;
+    let expected = leader.sync().await;
+    await_position(&mut positions, expected).await;
+
+    close_follower(follower, &mut leader).await;
+    second_dispatcher.terminate().await;
     leader.close().await;
 }
 
@@ -568,8 +636,8 @@ async fn restores_the_newest_snapshot_then_streams_its_tail() {
     let mut positions = stream(addr, &mut follower);
     await_replication(&mut positions, &follower, expected, state, 30).await;
 
+    close_follower(follower, &mut leader).await;
     dispatcher.terminate().await;
-    follower.close().await;
     leader.close().await;
 }
 
@@ -651,9 +719,9 @@ async fn cascades_replication_through_a_follower() {
     assert_eq!(middle.superblocks().sealed(), leader.superblocks().sealed());
     assert_eq!(tail.superblocks().sealed(), leader.superblocks().sealed());
 
-    leader_dispatcher.terminate().await;
+    close_follower(tail, &mut leader).await;
+    close_follower(middle, &mut leader).await;
     middle_dispatcher.terminate().await;
-    tail.close().await;
-    middle.close().await;
+    leader_dispatcher.terminate().await;
     leader.close().await;
 }

@@ -1,17 +1,17 @@
 use std::{
     fs::{self, File},
     io::{self, BufReader, Read},
+    mem,
     net::{SocketAddr, TcpStream},
-    sync::mpsc,
-    thread,
+    thread::{self, JoinHandle},
 };
 
 use derive_more::Deref;
 use engine::{
-    Engine, EngineError, ReplayError, TransactionAccessor, VerifiedTransaction,
-    pacemaker::ExternalBlock,
+    Engine, EngineError, ReplayError, TransactionAccessor, TransactionVerifier,
+    VerifiedTransaction, pacemaker::ExternalBlock,
 };
-use flume::{Sender, TrySendError};
+use flume::{Receiver, Sender, TrySendError};
 use ledger::{
     Superblock,
     schema::{Block, OwnedBlockstoreEntry, blockstore},
@@ -20,7 +20,7 @@ use nucleus::{
     KB,
     ledger::{ACCOUNTSDB_SNAPSHOT_FILE, BlockstorePosition},
     runtime::BarrierHandle,
-    shutdown::{CancellationToken, Service, ShutdownHandle, ShutdownManager, ShutdownReason},
+    shutdown::{Service, ShutdownHandle, ShutdownManager, ShutdownReason},
 };
 use tokio::{
     runtime,
@@ -38,7 +38,6 @@ use crate::{
 };
 
 type ReplicationStream = BufReader<TcpStream>;
-type ReconnectReply = mpsc::SyncSender<BlockstorePosition>;
 
 /// Maximum transactions retained before offering a batch to Control.
 const MAX_BATCH_TRANSACTIONS: usize = 128;
@@ -46,27 +45,13 @@ const MAX_BATCH_TRANSACTIONS: usize = 128;
 const MAX_BATCH_BYTES: usize = 128 * KB;
 
 /// Consecutive transaction payloads accumulated between ordered stream fences.
+#[derive(Default)]
 struct TransactionsBatch {
-    /// Raw transaction payloads in stream order.
     transactions: Vec<Vec<u8>>,
-    /// Cumulative payload bytes used to enforce the batch bound.
     bytes: usize,
 }
 
-impl Default for TransactionsBatch {
-    fn default() -> Self {
-        Self {
-            transactions: Vec::with_capacity(MAX_BATCH_TRANSACTIONS),
-            bytes: 0,
-        }
-    }
-}
-
 impl TransactionsBatch {
-    fn is_empty(&self) -> bool {
-        self.transactions.is_empty()
-    }
-
     fn push(&mut self, transaction: Vec<u8>) {
         self.bytes = self.bytes.saturating_add(transaction.len());
         self.transactions.push(transaction);
@@ -75,55 +60,57 @@ impl TransactionsBatch {
     fn is_full(&self) -> bool {
         self.transactions.len() >= MAX_BATCH_TRANSACTIONS || self.bytes >= MAX_BATCH_BYTES
     }
-
-    fn take(&mut self) -> Vec<Vec<u8>> {
-        self.bytes = 0;
-        std::mem::replace(
-            &mut self.transactions,
-            Vec::with_capacity(MAX_BATCH_TRANSACTIONS),
-        )
-    }
 }
 
-/// Ordered handoff from blocking stream ingest to asynchronous Engine control.
+/// Ordered handoff from blocking Ingest to asynchronous Control.
 enum ReplicationMessage {
-    /// Raw batch offered to Control for signature verification.
+    /// Raw transactions awaiting authority and signature verification.
     Unverified(Vec<Vec<u8>>),
-    /// Verification result completed by Ingest while Control was occupied.
-    Verified(engine::Result<Vec<VerifiedTransaction>>),
-    /// Control entry fenced behind every preceding transaction batch.
+    /// Transactions verified by Ingest while Control was occupied.
+    Verified(Vec<VerifiedTransaction>),
+    /// Non-transaction entry fenced behind every preceding batch.
     Entry(OwnedBlockstoreEntry),
-    /// Successful handshake allowing Control to release its sequencing barrier.
-    Connected,
-    /// Lost stream requesting Control's next durable resume position.
-    Disconnected(ReconnectReply),
 }
 
-/// Owns stream decoding, bounded transaction accumulation, and opportunistic verification.
+/// Why connection-scoped Ingest stopped without a terminal replication error.
+enum IngestExit {
+    /// Control dropped its receiver after reaching a boundary or terminal error.
+    Stopped,
+    /// The transport failed after all preceding entries were handed to Control.
+    Disconnected(wincode::io::ReadError),
+}
+
+/// Why Control stopped consuming one connection.
+enum ControlExit {
+    /// Normal shutdown reached and flushed a validated block boundary.
+    Boundary(BlockstorePosition),
+    /// Ingest ended; its join result determines whether to reconnect or fail.
+    HandoffClosed,
+}
+
+/// Decodes one connection and opportunistically verifies bounded transaction batches.
 struct Ingest {
-    /// Engine used for batch verification and authenticated stream recovery.
-    engine: Engine,
-    /// Upstream replication endpoint reused across reconnects.
-    addr: SocketAddr,
-    /// Consecutive transactions awaiting an ordered handoff.
+    /// Blocking stream for one authenticated connection.
+    stream: ReplicationStream,
+    /// Transactions accumulated until a size or entry fence.
     batch: TransactionsBatch,
-    /// Rendezvous sender preserving ingest-to-Control message order.
+    /// Rendezvous handoff preserving decoded stream order.
     tx: Sender<ReplicationMessage>,
-    /// Cancellation scoped to the ingest worker lifecycle.
-    shutdown: CancellationToken,
+    /// Authority-bound verifier used when Control is occupied.
+    verifier: TransactionVerifier,
 }
 
 /// Pulls a leader blockstore stream into an externally paced follower engine.
 #[derive(Deref)]
 pub struct ReplicationClient {
-    /// Engine receiving replicated transactions, boundaries, seals, and resets.
+    /// Engine receiving replicated state.
     #[deref]
     engine: Engine,
-    /// Leader endpoint reused after transport loss.
+    /// Leader endpoint reused for reconnects.
     addr: SocketAddr,
-    /// External pacemaker channel used to preserve block-boundary ordering.
+    /// External block source for the follower pacemaker.
     pacer: PacerSender<ExternalBlock>,
-    /// Locally committed block boundaries used to verify replicated output.
+    /// Locally committed blocks used to validate replicated boundaries.
     blocks: BlockReceiver<Block>,
 }
 
@@ -138,7 +125,6 @@ impl ReplicationClient {
         metrics::init();
         let shutdown = shutdown.handle(Service::ReplicationClient);
         let mut blocks = engine.blocks().subscribe();
-        // drain the channel from potential leftovers
         while blocks.try_recv().is_ok() {}
         let client = Self { engine, addr, pacer, blocks };
         let rt = runtime::Builder::new_current_thread().enable_time().build()?;
@@ -148,102 +134,88 @@ impl ReplicationClient {
         Ok(())
     }
 
-    /// Consumes the leader stream and reports why the client stopped.
+    /// Reports the terminal client outcome to shutdown management.
     async fn serve(self, mut shutdown: ShutdownHandle) {
-        let result = self.run(&shutdown).await;
-        if shutdown.requested() || result.is_ok() {
-            shutdown.terminate(ShutdownReason::Signalled);
-            return;
-        }
-        match result {
+        let reason = match self.run(&shutdown).await {
+            Ok(position) => {
+                info!(?position, "replication stopped at a durable boundary");
+                ShutdownReason::Signalled
+            }
             Err(ReplicationError::RestartRequired(slot)) => {
                 info!(%slot, "replication client has requested node restart");
-                shutdown.terminate(ShutdownReason::RestartRequired);
+                ShutdownReason::RestartRequired
             }
-            Err(error) => {
-                shutdown.terminate(ShutdownReason::Error(Box::new(error)));
-            }
-            Ok(()) => (),
-        }
-    }
-
-    /// Starts Ingest and joins it after Control stops consuming its ordered messages.
-    async fn run(self, shutdown: &ShutdownHandle) -> Result<()> {
-        let (guard, position) = self.resume().await?;
-        let (tx, rx) = flume::bounded(0);
-        let cancellation = shutdown.child();
-        let mut ingest = Ingest {
-            engine: self.engine.clone(),
-            addr: self.addr,
-            batch: Default::default(),
-            tx,
-            shutdown: cancellation.clone(),
+            Err(error) => ShutdownReason::Error(Box::new(error)),
         };
-        let rt = runtime::Builder::new_current_thread().enable_time().build()?;
-        let ingest = thread::Builder::new()
-            .name("replication-ingest".into())
-            .spawn(move || rt.block_on(ingest.run(position)))?;
-        let mut result = self.consume(shutdown, rx, guard).await;
-        cancellation.cancel();
-        match ingest.join() {
-            Ok(Ok(())) => info!("replication ingest has gracefully shutdown"),
-            Ok(Err(error)) => result = result.and(Err(error)),
-            Err(error) => error!(?error, "replication ingest panicked"),
-        }
-        result
+        shutdown.terminate(reason);
     }
 
-    /// Consumes ordered Ingest messages until shutdown or a terminal failure.
-    async fn consume(
-        mut self,
-        shutdown: &ShutdownHandle,
-        rx: flume::Receiver<ReplicationMessage>,
-        guard: BarrierHandle,
-    ) -> Result<()> {
-        let verifier = self.verifier();
-        let mut connected = None;
-        let mut barrier = Some(guard);
-
+    /// Owns connection recovery and returns success only at a validated block boundary.
+    async fn run(mut self, shutdown: &ShutdownHandle) -> Result<BlockstorePosition> {
+        let (mut barrier, mut position) = self.resume().await?;
         loop {
-            if shutdown.requested() {
-                return Ok(());
+            let stream = self.reconnect(position).await?;
+            let connected = metrics::client_connection();
+            drop(barrier);
+
+            let (rx, ingest) = Ingest::spawn(stream, self.verifier())?;
+            let control = self.consume(shutdown, &rx).await;
+            drop(rx);
+            let ingest = ingest.join().map_err(|_| ReplicationError::IngestPanicked)?;
+            drop(connected);
+
+            match control {
+                Ok(ControlExit::Boundary(position)) => return Ok(position),
+                Err(error) => return Err(error),
+                Ok(ControlExit::HandoffClosed) => match ingest? {
+                    IngestExit::Disconnected(error) => {
+                        warn!(%error, "replication stream disconnected");
+                        (barrier, position) = self.resume().await?;
+                    }
+                    IngestExit::Stopped => return Err(ReplicationError::IngestStopped),
+                },
             }
-            // Complete a ready handoff before observing concurrent cancellation.
+        }
+    }
+
+    /// Consumes one Ingest stream, draining normal shutdown to the next block.
+    async fn consume(
+        &mut self,
+        shutdown: &ShutdownHandle,
+        rx: &Receiver<ReplicationMessage>,
+    ) -> Result<ControlExit> {
+        let verifier = self.verifier();
+        let mut draining = shutdown.requested();
+        loop {
             let message = tokio::select! {
                 biased;
                 message = rx.recv_async() => match message {
-                    Ok(m) => m,
-                    // Ingest has shutdown, the potential error will be captured by caller
-                    Err(_) => return Ok(()),
+                    Ok(message) => message,
+                    Err(_) => return Ok(ControlExit::HandoffClosed),
                 },
-                _ = shutdown.signalled() => break,
-
+                _ = shutdown.signalled(), if !draining => {
+                    draining = true;
+                    continue;
+                },
             };
             match message {
                 ReplicationMessage::Unverified(batch) => {
-                    let verified = verifier.verify(batch)?;
-                    self.schedule(verified).await?;
+                    self.schedule(verifier.verify(batch)?).await?;
                 }
-                ReplicationMessage::Verified(result) => self.schedule(result?).await?,
-                ReplicationMessage::Entry(entry) => self.process(entry).await?,
-                ReplicationMessage::Connected => {
-                    connected = Some(metrics::client_connection());
-                    barrier.take();
-                }
-                ReplicationMessage::Disconnected(reply) => {
-                    connected.take();
-                    let (guard, position) = self.resume().await?;
-                    barrier = Some(guard);
-                    if reply.send(position).is_err() {
-                        return Err(ReplicationError::StreamClosed);
+                ReplicationMessage::Verified(batch) => self.schedule(batch).await?,
+                ReplicationMessage::Entry(entry) => {
+                    let boundary = matches!(entry, OwnedBlockstoreEntry::Block(_));
+                    self.process(entry).await?;
+                    if boundary && draining {
+                        let (_guard, position) = self.resume().await?;
+                        return Ok(ControlExit::Boundary(position));
                     }
                 }
             }
         }
-        Ok(())
     }
 
-    /// Schedules a verified batch in stream order without repeating admission checks.
+    /// Schedules a verified batch in stream order.
     async fn schedule(&self, transactions: Vec<VerifiedTransaction>) -> Result<()> {
         for transaction in transactions {
             TransactionAccessor::verified(&self.engine, transaction).schedule().await?;
@@ -251,14 +223,14 @@ impl ReplicationClient {
         Ok(())
     }
 
-    /// Applies one control entry after all preceding transactions are scheduled.
+    /// Applies and validates one non-transaction stream entry.
     async fn process(&mut self, entry: OwnedBlockstoreEntry) -> Result<()> {
         match entry {
             OwnedBlockstoreEntry::Block(block) => {
                 let (external, guard) = ExternalBlock::new(block);
                 self.pacer.send(external).await.map_err(EngineError::from)?;
                 let pending = time::timeout(IO_TIMEOUT, self.blocks.recv());
-                let observed = pending.await?.ok_or(ReplicationError::StreamClosed)?;
+                let observed = pending.await?.ok_or(ReplicationError::BlockStreamClosed)?;
                 if block != observed {
                     let error = ReplayError::BlockhashMismatch(block.slot);
                     Err(EngineError::from(error))?;
@@ -266,7 +238,6 @@ impl ReplicationClient {
                 guard.await.map_err(EngineError::from)?;
             }
             OwnedBlockstoreEntry::Superblock(expected) => {
-                // The preceding boundary finalized local state; this seal only validates it.
                 let observed = self.superblocks().sealed();
                 if observed != expected {
                     error!(?expected, ?observed, "replication state mismatch detected");
@@ -277,101 +248,20 @@ impl ReplicationClient {
             OwnedBlockstoreEntry::Reset(slot) => {
                 self.engine.replay(OwnedBlockstoreEntry::Reset(slot)).await?;
             }
-            OwnedBlockstoreEntry::Transaction(_) => (),
+            OwnedBlockstoreEntry::Transaction(_) => unreachable!("Ingest batches transactions"),
         }
         Ok(())
     }
 
-    /// Flushes prior work and returns its durable cursor under a sequencing barrier.
     async fn resume(&self) -> Result<(BarrierHandle, BlockstorePosition)> {
         let guard = self.barrier().await?;
-        self.sync(false)?;
+        self.superblocks().sync(false)?;
         Ok((guard, self.superblocks().position()))
     }
-}
 
-impl Ingest {
-    /// Decodes the stream while preserving the order of transactions and control entries.
-    async fn run(&mut self, position: BlockstorePosition) -> Result<()> {
-        let mut stream = self.open(position).await?;
-        while !self.shutdown.is_cancelled() {
-            match blockstore::decode(&mut stream) {
-                Ok(OwnedBlockstoreEntry::Transaction(transaction)) => {
-                    if !self.push(transaction) {
-                        return Ok(());
-                    }
-                }
-                Ok(entry) => {
-                    if !self.flush() {
-                        return Ok(());
-                    }
-                    self.tx
-                        .send(ReplicationMessage::Entry(entry))
-                        .map_err(|_| ReplicationError::StreamClosed)?;
-                }
-                Err(wincode::error::ReadError::Io(error)) => {
-                    warn!(%error, "replication stream disconnected");
-                    drop(stream);
-                    if !self.flush() {
-                        return Ok(());
-                    }
-                    let position = self.request_position()?;
-                    stream = self.open(position).await?;
-                }
-                Err(error) => {
-                    if !self.flush() {
-                        return Ok(());
-                    }
-                    return Err(wincode::Error::from(error).into());
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Adds a transaction and flushes once either batch bound is reached.
-    fn push(&mut self, transaction: Vec<u8>) -> bool {
-        self.batch.push(transaction);
-        !self.batch.is_full() || self.flush()
-    }
-
-    /// Offers the batch to Control, verifying it locally when Control is occupied.
-    fn flush(&mut self) -> bool {
-        if self.batch.is_empty() {
-            return true;
-        }
-        let batch = self.batch.take();
-        match self.tx.try_send(ReplicationMessage::Unverified(batch)) {
-            Ok(()) => true,
-            Err(TrySendError::Full(ReplicationMessage::Unverified(batch))) => {
-                let result = self.engine.verifier().verify(batch);
-                let valid = result.is_ok();
-                self.tx.send(ReplicationMessage::Verified(result)).is_ok() && valid
-            }
-            Err(_) => false,
-        }
-    }
-
-    /// Requests a durable resume cursor after Control finishes all preceding work.
-    fn request_position(&self) -> Result<BlockstorePosition> {
-        let (reply, response) = mpsc::sync_channel(0);
-        let _ = self.tx.send(ReplicationMessage::Disconnected(reply));
-        response.recv().map_err(|_| ReplicationError::StreamClosed)
-    }
-
-    /// Reconnects from `position` and tells Control it may release the barrier.
-    async fn open(&mut self, position: BlockstorePosition) -> Result<ReplicationStream> {
-        let stream = self.reconnect(position).await?;
-        let _ = self.tx.send(ReplicationMessage::Connected);
-        Ok(stream)
-    }
-
-    /// Retries transport establishment while the ordered resume cursor remains quiesced.
+    /// Retries transport establishment from one quiesced durable cursor.
     async fn reconnect(&self, position: BlockstorePosition) -> Result<ReplicationStream> {
         for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
-            if self.shutdown.is_cancelled() {
-                return Err(ReplicationError::StreamClosed);
-            }
             metrics::client_connection_attempt();
             match self.connect(position) {
                 Ok(stream) => {
@@ -386,15 +276,13 @@ impl Ingest {
                 }
                 Err(error) => return Err(error),
             }
-            let timeout = RETRY_DELAY * attempt as u32;
-            if time::timeout(timeout, self.shutdown.cancelled()).await.is_ok() {
-                Err(ReplicationError::StreamClosed)?;
-            }
+            let delay = RETRY_DELAY * attempt as u32;
+            time::interval_at(time::Instant::now() + delay, delay).tick().await;
         }
         Err(ReplicationError::ReconnectExhausted)
     }
 
-    /// Handshakes at `position`, staging a snapshot when streaming cannot resume.
+    /// Authenticates one resume request and returns its blockstore stream.
     fn connect(&self, position: BlockstorePosition) -> Result<ReplicationStream> {
         let _timer = metrics::time(Operation::ClientConnect);
         let mut connection = TcpStream::connect_timeout(&self.addr, IO_TIMEOUT)?;
@@ -428,10 +316,9 @@ impl Ingest {
         }
     }
 
-    /// Stages a complete snapshot and installs its seal for the requested restart.
+    /// Durably stages a snapshot and records its bootstrap seal.
     fn stage_snapshot(&self, connection: &mut TcpStream, meta: SnapshotMetadata) -> Result<()> {
         let _timer = metrics::time(Operation::ClientStageSnapshot);
-        // Stage in the successor before seal rotation so restart can find it.
         let superblocks = self.engine.superblocks();
         let dir = Superblock::init_dir(superblocks.directory(), meta.id + 1)?;
         let archive = dir.join(ACCOUNTSDB_SNAPSHOT_FILE);
@@ -447,5 +334,72 @@ impl Ingest {
         superblocks.bootstrap(meta.superblock)?;
         info!(?meta, "replication snapshot staged");
         Ok(())
+    }
+}
+
+impl Ingest {
+    /// Starts one blocking decoder for an authenticated connection.
+    fn spawn(
+        stream: ReplicationStream,
+        verifier: TransactionVerifier,
+    ) -> Result<(Receiver<ReplicationMessage>, JoinHandle<Result<IngestExit>>)> {
+        let (tx, rx) = flume::bounded(0);
+        let ingest = Self {
+            stream,
+            batch: Default::default(),
+            tx,
+            verifier,
+        };
+        let worker = thread::Builder::new()
+            .name("replication-ingest".into())
+            .spawn(move || ingest.run())?;
+        Ok((rx, worker))
+    }
+
+    /// Decodes until transport loss, terminal failure, or Control exit.
+    fn run(mut self) -> Result<IngestExit> {
+        loop {
+            match blockstore::decode(&mut self.stream) {
+                Ok(OwnedBlockstoreEntry::Transaction(transaction)) => {
+                    self.batch.push(transaction);
+                    if self.batch.is_full() && !self.flush()? {
+                        return Ok(IngestExit::Stopped);
+                    }
+                }
+                Ok(entry) => {
+                    if !self.flush()? || self.tx.send(ReplicationMessage::Entry(entry)).is_err() {
+                        return Ok(IngestExit::Stopped);
+                    }
+                }
+                Err(wincode::error::ReadError::Io(error)) => {
+                    if !self.flush()? {
+                        return Ok(IngestExit::Stopped);
+                    }
+                    return Ok(IngestExit::Disconnected(error));
+                }
+                Err(error) => {
+                    if !self.flush()? {
+                        return Ok(IngestExit::Stopped);
+                    }
+                    return Err(wincode::Error::from(error).into());
+                }
+            }
+        }
+    }
+
+    /// Offers raw work to idle Control, otherwise verifies without losing stream order.
+    fn flush(&mut self) -> Result<bool> {
+        if self.batch.transactions.is_empty() {
+            return Ok(true);
+        }
+        let batch = mem::take(&mut self.batch).transactions;
+        match self.tx.try_send(ReplicationMessage::Unverified(batch)) {
+            Ok(()) => Ok(true),
+            Err(TrySendError::Full(ReplicationMessage::Unverified(batch))) => {
+                let verified = self.verifier.verify(batch)?;
+                Ok(self.tx.send(ReplicationMessage::Verified(verified)).is_ok())
+            }
+            Err(_) => Ok(false),
+        }
     }
 }
