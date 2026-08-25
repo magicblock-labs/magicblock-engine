@@ -1,7 +1,9 @@
 //! Ledger test modules.
 //!
-//! `index` covers the Fjall codec/index in isolation; `integration` drives the
-//! append→seal→read pipeline end to end through the appender and reader.
+//! `codec` covers serialization and compression, `index` covers Fjall storage,
+//! and `integration` drives the append→seal→read pipeline end to end through
+//! the appender and reader.
 
+mod codec;
 mod index;
 mod integration;

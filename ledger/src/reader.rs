@@ -22,7 +22,7 @@ use wincode::{Error, io::Cursor};
 use zstd::bulk::Decompressor;
 
 use crate::{
-    Ledger, LedgerError, Result, Superblock,
+    Ledger, LedgerError, Result, Superblock, codec,
     index::{IndexReader, Span},
     metrics::{self, Operation},
     request::{
@@ -59,7 +59,7 @@ impl LedgerReader {
         Ok(Self {
             rx,
             ledger,
-            decompressor: Decompressor::new()?,
+            decompressor: codec::decompressor()?,
             buffers,
         })
     }

@@ -17,7 +17,7 @@ use wincode::Error;
 use zstd::bulk::Compressor;
 
 use crate::{
-    Ledger, Superblock,
+    Ledger, Superblock, codec,
     error::{LedgerError, Result},
     index::{IndexWriter, Span, TxSpan},
     metrics::{self, Operation},
@@ -120,7 +120,8 @@ impl LedgerAppender {
     fn rotate(&mut self, seal: SuperblockSeal) -> Result<()> {
         let _timer = metrics::time(Operation::Rotate);
         let head = seal.id + 1;
-        let superblock = Superblock::open(&self.ledger.directory, head, &self.ledger.index)?;
+        let meta = Superblock::open_meta(&self.ledger.directory, head)?;
+        let superblock = Superblock::open(meta, &self.ledger.index)?;
         // Seal N opens N+1, which stores N's snapshot archive and seal metadata.
         superblock.meta.checksum.store(seal.checksum, Release);
         superblock.meta.transactions.store(seal.transactions, Release);
@@ -302,7 +303,7 @@ impl SuperblockWriter {
                 &superblock.meta.cursors.executions,
             )?,
             superblock,
-            compressor: Compressor::new(0)?,
+            compressor: codec::compressor()?,
             buffer: Buffer::new(),
         })
     }
