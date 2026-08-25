@@ -1,6 +1,11 @@
 //! Startup seeding, corruption recovery
 
+use std::fs;
+
+use nucleus::testkit::{V42_ID, block, signed_view};
 use solana_account::{AccountBuilder, AccountMode, ReadableAccount};
+use solana_instruction::Instruction;
+use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
 use solana_sdk_ids::{loader_v4, sysvar};
 use solana_sysvar::{
@@ -8,6 +13,7 @@ use solana_sysvar::{
 };
 
 use super::TestKeeper;
+use crate::ResolvedTransaction;
 use crate::testkit::{Dirs, archived_snapshot, corrupt, keeper_builder, seal_and_archive};
 
 // Startup seeds the engine's required feature gates, the configured upgradeable
@@ -119,6 +125,50 @@ async fn recovers_the_newest_snapshot() {
     // The corrupt tree saved for inspection is removed on successful recovery.
     assert!(!keeper.dirs.accounts.path().join("CURRENT.bkp").exists());
 
+    keeper.close().await;
+}
+
+/// Proves startup merges ledger history beyond SlotHashes and falls back to SlotHashes alone.
+#[tokio::test]
+async fn restores_blockhash_history_from_ledger_and_snapshot() {
+    let dirs = Dirs::default();
+    let builder = keeper_builder(&dirs);
+    let keeper = TestKeeper::from_builder(dirs, builder.clone()).await;
+    for slot in 1..=600 {
+        keeper.blocks().append(block(slot), false).unwrap();
+    }
+    let ledger_hash = block(50).hash;
+    let snapshot_hash = block(100).hash;
+    let dirs = keeper.close().await;
+
+    let keeper = TestKeeper::from_builder(dirs, builder.clone()).await;
+    assert!(
+        keeper.blocks().is_valid(&ledger_hash),
+        "slot 50 remains inside the 600-slot TTL but outside SlotHashes"
+    );
+    keeper.accounts().dump(None).unwrap();
+    let dirs = keeper.close().await;
+    fs::remove_dir_all(dirs.ledger.path()).unwrap();
+    fs::create_dir(dirs.ledger.path()).unwrap();
+
+    let keeper = TestKeeper::from_builder(dirs, builder).await;
+    assert!(
+        !keeper.blocks().is_valid(&ledger_hash),
+        "clean ledger cannot restore history older than SlotHashes"
+    );
+    assert!(keeper.blocks().is_valid(&snapshot_hash));
+    let payer = Keypair::new();
+    let (_, view) = signed_view(
+        &payer,
+        [Instruction::new_with_bytes(V42_ID, &[], vec![])],
+        snapshot_hash,
+    );
+    let transaction =
+        ResolvedTransaction::try_new(view, Some(Default::default()), &Default::default()).unwrap();
+    assert!(
+        keeper.transactions().append(&transaction).await.unwrap(),
+        "snapshot-retained non-latest hash remains valid without ledger history"
+    );
     keeper.close().await;
 }
 

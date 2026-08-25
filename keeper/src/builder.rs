@@ -11,7 +11,7 @@ use accountsdb::{AccountEntry, AccountsDB, AccountsDBError, BackupOp, SnapshotEr
 use agave_feature_set::FeatureSet;
 use ledger::{
     Ledger, LedgerHandle,
-    request::{BlockDetails, BlockParams, ReadRequest, RequestPayload},
+    request::{ReadRequest, RequestPayload},
 };
 use nucleus::{
     Slot,
@@ -39,7 +39,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     Keeper,
-    cache::{AccountCache, BlocksCache, Caches, ExpiringCache},
+    cache::{AccountCache, BlockSeed, BlocksCache, Caches, ExpiringCache},
     error::Result,
     metrics,
     subscriptions::Subscriptions,
@@ -80,8 +80,8 @@ impl KeeperBuilder {
     pub async fn build(mut self, shutdown: &mut ShutdownManager) -> Result<Keeper> {
         let ledger = Ledger::init(&self.ledger.directory, self.ledger.size_limit, shutdown)?;
         let accountsdb = self.accountsdb(&ledger)?;
-        let (block, featureset) = self.prepopulate(&accountsdb, &ledger).await?;
-        let caches = self.caches(block);
+        let (blocks, featureset) = self.prepopulate(&accountsdb, &ledger).await?;
+        let caches = self.caches(blocks);
         metrics::init();
         Ok(Keeper {
             authority: self.authority,
@@ -99,11 +99,11 @@ impl KeeperBuilder {
         &mut self,
         accountsdb: &AccountsDB,
         ledger: &LedgerHandle,
-    ) -> Result<(Block, FeatureSet)> {
+    ) -> Result<(BlockSeed, FeatureSet)> {
         let mut accounts = Vec::new();
         let featureset = self.seed_featureset(&mut accounts)?;
         self.seed_programs(&mut accounts)?;
-        let block = self.seed_sysvars(accountsdb, ledger, &mut accounts).await?;
+        let blocks = self.seed_sysvars(accountsdb, ledger, &mut accounts).await?;
         let authority = self.authority.pubkey();
         if accountsdb.loader().load(&authority)?.is_none() {
             let sponsor = AccountBuilder::default()
@@ -113,18 +113,21 @@ impl KeeperBuilder {
         }
         accounts.extend(self.accounts.drain());
         accountsdb.store(&accounts)?;
-        Ok((block, featureset))
+        Ok((blocks, featureset))
     }
 
     /// Builds read-side caches using blocktime-derived slot TTLs.
-    fn caches(&self, latest: Block) -> Caches {
-        let blocktime = self.blockstore.blocktime;
-        let ttl = |window: Duration| window.div_duration_f64(blocktime).ceil() as Slot;
-        let blocks = BlocksCache::new(latest, ttl(BLOCK_CACHE_WINDOW));
-        let signatures = ExpiringCache::new(ttl(SIGNATURE_CACHE_WINDOW));
+    fn caches(&self, blocks: BlockSeed) -> Caches {
+        let blocks = BlocksCache::new(blocks, self.ttl(BLOCK_CACHE_WINDOW));
+        let signatures = ExpiringCache::new(self.ttl(SIGNATURE_CACHE_WINDOW));
         let accounts = Arc::new(AccountCache::new(self.accountsdb.lru_capacity));
 
         Caches { signatures, blocks, accounts }
+    }
+
+    /// Converts a wall-clock cache window into whole configured block slots.
+    fn ttl(&self, window: Duration) -> Slot {
+        window.div_duration_f64(self.blockstore.blocktime).ceil() as Slot
     }
 
     /// Activates the engine's required feature gates at slot 0, seeds a feature
@@ -176,44 +179,43 @@ impl KeeperBuilder {
 
     /// Seeds sysvars derived from retained ledger state and keeper config.
     ///
-    /// Returns the latest available block, resolved from accountsdb or ledger
+    /// Returns the latest available block and its anchored retained history.
     async fn seed_sysvars(
         &self,
         accountsdb: &AccountsDB,
         ledger: &LedgerHandle,
         accounts: &mut Vec<AccountEntry>,
-    ) -> Result<Block> {
+    ) -> Result<BlockSeed> {
         let slot = accountsdb.slot();
         let loader = accountsdb.loader();
-        let mut last_block = None;
-        if let Some(hashes) = loader.load(&SlotHashes::id())? {
-            let hashes = hashes.deserialize_data::<SlotHashes>().map_err(AccountsDBError::from)?;
-            // `SlotHashes` is ordered newest-first, so the latest block is `first`
-            if let Some(&(slot, hash)) = hashes.first() {
-                let parent = &slot.saturating_sub(1);
-                let parent = hashes.get(parent).copied().unwrap_or_default();
-                let time = self.blocktime(ledger, slot).await?;
-                last_block.replace(Block { slot, hash, time, parent });
-            }
-        } else {
-            let range = slot.saturating_sub(SLOTHASH_ENTRIES as u64)..slot + 1;
-            let (payload, handle) = RequestPayload::new(range);
-            ledger.reader.send(ReadRequest::BlockRange(payload))?;
+        let slothashes = loader
+            .load(&SlotHashes::id())?
+            .map(|account| account.deserialize_data::<SlotHashes>().map_err(AccountsDBError::from))
+            .transpose()?;
 
+        let retained = self.ttl(BLOCK_CACHE_WINDOW).max(SLOTHASH_ENTRIES as Slot);
+        let start = slot.saturating_sub(retained - 1);
+        let (payload, handle) = RequestPayload::new(start..slot.saturating_add(1));
+        ledger.reader.send(ReadRequest::BlockRange(payload))?;
+        let blocks = handle.recv_timeout().await??;
+
+        if slothashes.is_none() {
+            // Keep the sysvar account at its fixed serialized capacity so live
+            // updates can replace entries without resizing the account.
             let mut hashes = SlotHashes::new(&[Default::default(); SLOTHASH_ENTRIES]);
-            for block in handle.recv_timeout().await?? {
+            for block in blocks.iter().take(SLOTHASH_ENTRIES) {
                 hashes.add(block.slot, block.hash);
-                last_block.replace(block);
             }
             let acc = self.account(&hashes, &sysvar::ID)?;
             accounts.push((SlotHashes::id(), acc.build()));
         }
 
-        let block = last_block.unwrap_or_default();
+        let blocks = Self::block_seed(blocks, slothashes.as_ref());
+
         // Set the clock slot one ahead from the last
         let clock = Clock {
-            slot: block.slot + 1,
-            unix_timestamp: block.time,
+            slot: blocks.latest.slot + 1,
+            unix_timestamp: blocks.latest.time,
             ..Default::default()
         };
         accounts.push((Clock::id(), self.account(&clock, &sysvar::ID)?.build()));
@@ -239,7 +241,26 @@ impl KeeperBuilder {
             EpochRewards::id(),
             self.account(&EpochRewards::default(), &sysvar::ID)?.build(),
         ));
-        Ok(block)
+        Ok(blocks)
+    }
+
+    /// Extends persisted SlotHashes with older retained ledger history.
+    fn block_seed(blocks: Vec<Block>, slothashes: Option<&SlotHashes>) -> BlockSeed {
+        let Some(hashes) = slothashes.map(SlotHashes::slot_hashes) else {
+            let latest = blocks.first().copied().unwrap_or_default();
+            let history = blocks.iter().rev().map(|b| (b.slot, b.hash)).collect();
+            return BlockSeed { latest, history };
+        };
+        let mut history = hashes.to_vec();
+        history.extend(blocks.iter().skip(history.len()).map(|b| (b.slot, b.hash)));
+        let latest = history.first().map_or(Block::default(), |&(slot, hash)| Block {
+            slot,
+            hash,
+            time: blocks.first().map_or(0, |b| b.time),
+            parent: history.get(1).map(|(_, hash)| *hash).unwrap_or_default(),
+        });
+        history.reverse();
+        BlockSeed { latest, history }
     }
 
     /// Builds a rent-exempt system account containing a serialized sysvar-like state.
@@ -250,15 +271,6 @@ impl KeeperBuilder {
         Ok(AccountBuilder::from(account).lamports(lamports).mode(AccountMode::System))
     }
 
-    /// Returns the retained block time for the given slot.
-    async fn blocktime(&self, ledger: &LedgerHandle, slot: Slot) -> Result<i64> {
-        let (payload, handle) = RequestPayload::new(BlockParams {
-            slot,
-            details: BlockDetails::None,
-        });
-        ledger.reader.send(ReadRequest::Block(payload))?;
-        Ok(handle.recv_timeout().await??.map(|r| r.block().time).unwrap_or_default())
-    }
     /// Opens accountsdb, restoring the newest archived snapshot after corruption.
     ///
     /// A restored store trails the ledger tip — snapshots are archived at sealed

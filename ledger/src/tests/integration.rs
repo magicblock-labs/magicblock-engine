@@ -496,7 +496,7 @@ async fn test_reopen_resumes_state() {
     assert_eq!(ledger.meta.blocks.load(Acquire), 2);
 }
 
-// A block-range read returns every block in the range, in ascending slot order,
+// A block-range read returns every block in the range, in descending slot order,
 // even when the range straddles a superblock boundary. The reader walks slots
 // descending across superblocks newest-first, so a boundary slot must be handed
 // to the older segment instead of being consumed against the newer one.
@@ -519,13 +519,13 @@ async fn test_block_range_spans_superblocks() {
             .map(|b| b.slot)
             .collect::<Vec<_>>()
     };
-    // The full range comes back once each, in order, across the boundary.
-    assert_eq!(slots(1..4).await, vec![1, 2, 3]);
+    // The full range comes back once each, newest-first, across the boundary.
+    assert_eq!(slots(1..4).await, vec![3, 2, 1]);
     // A sub-range inside one segment returns only its blocks.
     assert_eq!(slots(2..3).await, vec![2]);
     // A tail past the retained tip yields the retained blocks without dropping
     // the boundary slot.
-    assert_eq!(slots(1..9).await, vec![1, 2, 3]);
+    assert_eq!(slots(1..9).await, vec![3, 2, 1]);
 }
 
 // The account index keeps one entry per touching transaction, excludes unrelated

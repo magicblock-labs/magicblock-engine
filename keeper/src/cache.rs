@@ -146,13 +146,20 @@ pub(crate) struct BlocksCache {
 }
 
 impl BlocksCache {
-    /// Creates a block cache seeded with the current latest block.
-    pub(crate) fn new(block: Block, ttl: Slot) -> Self {
+    /// Creates a block cache seeded with retained history in ascending slot order.
+    pub(crate) fn new(blocks: BlockSeed, ttl: Slot) -> Self {
+        let latest = blocks.latest;
         let cache = Self {
-            latest: ArcSwap::new(block.into()),
+            latest: ArcSwap::new(latest.into()),
             history: ExpiringCache::new(ttl),
         };
-        cache.history.push(block.hash, block.slot, block.slot);
+        if blocks.history.is_empty() {
+            cache.history.push(latest.hash, latest.slot, latest.slot);
+        } else {
+            for (slot, hash) in blocks.history {
+                cache.history.push(hash, slot, slot);
+            }
+        }
         cache
     }
 
@@ -247,4 +254,11 @@ impl<K> ExpiringRecord<K> {
     fn expired(&self, instant: Slot) -> bool {
         instant >= self.expires
     }
+}
+
+/// Latest committed boundary and retained hash history used to seed block caches.
+pub(crate) struct BlockSeed {
+    pub(crate) latest: Block,
+    /// Entries are ordered oldest-to-newest and retain their original slots.
+    pub(crate) history: Vec<(Slot, SolanaHash)>,
 }
