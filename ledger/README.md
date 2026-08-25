@@ -16,8 +16,9 @@ superblock-000000001/
 
 `blockstore.db` is a wincode stream. Blockstore decoding permits allocations up
 to the ledger's 25-bit encoded entry-size bound (33,554,431 bytes); larger
-entries are rejected. Execution headers and bitcode details compressed at Zstd
-level 3 with the embedded dictionary are stored separately in `executions.db`.
+entries are rejected. Wincode-encoded execution headers and bitcode details
+compressed at Zstd level 3 with the embedded dictionary are both stored in
+`executions.db`.
 Frames omit Zstd dictionary IDs; the version stored first in each
 `superblock.meta` selects the storage format, including its execution-details
 codec. The current format is version 1. Changing the dictionary or codec

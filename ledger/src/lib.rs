@@ -152,17 +152,20 @@ impl Ledger {
     /// Opens ledger metadata and retained superblocks without starting services.
     fn new(directory: PathBuf, size_limit: u64) -> Result<Self> {
         fs::create_dir_all(&directory)?;
-        let index = Index::new(&directory)?;
         let meta = directory.join(LEDGER_META);
         // SAFETY: `LedgerMeta` and its nested headers have stable C layouts,
         // and all fields that can change while mapped are atomic. This process
         // exclusively creates and updates the metadata file at `meta`.
         let meta = unsafe { MetaMap::<LedgerMeta>::new(&meta) }?;
-        let retained = meta.superblocks();
+        let retained = meta
+            .superblocks()
+            .map(|id| Superblock::open_meta(&directory, id))
+            .collect::<Result<Vec<_>>>()?;
+        let index = Index::new(&directory)?;
         let mut superblocks = BTreeMap::new();
-        for id in retained {
-            let superblock = Superblock::open(&directory, id, &index)?;
-            superblocks.insert(id, superblock);
+        for meta in retained {
+            let id = meta.id;
+            superblocks.insert(id, Superblock::open(meta, &index)?);
         }
 
         info!(?directory, superblocks = superblocks.len(), "opened ledger");
@@ -273,6 +276,13 @@ pub struct Superblock {
     pub directory: PathBuf,
 }
 
+/// Mapped superblock metadata that passed format-version validation.
+struct ValidatedSuperblockMeta {
+    id: u64,
+    directory: PathBuf,
+    meta: MetaMap<SuperblockMeta>,
+}
+
 impl Superblock {
     /// Canonical directory and keyspace name for one superblock.
     fn name(id: u64) -> String {
@@ -295,13 +305,20 @@ impl Superblock {
         self.meta.transactions.load(Acquire)
     }
 
-    /// Opens a superblock directory, creating its data files when needed.
-    fn open(root: &Path, id: u64, index: &Index) -> Result<Arc<Self>> {
+    /// Maps and validates a superblock's metadata before opening shared storage.
+    fn open_meta(root: &Path, id: u64) -> Result<ValidatedSuperblockMeta> {
         let directory = Self::init_dir(root, id)?;
         let meta = unsafe { MetaMap::<SuperblockMeta>::new(&directory.join(SUPERBLOCK_META)) }?;
         if meta.version != VERSION {
             return Err(LedgerError::UnsupportedVersion(meta.version));
         }
+
+        Ok(ValidatedSuperblockMeta { id, directory, meta })
+    }
+
+    /// Opens a superblock's keyspace and data files from validated metadata.
+    fn open(validated: ValidatedSuperblockMeta, index: &Index) -> Result<Arc<Self>> {
+        let ValidatedSuperblockMeta { id, directory, meta } = validated;
         let index = index.keyspace(id)?;
         let blockstore = Self::file(&directory.join(BLOCKSTORE_DB))?;
         let executions = Self::file(&directory.join(EXECUTIONS_DB))?;
