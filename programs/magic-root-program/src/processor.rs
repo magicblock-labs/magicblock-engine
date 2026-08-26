@@ -77,7 +77,7 @@ fn dispatch(
 /// Decodes the current instruction's data into a [`MagicRootInstruction`].
 fn decode(ctx: &InvokeContext<'_, '_>) -> Result<MagicRootInstruction, InstructionError> {
     let instruction = ctx.transaction_context.get_current_instruction_context()?;
-    wincode::deserialize(instruction.get_instruction_data()).map_err(|_| {
+    wincode::deserialize_exact(instruction.get_instruction_data()).map_err(|_| {
         ic_msg!(ctx, "MagicRoot: malformed instruction data");
         InstructionError::InvalidInstructionData
     })
