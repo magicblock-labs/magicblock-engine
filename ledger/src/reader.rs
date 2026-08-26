@@ -230,7 +230,7 @@ impl LedgerReader {
         self.populate_block_response(&superblock, request, span).map(Some)
     }
 
-    /// Reads block boundaries for a slot range in ascending slot order.
+    /// Reads block boundaries for a slot range in descending slot order.
     fn blocks(&mut self, range: Range<Slot>) -> Result<Vec<Block>> {
         let mut blocks = Vec::with_capacity(range.clone().count());
         let Some(last) = range.end.checked_sub(1) else { return Ok(blocks) };
@@ -251,7 +251,6 @@ impl LedgerReader {
                 }
             }
         }
-        blocks.reverse();
         Ok(blocks)
     }
 

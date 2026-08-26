@@ -24,6 +24,12 @@ non-zero superblock interval used by pacing and cache TTL calculation. The
 shared accountsdb, blockstore, and ledger parameters are defined by nucleus;
 keeper consumes them when opening its durable stores and caches.
 
+Startup reconstructs the recent-blockhash cache from retained ledger blocks for
+the configured 60-second validity window, bounded by the accountsdb slot so an
+unreplayed ledger tail cannot advance startup state. Persisted `SlotHashes`
+supplies the newest entries, extended with older ledger hashes when available;
+snapshot bootstrap without ledger history uses `SlotHashes` alone.
+
 ## Authority
 
 `nucleus::config::Authority::local` is the keypair used for locally signed
