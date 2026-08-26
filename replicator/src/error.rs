@@ -48,9 +48,18 @@ pub enum ReplicationError {
     /// A staged snapshot must be installed by restarting the engine.
     #[error("replication snapshot for superblock {0} is staged; restart required")]
     RestartRequired(u64),
-    /// A replication event stream closed before the transfer completed.
-    #[error("replication event stream closed")]
-    StreamClosed,
+    /// The local committed-block subscription closed while validating a boundary.
+    #[error("replication block stream closed")]
+    BlockStreamClosed,
+    /// The leader's durable-cursor subscription closed unexpectedly.
+    #[error("replication cursor stream closed")]
+    CursorStreamClosed,
+    /// Ingest stopped before Control ended the connection.
+    #[error("replication ingest stopped unexpectedly")]
+    IngestStopped,
+    /// Ingest thread panicked.
+    #[error("replication ingest panicked")]
+    IngestPanicked,
     /// Waiting for a locally committed block boundary timed out.
     #[error("timed out waiting for a replicated block boundary: {0}")]
     Timeout(#[from] Elapsed),

@@ -50,14 +50,19 @@ at startup before producing their first new block, so followers clear
 chain-mirrored volatile state at the same stream position while retaining
 internal system accounts.
 
+On normal follower shutdown, Control keeps consuming ordered transaction batches
+until it validates the next replicated block, then barriers execution and
+flushes the cursor at that boundary before stopping Ingest. The operational
+block heartbeat supplies that boundary, reconnecting first when necessary.
+Replication failure and snapshot restart paths do not claim this guarantee.
+
 Ingest decodes transaction batches of at most 128 transactions and typically
 128 KiB, fencing them before every block, superblock, reset, or reconnect.
 A rendezvous channel assigns verification to an idle control thread; otherwise
-`Ingest::flush` verifies while Control schedules earlier work. Control alone
-schedules verified transactions and advances the block pacer. During the
-Control-held handshake, `Ingest::stage_snapshot` may write the snapshot archive
-and bootstrap durable superblock state. These roles preserve stream order
-without reordering state.
+Ingest verifies while Control schedules earlier work. Control alone owns
+handshakes, reconnect cursors, execution barriers, snapshot staging, transaction
+scheduling, and block pacing. These roles preserve stream order without a
+reverse control channel.
 
 A shared-key follower may also serve downstream followers. It derives and
 validates superblock seals from replicated block boundaries and archives its own
