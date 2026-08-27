@@ -14,7 +14,6 @@
 
 use std::{
     env,
-    ops::Range,
     process::Command,
     sync::{Arc, atomic::Ordering::Acquire},
 };
@@ -27,7 +26,7 @@ use nucleus::{
 };
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
-use solana_transaction_error::TransactionResult;
+use solana_transaction_error::{TransactionError, TransactionResult};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::{
@@ -268,8 +267,8 @@ async fn test_transaction_roundtrip() {
 }
 
 // Blockstore payloads may exceed wincode's default 4 MiB preallocation limit.
-// Persisting, block reconstruction, and replay all use the ledger-specific
-// codec bound and must return the original owned bytes unchanged.
+// Persisting and replay use the ledger-specific codec bound and must return the
+// original owned bytes unchanged.
 #[tokio::test]
 async fn test_large_transaction_roundtrip() {
     let (_dir, ledger) = ledger(u64::MAX);
@@ -286,16 +285,6 @@ async fn test_large_transaction_roundtrip() {
         Event::Block(Block::new(1, 0)),
     ];
     append(&ledger, events);
-
-    match read_block(&ledger, 1, BlockDetails::Transactions).await {
-        Some(BlockResponse::WithTransactions(block)) => {
-            assert_eq!(
-                block.transactions.as_slice(),
-                std::slice::from_ref(payload.as_ref())
-            );
-        }
-        _ => panic!("expected transactions response"),
-    }
 
     let entries = replay(&ledger, 0).await;
     match entries.first() {
@@ -338,6 +327,13 @@ async fn test_pending_requires_execution() {
     assert!(read_transaction(&ledger, indexed).await.is_some());
     assert!(read_transaction(&ledger, orphan).await.is_none());
     assert!(read_transaction(&ledger, stray).await.is_none());
+    assert_eq!(block_signatures(&ledger, 1).await, [indexed]);
+    match read_block(&ledger, 1, BlockDetails::Transactions).await {
+        Some(BlockResponse::WithTransactions(block)) => {
+            assert_eq!(block.transactions.len(), 1, "unindexed record is omitted");
+        }
+        _ => panic!("expected transactions response"),
+    }
 }
 
 // Block reads reconstruct exactly the transactions between the previous block
@@ -496,36 +492,71 @@ async fn test_reopen_resumes_state() {
     assert_eq!(ledger.meta.blocks.load(Acquire), 2);
 }
 
-// A block-range read returns every block in the range, in descending slot order,
-// even when the range straddles a superblock boundary. The reader walks slots
-// descending across superblocks newest-first, so a boundary slot must be handed
-// to the older segment instead of being consumed against the newer one.
+/// Proves block-range reads preserve cross-superblock block and indexed status order.
+///
+/// The reader walks blocks newest-first across segments while each block body
+/// remains in append order. Transactions without terminal execution metadata
+/// are deliberately omitted because they were never published to the index.
 #[tokio::test]
 async fn test_block_range_spans_superblocks() {
     let (_dir, ledger) = ledger(u64::MAX);
     // Slot 1 lands in superblock 1; the seal rotates slots 2 and 3 into
     // superblock 2, so any range over 1..=2 crosses the segment boundary.
-    block_of(&ledger, 1, 1);
+    let first = block_of(&ledger, 1, 1);
     let events = vec![seal(1)];
     append(&ledger, events);
-    block_of(&ledger, 2, 1);
-    block_of(&ledger, 3, 1);
+    let (ok, ok_bytes) = transaction(&[Pubkey::new_unique()]);
+    let (failed, failed_bytes) = transaction(&[Pubkey::new_unique()]);
+    let (unindexed, unindexed_bytes) = transaction(&[Pubkey::new_unique()]);
+    let failure = Err(TransactionError::AccountNotFound);
+    append(
+        &ledger,
+        vec![
+            Event::Transaction(TransactionEntry { signature: ok, payload: ok_bytes }),
+            Event::Execution(execution(ok, 2, Ok(()))),
+            Event::Transaction(TransactionEntry {
+                signature: failed,
+                payload: failed_bytes,
+            }),
+            Event::Execution(execution(failed, 2, failure.clone())),
+            Event::Transaction(TransactionEntry {
+                signature: unindexed,
+                payload: unindexed_bytes,
+            }),
+            Event::Block(Block::new(2, 200)),
+        ],
+    );
+    let third = block_of(&ledger, 3, 1);
 
-    let slots = async |range: Range<Slot>| {
-        read(&ledger, range, ReadRequest::BlockRange)
-            .await
-            .unwrap()
-            .iter()
-            .map(|b| b.slot)
-            .collect::<Vec<_>>()
-    };
+    let blocks = read(&ledger, 1..4, ReadRequest::BlockRange).await.unwrap();
     // The full range comes back once each, newest-first, across the boundary.
-    assert_eq!(slots(1..4).await, vec![3, 2, 1]);
+    assert_eq!(
+        blocks.iter().map(|b| b.block.slot).collect::<Vec<_>>(),
+        [3, 2, 1]
+    );
+    assert_eq!(blocks[0].signatures[0].signature, third[0]);
+    assert!(blocks[0].signatures[0].status.result.is_ok());
+    assert_eq!(
+        blocks[1].signatures.len(),
+        2,
+        "unindexed transaction is omitted"
+    );
+    assert_eq!(blocks[1].signatures[0].signature, ok);
+    assert!(blocks[1].signatures[0].status.result.is_ok());
+    assert_eq!(blocks[1].signatures[1].signature, failed);
+    assert_eq!(blocks[1].signatures[1].status.result, failure);
+    assert_eq!(blocks[1].signatures[1].status.slot, 2);
+    assert_eq!(blocks[2].signatures[0].signature, first[0]);
     // A sub-range inside one segment returns only its blocks.
-    assert_eq!(slots(2..3).await, vec![2]);
+    let blocks = read(&ledger, 2..3, ReadRequest::BlockRange).await.unwrap();
+    assert_eq!(blocks.iter().map(|b| b.block.slot).collect::<Vec<_>>(), [2]);
     // A tail past the retained tip yields the retained blocks without dropping
     // the boundary slot.
-    assert_eq!(slots(1..9).await, vec![3, 2, 1]);
+    let blocks = read(&ledger, 1..9, ReadRequest::BlockRange).await.unwrap();
+    assert_eq!(
+        blocks.iter().map(|b| b.block.slot).collect::<Vec<_>>(),
+        [3, 2, 1]
+    );
 }
 
 // The account index keeps one entry per touching transaction, excludes unrelated

@@ -3,7 +3,6 @@
 use std::{
     collections::HashMap,
     fs::{self, File},
-    sync::Arc,
     time::Duration,
 };
 
@@ -16,7 +15,7 @@ use ledger::{
 use nucleus::{
     Slot,
     config::{AccountsDBParams, Authority, BlockstoreParams, LedgerParams},
-    ledger::{ACCOUNTSDB_SNAPSHOT_FILE, Block},
+    ledger::ACCOUNTSDB_SNAPSHOT_FILE,
     shutdown::ShutdownManager,
 };
 use serde::Serialize;
@@ -39,7 +38,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     Keeper,
-    cache::{AccountCache, BlockSeed, BlocksCache, Caches, ExpiringCache},
+    cache::{CacheSeed, Caches},
     error::Result,
     metrics,
     subscriptions::Subscriptions,
@@ -80,8 +79,8 @@ impl KeeperBuilder {
     pub async fn build(mut self, shutdown: &mut ShutdownManager) -> Result<Keeper> {
         let ledger = Ledger::init(&self.ledger.directory, self.ledger.size_limit, shutdown)?;
         let accountsdb = self.accountsdb(&ledger)?;
-        let (blocks, featureset) = self.prepopulate(&accountsdb, &ledger).await?;
-        let caches = self.caches(blocks);
+        let (seed, featureset) = self.prepopulate(&accountsdb, &ledger).await?;
+        let caches = self.caches(seed);
         metrics::init();
         Ok(Keeper {
             authority: self.authority,
@@ -99,11 +98,11 @@ impl KeeperBuilder {
         &mut self,
         accountsdb: &AccountsDB,
         ledger: &LedgerHandle,
-    ) -> Result<(BlockSeed, FeatureSet)> {
+    ) -> Result<(CacheSeed, FeatureSet)> {
         let mut accounts = Vec::new();
         let featureset = self.seed_featureset(&mut accounts)?;
         self.seed_programs(&mut accounts)?;
-        let blocks = self.seed_sysvars(accountsdb, ledger, &mut accounts).await?;
+        let seed = self.seed_sysvars(accountsdb, ledger, &mut accounts).await?;
         let authority = self.authority.pubkey();
         if accountsdb.loader().load(&authority)?.is_none() {
             let sponsor = AccountBuilder::default()
@@ -113,16 +112,17 @@ impl KeeperBuilder {
         }
         accounts.extend(self.accounts.drain());
         accountsdb.store(&accounts)?;
-        Ok((blocks, featureset))
+        Ok((seed, featureset))
     }
 
     /// Builds read-side caches using blocktime-derived slot TTLs.
-    fn caches(&self, blocks: BlockSeed) -> Caches {
-        let blocks = BlocksCache::new(blocks, self.ttl(BLOCK_CACHE_WINDOW));
-        let signatures = ExpiringCache::new(self.ttl(SIGNATURE_CACHE_WINDOW));
-        let accounts = Arc::new(AccountCache::new(self.accountsdb.lru_capacity));
-
-        Caches { signatures, blocks, accounts }
+    fn caches(&self, seed: CacheSeed) -> Caches {
+        Caches::new(
+            seed,
+            self.ttl(BLOCK_CACHE_WINDOW),
+            self.ttl(SIGNATURE_CACHE_WINDOW),
+            self.accountsdb.lru_capacity,
+        )
     }
 
     /// Converts a wall-clock cache window into whole configured block slots.
@@ -185,7 +185,7 @@ impl KeeperBuilder {
         accountsdb: &AccountsDB,
         ledger: &LedgerHandle,
         accounts: &mut Vec<AccountEntry>,
-    ) -> Result<BlockSeed> {
+    ) -> Result<CacheSeed> {
         let slot = accountsdb.slot();
         let loader = accountsdb.loader();
         let slothashes = loader
@@ -193,29 +193,33 @@ impl KeeperBuilder {
             .map(|account| account.deserialize_data::<SlotHashes>().map_err(AccountsDBError::from))
             .transpose()?;
 
-        let retained = self.ttl(BLOCK_CACHE_WINDOW).max(SLOTHASH_ENTRIES as Slot);
+        let retained = self
+            .ttl(BLOCK_CACHE_WINDOW)
+            .max(self.ttl(SIGNATURE_CACHE_WINDOW))
+            .max(SLOTHASH_ENTRIES as Slot);
         let start = slot.saturating_sub(retained - 1);
         let (payload, handle) = RequestPayload::new(start..slot.saturating_add(1));
         ledger.reader.send(ReadRequest::BlockRange(payload))?;
-        let blocks = handle.recv_timeout().await??;
+        let history = handle.recv_timeout().await??;
 
         if slothashes.is_none() {
             // Keep the sysvar account at its fixed serialized capacity so live
             // updates can replace entries without resizing the account.
             let mut hashes = SlotHashes::new(&[Default::default(); SLOTHASH_ENTRIES]);
-            for block in blocks.iter().take(SLOTHASH_ENTRIES) {
-                hashes.add(block.slot, block.hash);
+            for block in history.iter().take(SLOTHASH_ENTRIES) {
+                hashes.add(block.block.slot, block.block.hash);
             }
             let acc = self.account(&hashes, &sysvar::ID)?;
             accounts.push((SlotHashes::id(), acc.build()));
         }
 
-        let blocks = Self::block_seed(blocks, slothashes.as_ref());
+        let seed = CacheSeed::new(history, slothashes.as_ref());
 
         // Set the clock slot one ahead from the last
+        let latest = seed.latest();
         let clock = Clock {
-            slot: blocks.latest.slot + 1,
-            unix_timestamp: blocks.latest.time,
+            slot: latest.slot + 1,
+            unix_timestamp: latest.time,
             ..Default::default()
         };
         accounts.push((Clock::id(), self.account(&clock, &sysvar::ID)?.build()));
@@ -241,26 +245,7 @@ impl KeeperBuilder {
             EpochRewards::id(),
             self.account(&EpochRewards::default(), &sysvar::ID)?.build(),
         ));
-        Ok(blocks)
-    }
-
-    /// Extends persisted SlotHashes with older retained ledger history.
-    fn block_seed(blocks: Vec<Block>, slothashes: Option<&SlotHashes>) -> BlockSeed {
-        let Some(hashes) = slothashes.map(SlotHashes::slot_hashes) else {
-            let latest = blocks.first().copied().unwrap_or_default();
-            let history = blocks.iter().rev().map(|b| (b.slot, b.hash)).collect();
-            return BlockSeed { latest, history };
-        };
-        let mut history = hashes.to_vec();
-        history.extend(blocks.iter().skip(history.len()).map(|b| (b.slot, b.hash)));
-        let latest = history.first().map_or(Block::default(), |&(slot, hash)| Block {
-            slot,
-            hash,
-            time: blocks.first().map_or(0, |b| b.time),
-            parent: history.get(1).map(|(_, hash)| *hash).unwrap_or_default(),
-        });
-        history.reverse();
-        BlockSeed { latest, history }
+        Ok(seed)
     }
 
     /// Builds a rent-exempt system account containing a serialized sysvar-like state.

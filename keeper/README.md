@@ -24,11 +24,16 @@ non-zero superblock interval used by pacing and cache TTL calculation. The
 shared accountsdb, blockstore, and ledger parameters are defined by nucleus;
 keeper consumes them when opening its durable stores and caches.
 
-Startup reconstructs the recent-blockhash cache from retained ledger blocks for
-the configured 60-second validity window, bounded by the accountsdb slot so an
-unreplayed ledger tail cannot advance startup state. Persisted `SlotHashes`
-supplies the newest entries, extended with older ledger hashes when available;
-snapshot bootstrap without ledger history uses `SlotHashes` alone.
+Startup issues one retained-history read, ending at the accountsdb slot and
+covering the largest of the block cache, signature cache, and `SlotHashes`
+windows. An unreplayed ledger tail therefore cannot advance startup state.
+Persisted `SlotHashes` supplies the newest block entries, extended with older
+ledger hashes when available; snapshot bootstrap without ledger history uses
+`SlotHashes` alone. Indexed terminal transaction statuses seed the processed
+signature cache at their original block slots. If Engine startup replay advances
+the authoritative block boundary, each re-executed transaction caches its
+terminal result without appending another ledger record or publishing live
+subscriptions.
 
 ## Authority
 

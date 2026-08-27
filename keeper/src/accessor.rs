@@ -30,11 +30,11 @@ use solana_transaction_error::TransactionError;
 use tokio::sync::mpsc::Receiver;
 
 use crate::{
-    FullTransaction, Keeper, ResolvedTransaction,
+    ExecutionRecord, FullTransaction, Keeper, ResolvedTransaction,
     cache::{AccountCache, MissingAccount},
     error::Result,
     subscriptions::TransactionLogs,
-    util::{execution_commit, request},
+    util::{execution_commit, request, transaction_status},
 };
 
 /// Account operations namespace.
@@ -259,9 +259,24 @@ impl<'a> TransactionsAccessor<'a> {
         Ok(())
     }
 
+    /// Commits replayed state and caches its re-executed terminal status.
+    ///
+    /// Replay does not append ledger records or publish live subscriptions.
+    pub fn commit_replay(
+        &self,
+        transaction: &ResolvedTransaction,
+        execution: &ExecutionRecord,
+    ) -> Result<()> {
+        self.commit_state_transitions(&execution.result)?;
+        let signature = transaction.signatures()[0];
+        let status = transaction_status(&execution.result, execution.slot);
+        self.keeper.caches.signatures.push(signature, Some(status), execution.slot);
+        Ok(())
+    }
+
     /// Commits one accepted transaction to accountsdb, writing dirty accounts
     /// only for successful execution and returning it for downstream fanout.
-    pub fn commit_state_transitions<'t>(
+    fn commit_state_transitions<'t>(
         &self,
         result: &'t TransactionProcessingResult,
     ) -> Result<Option<&'t ExecutedTransaction>> {

@@ -3,7 +3,6 @@
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Read},
-    mem,
     ops::Range,
     os::unix::fs::FileExt,
     sync::{Arc, atomic::Ordering::Acquire},
@@ -27,11 +26,11 @@ use crate::{
     metrics::{self, Operation},
     request::{
         AccountSignature, AccountSignaturesParams, AccountSignaturesPayload,
-        AccountSignaturesReadResult, BlockDetails, BlockParams, BlockPayload, BlockReadResult,
-        BlockResponse, BlockWithSignatures, BlockWithTransactions, FullBlockInfo, ReadRequest,
-        ReplayParams, ReplayPayload, TransactionPayload, TransactionReadResult,
-        TransactionResponse, TransactionStatus, TransactionStatusPayload,
-        TransactionStatusReadResult,
+        AccountSignaturesReadResult, BlockDetails, BlockHistory, BlockParams, BlockPayload,
+        BlockReadResult, BlockResponse, BlockWithSignatureStatuses, BlockWithSignatures,
+        BlockWithTransactions, FullBlockInfo, ReadRequest, ReplayParams, ReplayPayload,
+        SignatureStatus, TransactionPayload, TransactionReadResult, TransactionResponse,
+        TransactionStatusPayload, TransactionStatusReadResult,
     },
     schema::{
         Block, BlockstoreEntry, Execution, ExecutionHeader, MAX_EXECUTION_DETAILS_SIZE,
@@ -49,6 +48,13 @@ pub(crate) struct LedgerReader {
     decompressor: Decompressor<'static>,
     /// Scratch buffers reused across requests.
     buffers: ReadBuffers,
+}
+
+/// Decoded blockstore transaction paired with its durable execution index.
+struct IndexedTransaction {
+    transaction: Vec<u8>,
+    signature: Signature,
+    execution: Span,
 }
 
 impl LedgerReader {
@@ -137,11 +143,7 @@ impl LedgerReader {
             let Some(spans) = index.transaction(&request.params)? else {
                 continue;
             };
-            let header = self.header(&superblock, spans.execution)?;
-            return Ok(Some(TransactionStatus {
-                result: header.result,
-                slot: header.slot,
-            }));
+            return Ok(Some(self.header(&superblock, spans.execution)?.into()));
         }
         Ok(None)
     }
@@ -230,8 +232,8 @@ impl LedgerReader {
         self.populate_block_response(&superblock, request, span).map(Some)
     }
 
-    /// Reads block boundaries for a slot range in descending slot order.
-    fn blocks(&mut self, range: Range<Slot>) -> Result<Vec<Block>> {
+    /// Reads blocks and indexed transaction statuses in descending slot order.
+    fn blocks(&mut self, range: Range<Slot>) -> Result<BlockHistory> {
         let mut blocks = Vec::with_capacity(range.clone().count());
         let Some(last) = range.end.checked_sub(1) else { return Ok(blocks) };
 
@@ -245,15 +247,27 @@ impl LedgerReader {
             }
             let index = IndexReader::new(&superblock.index);
             for entry in index.blocks(start..=end) {
-                let (_, span) = entry?;
-                if let BlockstoreEntry::Block(b) = self.blockstore_entry(&superblock, span)? {
-                    blocks.push(b);
-                }
+                let (slot, span) = entry?;
+                let block = self.block_entry(&superblock, slot, span)?;
+                let signatures = self
+                    .indexed_transactions(&superblock, &index, slot, span, None)?
+                    .into_iter()
+                    .map(|transaction| {
+                        let status = self.header(&superblock, transaction.execution)?.into();
+                        let signature = transaction.signature;
+                        Ok(SignatureStatus { signature, status })
+                    })
+                    .collect::<Result<_>>()?;
+                blocks.push(BlockWithSignatureStatuses { block, signatures });
             }
         }
         Ok(blocks)
     }
 
+    /// Streams committed blockstore entries after the requested superblock in storage order.
+    ///
+    /// Replay reads only through each superblock's durable cursor and leaves execution,
+    /// indexing, and state restoration to the consumer.
     fn replay(&mut self, request: &ReplayPayload) -> Result<()> {
         let ReplayParams { superblock, tx } = &request.params;
         for superblock in self.ledger.iter_after(*superblock) {
@@ -324,81 +338,100 @@ impl LedgerReader {
         span: Span,
     ) -> Result<BlockResponse> {
         let BlockParams { slot, details } = request.params;
-        let BlockstoreEntry::Block(block) = self.blockstore_entry(superblock, span)? else {
-            error!(
-                superblock = superblock.id,
-                slot, "ledger index points to invalid block entry"
-            );
-            return Err(LedgerError::Corruption(
-                "index points to invalid block entry",
-            ));
-        };
+        let block = self.block_entry(superblock, slot, span)?;
 
         if matches!(details, BlockDetails::None) {
             return Ok(BlockResponse::Bare(block));
         }
         let index = IndexReader::new(&superblock.index);
+        let body = self.indexed_transactions(superblock, &index, slot, span, Some(request))?;
+        match details {
+            BlockDetails::Full => {
+                let transactions = body
+                    .into_iter()
+                    .map(|entry| {
+                        let execution = self.execution(superblock, entry.execution)?;
+                        let transaction = entry.transaction;
+                        Ok(TransactionResponse { transaction, execution })
+                    })
+                    .collect::<Result<_>>()?;
+                Ok(BlockResponse::Full(FullBlockInfo { block, transactions }))
+            }
+            BlockDetails::Transactions => {
+                let transactions = body.into_iter().map(|entry| entry.transaction).collect();
+                Ok(BlockResponse::WithTransactions(BlockWithTransactions {
+                    block,
+                    transactions,
+                }))
+            }
+            BlockDetails::Signatures => {
+                let signatures = body.into_iter().map(|entry| entry.signature).collect();
+                Ok(BlockResponse::WithSignatures(BlockWithSignatures {
+                    block,
+                    signatures,
+                }))
+            }
+            BlockDetails::None => unreachable!(),
+        }
+    }
+
+    /// Reads and validates an indexed block boundary.
+    fn block_entry(&mut self, superblock: &Superblock, slot: Slot, span: Span) -> Result<Block> {
+        let BlockstoreEntry::Block(block) = self.blockstore_entry(superblock, span)? else {
+            error!(slot, "ledger index points to invalid block entry");
+            return Err(LedgerError::Corruption(
+                "index points to invalid block entry",
+            ));
+        };
+        Ok(block)
+    }
+
+    /// Decodes the indexed transactions preceding a block boundary.
+    fn indexed_transactions(
+        &mut self,
+        superblock: &Superblock,
+        index: &IndexReader<'_>,
+        slot: Slot,
+        span: Span,
+        request: Option<&BlockPayload>,
+    ) -> Result<Vec<IndexedTransaction>> {
         // Slots are contiguous, so the previous block boundary is `slot - 1`
         // when this is not the first possible slot.
-        let previous = slot.checked_sub(1).map(|slot| index.block(slot)).transpose()?.flatten();
+        let previous = match slot.checked_sub(1) {
+            Some(slot) => index.block(slot)?,
+            None => None,
+        };
         let start = match previous {
             Some(previous) => previous.offset() + previous.size(),
             None => 0,
         };
         self.buffers.read_blockstore_range(superblock, start..span.offset())?;
-        let blockstore = mem::take(&mut self.buffers.blockstore);
-        let len = blockstore.len();
+        let blockstore = self.buffers.blockstore.as_slice();
         let mut cursor = Cursor::new(blockstore);
-        let result = (|| {
-            let mut full = Vec::new();
-            let mut transactions = Vec::new();
-            let mut signatures = Vec::new();
-            while cursor.position() < len && !request.cancelled() {
-                let entry = blockstore::decode(&mut cursor).map_err(Into::<Error>::into)?;
-                let transaction = match entry {
-                    BlockstoreEntry::Transaction(transaction) => transaction,
-                    BlockstoreEntry::Reset(_) => continue,
-                    _ => {
-                        error!(
-                            superblock = superblock.id,
-                            slot, "ledger blockstore includes invalid block entries"
-                        );
-                        return Err(LedgerError::Corruption(
-                            "blockstore includes invalid block entries",
-                        ));
-                    }
-                };
-                if matches!(details, BlockDetails::Transactions) {
-                    transactions.push(transaction);
-                    continue;
+        let mut transactions = Vec::new();
+        while cursor.position() < blockstore.len() && request.is_none_or(|r| !r.cancelled()) {
+            let entry = blockstore::decode(&mut cursor).map_err(Into::<Error>::into)?;
+            let transaction = match entry {
+                BlockstoreEntry::Transaction(transaction) => transaction,
+                BlockstoreEntry::Reset(_) => continue,
+                _ => {
+                    error!(slot, "ledger blockstore includes invalid block entries");
+                    return Err(LedgerError::Corruption(
+                        "blockstore includes invalid block entries",
+                    ));
                 }
-                let signature = signature(&transaction)?;
-                if matches!(details, BlockDetails::Signatures) {
-                    signatures.push(signature);
-                    continue;
-                }
-                let Some(spans) = index.transaction(&signature)? else {
-                    continue;
-                };
-                let execution = self.execution(superblock, spans.execution)?;
-                full.push(TransactionResponse { transaction, execution });
-            }
-            Ok((full, transactions, signatures))
-        })();
-        self.buffers.blockstore = cursor.into_inner();
-        let (full, transactions, signatures) = result?;
-
-        let response = match details {
-            BlockDetails::Full => BlockResponse::Full(FullBlockInfo { block, transactions: full }),
-            BlockDetails::Transactions => {
-                BlockResponse::WithTransactions(BlockWithTransactions { block, transactions })
-            }
-            BlockDetails::Signatures => {
-                BlockResponse::WithSignatures(BlockWithSignatures { block, signatures })
-            }
-            BlockDetails::None => BlockResponse::Bare(block),
-        };
-        Ok(response)
+            };
+            let signature = signature(&transaction)?;
+            let Some(spans) = index.transaction(&signature)? else {
+                continue;
+            };
+            transactions.push(IndexedTransaction {
+                transaction,
+                signature,
+                execution: spans.execution,
+            });
+        }
+        Ok(transactions)
     }
 
     /// Reads the timestamp from a block boundary entry.

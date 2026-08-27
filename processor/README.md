@@ -3,6 +3,9 @@
 The processor schedules transactions across a fixed pool of SVM executors and
 commits their results through keeper.
 
+Replay executors commit account state and cache the re-executed terminal status,
+but do not append ledger records or publish live transaction subscriptions.
+
 The sequencer preserves canonical stream order for account conflicts while
 retaining parallel execution for disjoint transactions and read/read access.
 Block-local dependency tracking is independent of executor completion order.
