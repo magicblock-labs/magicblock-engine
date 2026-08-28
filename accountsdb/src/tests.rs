@@ -797,3 +797,63 @@ fn test_incremental_growth_reuses_slack_span() {
     );
     assert_eq!(reload(&db, &key).data().len(), 8 + 2_000 * 64);
 }
+
+// In-place reuse writes the mmap before the LMDB commit. A later apply
+// failure must restore the previous span (headers included) and the prior
+// owner index. A new allocation leaves the old image untouched.
+#[test]
+fn test_reused_image_restored_on_batch_failure() {
+    // Larger than the 64 MiB test map once serialized as a double image.
+    const OVERSIZE: usize = 40 << 20;
+    let owner = Pubkey::new_unique();
+    let next = Pubkey::new_unique();
+
+    {
+        let (_dir, db) = db();
+        let key = Pubkey::new_unique();
+        let original = vec![1; 64];
+        store(&db, key, mutable_data(1, original.clone(), &owner));
+        let live = offset(&db, &key);
+
+        let updated = mutable_data(2, vec![2; 64], &next);
+        let extra = Pubkey::new_unique();
+        assert!(
+            db.store(&[(key, updated), (extra, mutable_data(3, vec![0; OVERSIZE], &owner)),])
+                .is_err()
+        );
+
+        assert!(offset(&db, &key) == live);
+        let restored = reload(&db, &key);
+        assert_eq!(restored.lamports(), 1);
+        assert_eq!(restored.data(), original);
+        assert_eq!(restored.owner(), &owner);
+        assert_eq!(program(&db, &owner), vec![key]);
+        assert!(program(&db, &next).is_empty());
+        assert!(!in_persisted(&db, &extra));
+    }
+
+    {
+        let (_dir, db) = db();
+        let key = Pubkey::new_unique();
+        let original = vec![1; 8];
+        store(&db, key, mutable_data(1, original.clone(), &owner));
+        let live = offset(&db, &key);
+
+        let grown = mutable_data(2, vec![2; 64 * 1024], &next);
+        assert!(grown.owned().units() > reload(&db, &key).owned().units());
+        let extra = Pubkey::new_unique();
+        assert!(
+            db.store(&[(key, grown), (extra, mutable_data(3, vec![0; OVERSIZE], &owner)),])
+                .is_err()
+        );
+
+        assert!(offset(&db, &key) == live);
+        let restored = reload(&db, &key);
+        assert_eq!(restored.lamports(), 1);
+        assert_eq!(restored.data(), original);
+        assert_eq!(restored.owner(), &owner);
+        assert_eq!(program(&db, &owner), vec![key]);
+        assert!(program(&db, &next).is_empty());
+        assert!(!in_persisted(&db, &extra));
+    }
+}

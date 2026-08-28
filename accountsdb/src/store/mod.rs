@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering::{Acquire, Release};
 
 use solana_account::{
     AccountMode, AccountSharedData, BorrowedAccount, CoWAccount::*, DirtyMarkers, OwnedAccount,
+    StorageUnit,
 };
 use solana_pubkey::Pubkey;
 use tracing::{error, warn};
@@ -18,7 +19,7 @@ use crate::{
     metrics::{self, Operation},
     store::{
         index::{Index, OptRoTxn, OptRwTxn, OwnerIter, read_txn, write_txn},
-        kv::{Offset, OwnerAndOffset},
+        kv::{KeyTail, Offset, OwnerAndOffset},
         mmap::{DatabaseMeta, MappedStorage},
     },
 };
@@ -36,6 +37,18 @@ pub(crate) use mmap::Stats;
 pub(crate) const VERSION: DatabaseVersion = 1;
 /// Version tag stored in the metadata header.
 pub(crate) type DatabaseVersion = u64;
+
+/// Snapshot of an in-place owned overwrite that is not yet durable.
+struct ReusedOverwrite {
+    /// Live image offset that was overwritten.
+    offset: Offset,
+    /// Full existing span, including headers, taken before serialize.
+    snapshot: Vec<StorageUnit>,
+    /// Account whose owner mapping may have been updated in the open txn.
+    pubkey: Pubkey,
+    /// Owner tag recorded in the index before this overwrite.
+    owner: KeyTail,
+}
 
 /// Persisted store backed by the mmap and LMDB index.
 pub(crate) struct PersistedStore {
@@ -84,8 +97,8 @@ impl PersistedStore {
     ///
     /// Borrowed accounts in authoritative modes are committed in place. Owned
     /// accounts in those modes are serialized into the mmap. Other modes delete
-    /// stale persisted entries. If the LMDB commit fails or database runs out of
-    /// space, the borrowed images are rolled back so in-memory state stays
+    /// stale persisted entries. If a later apply or the LMDB commit fails, borrowed
+    /// images and in-place owned reuse are rolled back so mmap state stays
     /// aligned with the durable index.
     pub(crate) fn upsert<'a, AC>(&self, accounts: AC) -> Result<()>
     where
@@ -94,26 +107,34 @@ impl PersistedStore {
         let mut applied = 0;
         let mut result = Ok(());
         let mut txn = None;
+        let mut reused = Vec::new();
         for entry in accounts.clone() {
-            result = self.apply(entry, &mut txn);
+            result = self.apply(entry, &mut txn, &mut reused);
             if result.is_err() {
                 break;
             }
             applied += 1;
         }
         // Commit once after the batch so the index and mmap stay in sync.
-        if let Some(txn) = txn
-            && result.is_ok()
+        if result.is_ok()
+            && let Some(txn) = txn.take()
         {
-            metrics::accounts(StoreKind::Persisted, self.index.accounts.len(&txn)?);
-            result = txn.commit().map_err(Into::into);
+            match self.index.accounts.len(&txn) {
+                Ok(count) => {
+                    metrics::accounts(StoreKind::Persisted, count);
+                    result = txn.commit().map_err(Into::into);
+                }
+                Err(error) => result = Err(error.into()),
+            }
         }
         if let Err(error) = &result {
             warn!(applied, ?error, "accounts persistence failed; rolling back");
             // Borrowed commits and in-place owned reuse write the mmap before
-            // the LMDB commit. Only borrowed views keep a sequence to undo.
+            // the LMDB commit. Borrowed views undo via sequence; reused owned
+            // images restore the snapshot taken before serialize.
             let processed = accounts.into_iter().take(applied).map(|(_, a)| a);
             Self::rollback(processed);
+            self.restore_reused(&reused, txn.as_mut());
         }
 
         result
@@ -154,7 +175,12 @@ impl PersistedStore {
     }
 
     /// Applies one account state transition to the persisted backend.
-    fn apply<'e>(&'e self, acc: &AccountEntry, txn: OptRwTxn<'_, 'e>) -> Result<()> {
+    fn apply<'e>(
+        &'e self,
+        acc: &AccountEntry,
+        txn: OptRwTxn<'_, 'e>,
+        reused: &mut Vec<ReusedOverwrite>,
+    ) -> Result<()> {
         let (pubkey, account) = acc;
         // An account that has moved to a non-authoritative mode, or has been
         // closed, no longer belongs here, so drop any stale persisted entry.
@@ -169,7 +195,7 @@ impl PersistedStore {
         let markers = account.markers();
         match account.cow() {
             Borrowed(acc) => self.update(pubkey, acc, markers, txn),
-            Owned(acc) => self.insert(pubkey, acc, txn),
+            Owned(acc) => self.insert(pubkey, acc, txn, reused),
         }
     }
 
@@ -185,6 +211,25 @@ impl PersistedStore {
             let Borrowed(acc) = acc.cow() else { continue };
             // SAFETY: only borrowed accounts were updated before the failed commit.
             unsafe { acc.rollback() };
+        }
+    }
+
+    /// Restores overwritten owned spans and their prior owner mappings.
+    fn restore_reused(&self, reused: &[ReusedOverwrite], txn: Option<&mut heed::RwTxn<'_>>) {
+        for image in reused {
+            let ptr = self.storage.at(image.offset);
+            // SAFETY: `offset` is the live span we overwrote; `snapshot` is that
+            // span including headers, taken before serialize.
+            unsafe {
+                let dest = slice::from_raw_parts_mut(ptr.as_ptr(), image.snapshot.len());
+                dest.copy_from_slice(&image.snapshot);
+            }
+        }
+        let Some(txn) = txn else {
+            return;
+        };
+        for image in reused {
+            let _ = self.index.update_owner(&image.pubkey, image.owner, txn);
         }
     }
 
@@ -218,26 +263,36 @@ impl PersistedStore {
         pubkey: &Pubkey,
         acc: &OwnedAccount,
         txn: OptRwTxn<'_, 'e>,
+        reused: &mut Vec<ReusedOverwrite>,
     ) -> Result<()> {
         let txn = write_txn(self.index.env(), txn)?;
         let owner = acc.owner().into();
-        let live = self.index.offset(pubkey, txn)?;
+        let live = self.index.accounts.get(txn, pubkey)?;
         let existing = match live {
             // SAFETY: live offsets come from the persisted index.
-            Some(offset) => unsafe { BorrowedAccount::span(self.storage.at(offset)) },
+            Some(data) => unsafe { BorrowedAccount::span(self.storage.at(data.offset)) },
             None => 0,
         };
         let units = acc.units_at_least(existing);
-        if let Some(offset) = live
+        if let Some(prior) = live
             && existing >= acc.units()
         {
+            let ptr = self.storage.at(prior.offset);
+            // SAFETY: `prior.offset` is the live image; `existing` is its full span.
+            let snapshot =
+                unsafe { slice::from_raw_parts(ptr.as_ptr(), existing as usize) }.to_vec();
             self.index.update_owner(pubkey, owner, txn)?;
-            let ptr = self.storage.at(offset);
             // SAFETY: `offset` is the live image and `existing` still fits.
             unsafe {
                 let buffer = slice::from_raw_parts_mut(ptr.as_ptr(), existing as usize);
                 acc.serialize(buffer, pubkey);
             }
+            reused.push(ReusedOverwrite {
+                offset: prior.offset,
+                snapshot,
+                pubkey: *pubkey,
+                owner: prior.owner,
+            });
             return Ok(());
         }
 
