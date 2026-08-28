@@ -41,7 +41,7 @@ impl SvmContext {
         let runtime_env = agave_syscalls::create_program_runtime_environment(
             &state.features().runtime_features(),
             &budget,
-            true,
+            false, // Accept legacy ELFs already deployed on the base chain.
             false,
         )
         .map_err(|e| e.to_string())?;
