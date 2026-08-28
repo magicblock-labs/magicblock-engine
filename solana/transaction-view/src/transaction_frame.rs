@@ -53,7 +53,7 @@ impl TransactionFrame {
     fn try_new_as_legacy_or_v0(bytes: &[u8]) -> Result<Self> {
         let mut offset = 0;
         let signature = SignatureFrame::try_new(bytes, &mut offset)?;
-        let message_header = MessageHeaderFrame::try_new(bytes, &mut offset)?;
+        let message_header = MessageHeaderFrame::try_new_legacy_or_v0(bytes, &mut offset)?;
         let static_account_keys = StaticAccountKeysFrame::try_new(bytes, &mut offset)?;
 
         // The recent blockhash is the first account key after the static
@@ -63,17 +63,10 @@ impl TransactionFrame {
         advance_offset_for_type::<Hash>(bytes, &mut offset)?;
 
         let instructions = InstructionsFrame::try_new_for_legacy_and_v0(bytes, &mut offset)?;
-        let address_table_lookup = match message_header.version {
-            TransactionVersion::Legacy => AddressTableLookupFrame {
-                num_address_table_lookups: 0,
-                offset: 0,
-                total_writable_lookup_accounts: 0,
-                total_readonly_lookup_accounts: 0,
-            },
-            TransactionVersion::V0 => AddressTableLookupFrame::try_new(bytes, &mut offset)?,
-            TransactionVersion::V1 | TransactionVersion::Magicblock => {
-                unreachable!("unexpected variant")
-            }
+        let address_table_lookup = if matches!(message_header.version, TransactionVersion::V0) {
+            AddressTableLookupFrame::try_new(bytes, &mut offset)?
+        } else {
+            AddressTableLookupFrame::default()
         };
 
         // Verify that the entire transaction was parsed.
@@ -177,12 +170,7 @@ impl TransactionFrame {
             recent_blockhash_offset,
             instructions,
             // Don't have ATL in txv1
-            address_table_lookup: AddressTableLookupFrame {
-                num_address_table_lookups: 0,
-                offset: 0,
-                total_writable_lookup_accounts: 0,
-                total_readonly_lookup_accounts: 0,
-            },
+            address_table_lookup: AddressTableLookupFrame::default(),
             transaction_config_frame,
             data_len: try_u32_offset(offset)?,
         };

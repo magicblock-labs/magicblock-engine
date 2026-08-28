@@ -229,7 +229,7 @@ impl LedgerReader {
             break;
         }
         let Some((superblock, span)) = position else { return Ok(None) };
-        self.populate_block_response(&superblock, request, span).map(Some)
+        self.block_response(&superblock, request, span).map(Some)
     }
 
     /// Reads blocks and indexed transaction statuses in descending slot order.
@@ -331,7 +331,7 @@ impl LedgerReader {
     }
 
     /// Builds the block response requested by the caller.
-    fn populate_block_response(
+    fn block_response(
         &mut self,
         superblock: &Superblock,
         request: &BlockPayload,
@@ -339,7 +339,6 @@ impl LedgerReader {
     ) -> Result<BlockResponse> {
         let BlockParams { slot, details } = request.params;
         let block = self.block_entry(superblock, slot, span)?;
-
         if matches!(details, BlockDetails::None) {
             return Ok(BlockResponse::Bare(block));
         }
@@ -371,7 +370,7 @@ impl LedgerReader {
                     signatures,
                 }))
             }
-            BlockDetails::None => unreachable!(),
+            BlockDetails::None => Ok(BlockResponse::Bare(block)),
         }
     }
 
