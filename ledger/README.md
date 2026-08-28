@@ -44,6 +44,12 @@ format. Point lookups read the latest visible value, while range and prefix
 iterators carry their own Fjall snapshot guard; the append-only index does not
 need a request-wide snapshot.
 
+Block-range reads return boundaries newest-first and include each indexed
+transaction's signature and terminal status in block order. Point and range
+reads share block-body decoding and omit transaction records that never acquired
+an execution index. This is a read-side projection only and does not change the
+on-disk blockstore or index format.
+
 Each block atomically commits its transaction, block, and account index changes.
 Ordinary boundaries flush data files and the Fjall journal to the operating
 system with `Buffer` durability before publishing cursors. Explicit syncs,

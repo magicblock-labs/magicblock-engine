@@ -11,10 +11,12 @@
 use std::{path::PathBuf, time::Duration};
 
 use engine::{EngineError, ReplayError, testkit::TestEngine};
-use keeper::testkit::{corrupt, load_v42_data, store_v42};
+use keeper::testkit::{corrupt, load_v42_data, signed_view, store_v42};
 use nucleus::ledger::ACCOUNTSDB_SNAPSHOT_FILE;
 use solana_account::AccountMode;
 use solana_pubkey::Pubkey;
+use solana_signature::Signature;
+use solana_transaction::TransactionError;
 use tokio::time;
 use v42_calculator_interface::builder::Expr as E;
 
@@ -25,10 +27,44 @@ async fn commit_and_seal(te: &mut TestEngine, key: Pubkey, value: i64) -> PathBu
     te.seal_and_archive().await
 }
 
-// Replay must rebuild everything between the restored snapshot and the ledger
-// tip: dropping superblock 2's archive forces the restore back onto snapshot 1,
-// so re-executing B crosses superblock 2's sealed checksum (the verification
-// arm's happy path) before C is rebuilt from the unsealed head.
+/// Verifies a startup-restored terminal status rejects the original bytes.
+async fn assert_restored_signature(
+    te: &TestEngine,
+    key: Pubkey,
+    signature: Signature,
+    transaction: Vec<u8>,
+    value: i64,
+) {
+    let status = te
+        .transactions()
+        .status(signature)
+        .await
+        .expect("status lookup succeeds")
+        .expect("terminal status is restored");
+    assert!(
+        status.result.is_ok(),
+        "successful terminal status is available"
+    );
+
+    let result = te
+        .transaction(transaction)
+        .expect("persisted transaction remains valid")
+        .execute()
+        .await
+        .expect("duplicate submission returns a terminal status");
+    assert_eq!(result, Err(TransactionError::AlreadyProcessed));
+    assert_eq!(
+        load_v42_data(te, key),
+        Some(value),
+        "duplicate transaction was not executed again"
+    );
+}
+
+/// Proves snapshot-tail replay rebuilds state and refreshes processed signatures.
+///
+/// Dropping superblock 2's archive forces the restore back onto snapshot 1, so
+/// re-executing B crosses superblock 2's sealed checksum before C is rebuilt
+/// from the unsealed head. C must then remain deduplicated after replay.
 #[tokio::test(flavor = "multi_thread")]
 async fn replay_rebuilds_state_after_counter_lag() {
     let mut te = TestEngine::new().await;
@@ -41,10 +77,13 @@ async fn replay_rebuilds_state_after_counter_lag() {
         s1.ends_with(ACCOUNTSDB_SNAPSHOT_FILE),
         "archive is the compressed accountsdb tarball"
     );
-    // B: K = 20 sealed into superblock 2; C: K = 30 lives only in the ledger's
-    // unsealed head, past every archived snapshot.
+    // B: K = 20 sealed into superblock 2; C increments K and lives only in the
+    // ledger's unsealed head, past every archived snapshot.
     let s2 = commit_and_seal(&mut te, key, 20).await;
-    te.execute(&[E::lit(30).compose(key, &[])]).await.expect("C commits");
+    let (signature, transaction) =
+        signed_view(&te, None, (E::acc(0) + E::lit(1)).compose(key, &[]));
+    let transaction = transaction.inner_data().as_ref().clone();
+    te.execute(transaction.clone()).await.expect("C commits");
     te.advance(2).await;
     let (dirs, authority) = te.close().await;
 
@@ -59,9 +98,10 @@ async fn replay_rebuilds_state_after_counter_lag() {
     let te2 = TestEngine::with(dirs, authority).await;
     assert_eq!(
         load_v42_data(&te2, key),
-        Some(30),
+        Some(21),
         "both post-snapshot mutations were rebuilt purely from ledger replay"
     );
+    assert_restored_signature(&te2, key, signature, transaction, 21).await;
     // The temporary replay sequencer must hand off to a working live one.
     te2.execute(&[E::lit(1).compose(key, &[])])
         .await
@@ -100,11 +140,11 @@ async fn replay_aborts_on_checksum_mismatch() {
     );
 }
 
-// A healthy restart opens persisted state as-is and restores the clean-shutdown
-// volatile dump. A failed execution still counts on both durable sides without
-// writing accounts. The direct-stored delegated account exists in neither
-// snapshots nor ledger, while the read-only account exists only in the volatile
-// dump; the post-seal transaction write pins the persisted tip alongside them.
+/// Proves a clean restart restores processed signatures without re-execution.
+///
+/// Persisted state reopens as-is with the clean-shutdown volatile dump. A failed
+/// execution still counts on both durable sides without writing accounts. The
+/// exact successful transaction remains terminal and is rejected on resubmission.
 #[tokio::test(flavor = "multi_thread")]
 async fn clean_restart_reopens_persisted_and_volatile_state() {
     let mut te = TestEngine::new().await;
@@ -121,6 +161,11 @@ async fn clean_restart_reopens_persisted_and_volatile_state() {
         Some(20),
         "failed execution writes no state"
     );
+    let (signature, transaction) =
+        signed_view(&te, None, (E::acc(0) + E::lit(1)).compose(key, &[]));
+    let transaction = transaction.inner_data().as_ref().clone();
+    te.execute(transaction.clone()).await.expect("increment commits");
+    te.advance(1).await;
     let direct = store_v42(&te, 7, AccountMode::Delegated);
     let volatile = store_v42(&te, 8, AccountMode::ReadOnly);
     let (dirs, authority) = te.close().await;
@@ -128,9 +173,10 @@ async fn clean_restart_reopens_persisted_and_volatile_state() {
     let te2 = TestEngine::with(dirs, authority).await;
     assert_eq!(
         load_v42_data(&te2, key),
-        Some(20),
+        Some(21),
         "persisted tip state reopened as-is"
     );
+    assert_restored_signature(&te2, key, signature, transaction, 21).await;
     assert_eq!(
         load_v42_data(&te2, direct),
         Some(7),

@@ -4,7 +4,7 @@ use std::{collections::VecDeque, hash::Hash, sync::Arc};
 
 use ahash::RandomState;
 use arc_swap::ArcSwap;
-use ledger::request::TransactionStatus;
+use ledger::request::{BlockHistory, TransactionStatus};
 use nucleus::{Slot, ledger::Block, notifier::EventNotifier};
 use parking_lot::Mutex;
 use scc::{HashCache, HashMap, hash_map::Entry};
@@ -12,11 +12,52 @@ use solana_account::AccountMode;
 use solana_hash::Hash as SolanaHash;
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
+use solana_sysvar::slot_hashes::SlotHashes;
 
 use crate::{
     metrics,
     subscriptions::{Subscription, Unicast},
 };
+
+/// Block and transaction history captured at one authoritative startup boundary.
+pub(crate) struct CacheSeed {
+    latest: Block,
+    hashes: Vec<(Slot, SolanaHash)>,
+    history: BlockHistory,
+}
+
+impl CacheSeed {
+    /// Reconciles ledger history with persisted SlotHashes at one state boundary.
+    pub(crate) fn new(history: BlockHistory, slothashes: Option<&SlotHashes>) -> Self {
+        let Some(slothashes) = slothashes.map(SlotHashes::slot_hashes) else {
+            let latest = history.first().map_or(Block::default(), |entry| entry.block);
+            let hashes =
+                history.iter().rev().map(|entry| (entry.block.slot, entry.block.hash)).collect();
+            return Self { latest, hashes, history };
+        };
+
+        let mut hashes = slothashes.to_vec();
+        hashes.extend(
+            history
+                .iter()
+                .skip(hashes.len())
+                .map(|entry| (entry.block.slot, entry.block.hash)),
+        );
+        let latest = hashes.first().map_or(Block::default(), |&(slot, hash)| Block {
+            slot,
+            hash,
+            time: history.first().map_or(0, |entry| entry.block.time),
+            parent: hashes.get(1).map(|(_, hash)| *hash).unwrap_or_default(),
+        });
+        hashes.reverse();
+        Self { latest, hashes, history }
+    }
+
+    /// Returns the latest authoritative block boundary.
+    pub(crate) fn latest(&self) -> Block {
+        self.latest
+    }
+}
 
 pub(crate) struct Caches {
     /// Recent signature statuses keyed by transaction signature.
@@ -25,6 +66,30 @@ pub(crate) struct Caches {
     pub(crate) blocks: BlocksCache,
     /// Account recency and missing-load coordination.
     pub(crate) accounts: Arc<AccountCache>,
+}
+
+impl Caches {
+    /// Creates read caches from one authoritative startup history.
+    pub(crate) fn new(
+        seed: CacheSeed,
+        block_ttl: Slot,
+        signature_ttl: Slot,
+        account_capacity: usize,
+    ) -> Self {
+        let CacheSeed { latest, hashes, history } = seed;
+        let caches = Self {
+            blocks: BlocksCache::new(latest, hashes, block_ttl),
+            signatures: ExpiringCache::new(signature_ttl),
+            accounts: Arc::new(AccountCache::new(account_capacity)),
+        };
+        for (slot, status) in history.into_iter().rev().flat_map(|block| {
+            let slot = block.block.slot;
+            block.signatures.into_iter().map(move |status| (slot, status))
+        }) {
+            caches.signatures.push(status.signature, Some(status.status), slot);
+        }
+        caches
+    }
 }
 
 /// Account access cache along with missing-account load reservations.
@@ -147,16 +212,15 @@ pub(crate) struct BlocksCache {
 
 impl BlocksCache {
     /// Creates a block cache seeded with retained history in ascending slot order.
-    pub(crate) fn new(blocks: BlockSeed, ttl: Slot) -> Self {
-        let latest = blocks.latest;
+    pub(crate) fn new(latest: Block, history: Vec<(Slot, SolanaHash)>, ttl: Slot) -> Self {
         let cache = Self {
             latest: ArcSwap::new(latest.into()),
             history: ExpiringCache::new(ttl),
         };
-        if blocks.history.is_empty() {
+        if history.is_empty() {
             cache.history.push(latest.hash, latest.slot, latest.slot);
         } else {
-            for (slot, hash) in blocks.history {
+            for (slot, hash) in history {
                 cache.history.push(hash, slot, slot);
             }
         }
@@ -254,11 +318,4 @@ impl<K> ExpiringRecord<K> {
     fn expired(&self, instant: Slot) -> bool {
         instant >= self.expires
     }
-}
-
-/// Latest committed boundary and retained hash history used to seed block caches.
-pub(crate) struct BlockSeed {
-    pub(crate) latest: Block,
-    /// Entries are ordered oldest-to-newest and retain their original slots.
-    pub(crate) history: Vec<(Slot, SolanaHash)>,
 }

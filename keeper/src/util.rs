@@ -9,11 +9,15 @@ use ledger::{
         Instruction, ReturnData,
     },
 };
+use nucleus::Slot;
 use solana_message::inner_instruction::{InnerInstruction, InnerInstructionsList};
 use solana_signature::Signature;
 use solana_svm::{
-    transaction_balances::BalanceCollector, transaction_execution_result::ExecutedTransaction,
-    transaction_processing_result::TransactionProcessingResultExtensions,
+    transaction_balances::BalanceCollector,
+    transaction_execution_result::ExecutedTransaction,
+    transaction_processing_result::{
+        TransactionProcessingResult, TransactionProcessingResultExtensions,
+    },
 };
 
 use crate::{FullTransaction, Keeper, Result};
@@ -44,15 +48,14 @@ where
 /// Builds the ledger and cache records for a completed transaction execution.
 pub(crate) fn execution_commit(txn: &mut FullTransaction) -> ExecutionCommit {
     let slot = txn.execution.slot;
-    let result = txn.execution.result.flattened_result();
     let signature = txn.transaction.signatures()[0];
+    let status = transaction_status(&txn.execution.result, slot);
 
     let header = ExecutionHeader {
         signature,
         slot,
-        result: result.clone(),
+        result: status.result.clone(),
     };
-    let status = TransactionStatus { result, slot };
     let details = txn
         .execution
         .result
@@ -63,6 +66,17 @@ pub(crate) fn execution_commit(txn: &mut FullTransaction) -> ExecutionCommit {
     let event = Event::Execution(Execution { header, details });
 
     ExecutionCommit { signature, status, event, logs }
+}
+
+/// Projects an SVM result into the terminal status shared by live and replay commits.
+pub(crate) fn transaction_status(
+    result: &TransactionProcessingResult,
+    slot: Slot,
+) -> TransactionStatus {
+    TransactionStatus {
+        result: result.flattened_result(),
+        slot,
+    }
 }
 
 /// Projects SVM execution data into the retained ledger format.

@@ -257,10 +257,9 @@ async fn block_transition_updates_execution_and_simulation_sysvars() {
     harness.close().await;
 }
 
-// Replay mode still applies balance writes, but it must not publish transaction
-// status because replayed entries were already recorded by the original run.
+/// Proves replay caches its re-executed status without publishing ledger records.
 #[tokio::test(flavor = "current_thread")]
-async fn replay_mode_commits_state_without_recording_status() {
+async fn replay_mode_commits_state_and_caches_status() {
     let harness = Harness::new(true).await;
     let source = store_v42(&harness, 0, AccountMode::Delegated);
     let recipient = store_v42(&harness, 0, AccountMode::Delegated);
@@ -282,8 +281,12 @@ async fn replay_mode_commits_state_without_recording_status() {
         "replay commits the recipient credit"
     );
     assert!(
-        harness.transactions().status(signature).await.unwrap().is_none(),
-        "replay records no status"
+        harness.status(signature).await.result.is_ok(),
+        "replay caches success"
+    );
+    assert!(
+        harness.transactions().get(signature).await.unwrap().is_none(),
+        "replay does not append a ledger transaction"
     );
     harness.close().await;
 }

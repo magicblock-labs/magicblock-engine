@@ -20,7 +20,7 @@ use tokio::{sync::mpsc, time};
 use crate::{
     Result,
     error::RequestResult,
-    schema::{Block, Execution, OwnedBlockstoreEntry},
+    schema::{Block, Execution, ExecutionHeader, OwnedBlockstoreEntry},
 };
 
 /// Result returned by a full transaction lookup.
@@ -42,7 +42,7 @@ pub(crate) type AccountSignaturesPayload =
 /// Payload for a single-block lookup request.
 pub(crate) type BlockPayload = RequestPayload<BlockParams, BlockReadResult>;
 /// Payload for a contiguous block-range request.
-pub(crate) type BlockRangePayload = RequestPayload<Range<Slot>, Result<Vec<Block>>>;
+pub type BlockRangePayload = RequestPayload<Range<Slot>, Result<BlockHistory>>;
 /// Payload for replaying owned blockstore entries after a sealed superblock.
 pub(crate) type ReplayPayload = RequestPayload<ReplayParams, Result<()>>;
 
@@ -85,6 +85,34 @@ pub struct TransactionStatus {
     /// Slot where the transaction executed.
     pub slot: Slot,
 }
+
+impl From<ExecutionHeader> for TransactionStatus {
+    fn from(header: ExecutionHeader) -> Self {
+        Self {
+            result: header.result,
+            slot: header.slot,
+        }
+    }
+}
+
+/// Indexed transaction signature and terminal execution status.
+pub struct SignatureStatus {
+    /// Transaction signature.
+    pub signature: Signature,
+    /// Terminal execution status persisted for the transaction.
+    pub status: TransactionStatus,
+}
+
+/// Block boundary and indexed transaction statuses in block order.
+pub struct BlockWithSignatureStatuses {
+    /// Block boundary.
+    pub block: Block,
+    /// Indexed transaction signatures and statuses.
+    pub signatures: Vec<SignatureStatus>,
+}
+
+/// Blocks ordered newest-to-oldest, with transactions kept in block order.
+pub type BlockHistory = Vec<BlockWithSignatureStatuses>;
 
 /// Account-signature query parameters.
 pub struct AccountSignaturesParams {

@@ -45,7 +45,8 @@ quiesces at superblock seals and compares the reconstructed checksum with the
 recorded seal. A mismatch returns `ReplayError::StateMismatch`. Current state
 opens without replay when its slot and transaction count are each at least the
 ledger values. After replay actually runs, the final transaction counts must be
-equal or startup returns `ReplayError::StateMismatch`.
+equal or startup returns `ReplayError::StateMismatch`. Replay caches each
+re-executed terminal transaction result without appending it to the ledger.
 
 Internal pacing appends one reset marker at the current slot and clears
 chain-mirrored volatile accounts before the pacemaker task starts. Internal

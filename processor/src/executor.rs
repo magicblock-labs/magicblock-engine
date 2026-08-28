@@ -178,16 +178,17 @@ impl TransactionExecutor {
         if !output.processing_result.was_processed_with_successful_result() {
             metrics::failed_transaction(FailureKind::Execution);
         }
+        let execution = ExecutionRecord {
+            result: output.processing_result,
+            balances: output.balance_collector,
+            slot: self.svm.slot(),
+        };
         if self.replay {
-            self.state.transactions().commit_state_transitions(&output.processing_result)?;
+            self.state.transactions().commit_replay(&txn, &execution)?;
         } else {
             let txn = FullTransaction {
                 transaction: txn.into_view(),
-                execution: ExecutionRecord {
-                    result: output.processing_result,
-                    balances: output.balance_collector,
-                    slot: self.svm.slot(),
-                },
+                execution,
             };
             self.state.transactions().commit_execution(txn)?;
         }
