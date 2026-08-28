@@ -14,10 +14,10 @@ use engine::{
 use flume::{Receiver, Sender, TrySendError};
 use ledger::{
     Superblock,
-    schema::{Block, OwnedBlockstoreEntry, blockstore},
+    schema::{Block, OwnedBlockstoreEntry, SuperblockSeal, blockstore},
 };
 use nucleus::{
-    KB,
+    KB, Slot,
     ledger::{ACCOUNTSDB_SNAPSHOT_FILE, BlockstorePosition},
     runtime::BarrierHandle,
     shutdown::{Service, ShutdownHandle, ShutdownManager, ShutdownReason},
@@ -68,8 +68,12 @@ enum ReplicationMessage {
     Unverified(Vec<Vec<u8>>),
     /// Transactions verified by Ingest while Control was occupied.
     Verified(Vec<VerifiedTransaction>),
-    /// Non-transaction entry fenced behind every preceding batch.
-    Entry(OwnedBlockstoreEntry),
+    /// Block boundary fenced behind every preceding batch.
+    Block(Block),
+    /// Superblock seal fenced behind every preceding batch.
+    Superblock(SuperblockSeal),
+    /// Volatile-state reset fenced behind every preceding batch.
+    Reset(Slot),
 }
 
 /// Why connection-scoped Ingest stopped without a terminal replication error.
@@ -203,13 +207,31 @@ impl ReplicationClient {
                     self.schedule(verifier.verify(batch)?).await?;
                 }
                 ReplicationMessage::Verified(batch) => self.schedule(batch).await?,
-                ReplicationMessage::Entry(entry) => {
-                    let boundary = matches!(entry, OwnedBlockstoreEntry::Block(_));
-                    self.process(entry).await?;
-                    if boundary && draining {
+                ReplicationMessage::Block(block) => {
+                    let (external, guard) = ExternalBlock::new(block);
+                    self.pacer.send(external).await.map_err(EngineError::from)?;
+                    let pending = time::timeout(IO_TIMEOUT, self.blocks.recv());
+                    let observed = pending.await?.ok_or(ReplicationError::BlockStreamClosed)?;
+                    if block != observed {
+                        let error = EngineError::Replay(ReplayError::BlockhashMismatch(block.slot));
+                        return Err(error.into());
+                    }
+                    guard.await.map_err(EngineError::from)?;
+                    if draining {
                         let (_guard, position) = self.resume().await?;
                         return Ok(ControlExit::Boundary(position));
                     }
+                }
+                ReplicationMessage::Superblock(expected) => {
+                    let observed = self.superblocks().sealed();
+                    if observed != expected {
+                        error!(?expected, ?observed, "replication state mismatch detected");
+                        metrics::client_state_mismatch();
+                        return Err(EngineError::Replay(ReplayError::StateMismatch).into());
+                    }
+                }
+                ReplicationMessage::Reset(slot) => {
+                    self.engine.replay(OwnedBlockstoreEntry::Reset(slot)).await?;
                 }
             }
         }
@@ -219,36 +241,6 @@ impl ReplicationClient {
     async fn schedule(&self, transactions: Vec<VerifiedTransaction>) -> Result<()> {
         for transaction in transactions {
             TransactionAccessor::verified(&self.engine, transaction).schedule().await?;
-        }
-        Ok(())
-    }
-
-    /// Applies and validates one non-transaction stream entry.
-    async fn process(&mut self, entry: OwnedBlockstoreEntry) -> Result<()> {
-        match entry {
-            OwnedBlockstoreEntry::Block(block) => {
-                let (external, guard) = ExternalBlock::new(block);
-                self.pacer.send(external).await.map_err(EngineError::from)?;
-                let pending = time::timeout(IO_TIMEOUT, self.blocks.recv());
-                let observed = pending.await?.ok_or(ReplicationError::BlockStreamClosed)?;
-                if block != observed {
-                    let error = ReplayError::BlockhashMismatch(block.slot);
-                    Err(EngineError::from(error))?;
-                }
-                guard.await.map_err(EngineError::from)?;
-            }
-            OwnedBlockstoreEntry::Superblock(expected) => {
-                let observed = self.superblocks().sealed();
-                if observed != expected {
-                    error!(?expected, ?observed, "replication state mismatch detected");
-                    metrics::client_state_mismatch();
-                    Err(EngineError::Replay(ReplayError::StateMismatch))?;
-                }
-            }
-            OwnedBlockstoreEntry::Reset(slot) => {
-                self.engine.replay(OwnedBlockstoreEntry::Reset(slot)).await?;
-            }
-            OwnedBlockstoreEntry::Transaction(_) => unreachable!("Ingest batches transactions"),
         }
         Ok(())
     }
@@ -359,18 +351,8 @@ impl Ingest {
     /// Decodes until transport loss, terminal failure, or Control exit.
     fn run(mut self) -> Result<IngestExit> {
         loop {
-            match blockstore::decode(&mut self.stream) {
-                Ok(OwnedBlockstoreEntry::Transaction(transaction)) => {
-                    self.batch.push(transaction);
-                    if self.batch.is_full() && !self.flush()? {
-                        return Ok(IngestExit::Stopped);
-                    }
-                }
-                Ok(entry) => {
-                    if !self.flush()? || self.tx.send(ReplicationMessage::Entry(entry)).is_err() {
-                        return Ok(IngestExit::Stopped);
-                    }
-                }
+            let entry = match blockstore::decode(&mut self.stream) {
+                Ok(entry) => entry,
                 Err(wincode::error::ReadError::Io(error)) => {
                     if !self.flush()? {
                         return Ok(IngestExit::Stopped);
@@ -383,6 +365,21 @@ impl Ingest {
                     }
                     return Err(wincode::Error::from(error).into());
                 }
+            };
+            let message = match entry {
+                OwnedBlockstoreEntry::Transaction(transaction) => {
+                    self.batch.push(transaction);
+                    if self.batch.is_full() && !self.flush()? {
+                        return Ok(IngestExit::Stopped);
+                    }
+                    continue;
+                }
+                OwnedBlockstoreEntry::Block(block) => ReplicationMessage::Block(block),
+                OwnedBlockstoreEntry::Superblock(seal) => ReplicationMessage::Superblock(seal),
+                OwnedBlockstoreEntry::Reset(slot) => ReplicationMessage::Reset(slot),
+            };
+            if !self.flush()? || self.tx.send(message).is_err() {
+                return Ok(IngestExit::Stopped);
             }
         }
     }

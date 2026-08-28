@@ -27,7 +27,7 @@ pub(crate) struct MessageHeaderFrame {
 
 impl MessageHeaderFrame {
     #[inline(always)]
-    pub(crate) fn try_new(bytes: &[u8], offset: &mut usize) -> Result<Self> {
+    pub(crate) fn try_new_legacy_or_v0(bytes: &[u8], offset: &mut usize) -> Result<Self> {
         // Get the message offset.
         let message_offset = try_u32_offset(*offset)?;
 
@@ -69,21 +69,21 @@ mod tests {
     fn test_invalid_version() {
         let bytes = [0b1000_0001];
         let mut offset = 0;
-        assert!(MessageHeaderFrame::try_new(&bytes, &mut offset).is_err());
+        assert!(MessageHeaderFrame::try_new_legacy_or_v0(&bytes, &mut offset).is_err());
     }
 
     #[test]
     fn test_legacy_transaction_missing_header_byte() {
         let bytes = [5, 0];
         let mut offset = 0;
-        assert!(MessageHeaderFrame::try_new(&bytes, &mut offset).is_err());
+        assert!(MessageHeaderFrame::try_new_legacy_or_v0(&bytes, &mut offset).is_err());
     }
 
     #[test]
     fn test_legacy_transaction_valid() {
         let bytes = [5, 1, 2];
         let mut offset = 0;
-        let header = MessageHeaderFrame::try_new(&bytes, &mut offset).unwrap();
+        let header = MessageHeaderFrame::try_new_legacy_or_v0(&bytes, &mut offset).unwrap();
         assert!(matches!(header.version, TransactionVersion::Legacy));
         assert_eq!(header.num_required_signatures, 5);
         assert_eq!(header.num_readonly_signed_accounts, 1);
@@ -94,14 +94,14 @@ mod tests {
     fn test_v0_transaction_missing_header_byte() {
         let bytes = [MESSAGE_VERSION_PREFIX, 5, 1];
         let mut offset = 0;
-        assert!(MessageHeaderFrame::try_new(&bytes, &mut offset).is_err());
+        assert!(MessageHeaderFrame::try_new_legacy_or_v0(&bytes, &mut offset).is_err());
     }
 
     #[test]
     fn test_v0_transaction_valid() {
         let bytes = [MESSAGE_VERSION_PREFIX, 5, 1, 2];
         let mut offset = 0;
-        let header = MessageHeaderFrame::try_new(&bytes, &mut offset).unwrap();
+        let header = MessageHeaderFrame::try_new_legacy_or_v0(&bytes, &mut offset).unwrap();
         assert!(matches!(header.version, TransactionVersion::V0));
         assert_eq!(header.num_required_signatures, 5);
         assert_eq!(header.num_readonly_signed_accounts, 1);
