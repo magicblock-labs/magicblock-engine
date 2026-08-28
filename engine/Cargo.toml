@@ -51,6 +51,7 @@ magicblock-engine = { path = ".", features = ["testkit"] }
 nucleus = { workspace = true, features = ["testkit"] }
 v42-calculator-interface = { workspace = true, features = ["builder"] }
 
+solana-instruction = { workspace = true }
 solana-instruction-error = { workspace = true }
 solana-packet = { workspace = true }
 solana-signer = { workspace = true }

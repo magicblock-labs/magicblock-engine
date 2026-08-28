@@ -71,6 +71,7 @@ fn dispatch(
         MagicRootInstruction::Finalize(flags) => account::finalize(ctx, target, flags),
         MagicRootInstruction::Delete => account::delete(ctx, target),
         MagicRootInstruction::PostFinalize(actions) => post_finalize::process(ctx, actions),
+        MagicRootInstruction::Prepare => account::prepare(ctx, target),
     }
 }
 

@@ -35,6 +35,12 @@ authorization. The SVM's separate top-level-only privilege rule is unchanged.
   placed immediately after the target's `Finalize` by internal composers. It
   rejects any immutable instruction account marked writable and any action that
   targets MagicRoot itself.
+- `Prepare` materializes the target as an empty system-owned placeholder at
+  slot 1 when the target still does not exist at execution time (loaded as a
+  slot-0 placeholder); any existing target is left untouched. The check runs
+  under the transaction's account locks, so concurrent transactions asserting
+  the same missing account converge on the first materialization instead of
+  failing each other.
 
 After authority and caller checks pass, MagicRoot does not determine whether a
 complete account image is stale. Callers must supply current state; slot and

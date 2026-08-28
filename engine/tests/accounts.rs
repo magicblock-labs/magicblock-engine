@@ -12,6 +12,7 @@ use keeper::testkit::{
 };
 use magic_root_interface::MagicRootInstruction;
 use solana_account::{AccountBuilder, AccountMode, OwnedAccount, ReadableAccount};
+use solana_instruction::AccountMeta;
 use solana_instruction_error::InstructionError;
 use solana_pubkey::Pubkey;
 use solana_system_interface::MAX_PERMITTED_DATA_LENGTH;
@@ -454,6 +455,120 @@ async fn create_runs_post_finalize_actions() {
     assert!(
         te.get_account(bad_key).is_none(),
         "nothing commits when the action fails"
+    );
+
+    te.close().await;
+}
+
+// A writable action account that is never initialized stays a Placeholder.
+// PostFinalize must reject that and roll back, not commit an empty Ephemeral.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_rejects_uninitialized_writable_action_accounts() {
+    let te = TestEngine::new().await;
+
+    let source = store_v42(&te, 0, AccountMode::Delegated);
+    let ok_key = Pubkey::new_unique();
+    let missing = Pubkey::new_unique();
+    let mut benign = transfer(source, ok_key, 1);
+    benign.accounts.push(AccountMeta::new(missing, false));
+    let acc = v42_builder(0, AccountMode::Delegated);
+    let result = te.account(ok_key).create(acc, Some(vec![benign])).await;
+    assert!(
+        result.is_err(),
+        "untouched writable placeholder must fail PostFinalize"
+    );
+    assert!(
+        te.get_account(ok_key).is_none(),
+        "create rolls back when a writable action account is left uninitialized"
+    );
+    assert!(
+        te.get_account(missing).is_none(),
+        "the prepared placeholder rolls back with the transaction"
+    );
+
+    te.close().await;
+}
+
+// Concurrent creates of different accounts can name the same missing writable
+// in their actions (the auction-tree pattern). Prepare materializes it only if
+// it still does not exist at execution time, so no create fails another one:
+// each fails solely its own PostFinalize check (the action never initializes
+// the shared writable), never with InvalidArgument or AlreadyProcessed.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_creates_share_one_missing_writable() {
+    let te = TestEngine::new().await;
+
+    let source = store_v42(&te, 0, AccountMode::Delegated);
+    let shared = Pubkey::new_unique();
+    let engine = Engine::clone(&te);
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let engine = engine.clone();
+        let target = Pubkey::new_unique();
+        let mut action = transfer(source, target, 1);
+        action.accounts.push(AccountMeta::new(shared, false));
+        handles.push(tokio::spawn(async move {
+            let result = engine
+                .account(target)
+                .create(v42_builder(0, AccountMode::Delegated), Some(vec![action]))
+                .await;
+            (target, result)
+        }));
+    }
+    for handle in handles {
+        let (target, result) = handle.await.expect("create task");
+        let error = result.expect_err("untouched shared writable fails PostFinalize");
+        assert!(
+            matches!(
+                error,
+                EngineError::TransactionExecution(TransactionError::InstructionError(
+                    _,
+                    InstructionError::Immutable,
+                ))
+            ),
+            "each create fails only its own PostFinalize check: {error:?}"
+        );
+        assert!(te.get_account(target).is_none(), "failed create commits nothing");
+    }
+    assert!(
+        te.get_account(shared).is_none(),
+        "rolled-back creates leave no shared placeholder behind"
+    );
+
+    te.close().await;
+}
+
+// Prepare materializes a missing account as an empty placeholder and leaves any
+// existing account untouched — the execution-time idempotence the concurrent
+// create path relies on.
+#[tokio::test(flavor = "multi_thread")]
+async fn prepare_creates_missing_and_noops_on_existing() {
+    let te = TestEngine::new().await;
+
+    let fresh = Pubkey::new_unique();
+    te.execute(&[MagicRootInstruction::Prepare.compose(fresh).unwrap()])
+        .await
+        .expect("prepare materializes a missing account");
+    let placeholder = te.get_account(fresh).expect("placeholder committed");
+    assert!(placeholder.is(AccountMode::Placeholder));
+    assert_eq!(placeholder.slot(), 1);
+
+    let existing = store_v42(&te, 7, AccountMode::Delegated);
+    let before = te.get_account(existing).expect("existing account");
+    let other = Pubkey::new_unique();
+    te.execute(&[
+        MagicRootInstruction::Prepare.compose(existing).unwrap(),
+        MagicRootInstruction::Prepare.compose(other).unwrap(),
+    ])
+    .await
+    .expect("prepare of an existing account is a no-op");
+    let unchanged = te.get_account(existing).expect("existing account remains");
+    assert!(unchanged.is(AccountMode::Delegated), "mode untouched");
+    assert_eq!(unchanged.slot(), before.slot(), "slot untouched");
+    assert_eq!(unchanged.data(), before.data(), "data untouched");
+    assert!(
+        te.get_account(other).expect("second prepare committed").is(AccountMode::Placeholder),
+        "prepare still materializes the missing account in the same transaction"
     );
 
     te.close().await;

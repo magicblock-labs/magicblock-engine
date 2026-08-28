@@ -1,11 +1,11 @@
 //! Account- and transaction-scoped operation facades.
 
-use std::{sync::atomic::Ordering, time::Duration};
+use std::{collections::BTreeSet, sync::atomic::Ordering, time::Duration};
 
 use keeper::{ExecutionRecord, TransactionView};
 use magic_root_interface::MagicRootInstruction;
 use processor::{SequencerMessage, Simulation, SimulatorMessage};
-use solana_account::OwnedAccount;
+use solana_account::{AccountMode, OwnedAccount};
 use solana_instruction::Instruction;
 use solana_pubkey::Pubkey;
 use solana_transaction::TransactionResult;
@@ -35,16 +35,56 @@ pub struct TransactionAccessor<'a> {
 impl AccountAccessor<'_> {
     /// Creates the account by patching in every field and finalizing it,
     /// optionally running follow-up `actions` once it is finalized.
+    ///
+    /// Missing writable accounts named by `actions` (ER-only PDAs such as an
+    /// auction tree) are asserted with [`MagicRootInstruction::Prepare`] in the
+    /// same transaction, so a follow-up action can initialize them (for example
+    /// `create_ephemeral`). `Prepare` materializes the placeholder only if the
+    /// account still does not exist at execution time, so concurrent creates
+    /// that share such an account converge on the first materialization instead
+    /// of failing each other.
     pub async fn create(
         &self,
         acc: impl Into<OwnedAccount>,
         actions: Option<Vec<Instruction>>,
     ) -> Result<()> {
-        let mut instructions = MagicRootInstruction::compose_account(self.pubkey, acc.into())?;
+        let mut instructions = Vec::new();
+        if let Some(actions) = actions.as_ref() {
+            for pubkey in self.missing_writable_action_accounts(actions) {
+                instructions.push(MagicRootInstruction::Prepare.compose(pubkey)?);
+            }
+        }
+        instructions.extend(MagicRootInstruction::compose_account(self.pubkey, acc.into())?);
         if let Some(actions) = actions {
             instructions.push(MagicRootInstruction::PostFinalize(actions).compose(self.pubkey)?);
         }
         self.execute(instructions).await
+    }
+
+    /// Writable action accounts that are absent or only a slot-0 Placeholder.
+    fn missing_writable_action_accounts(&self, actions: &[Instruction]) -> Vec<Pubkey> {
+        let accounts = self.engine.accounts();
+        let loader = accounts.loader();
+        let mut seen = BTreeSet::new();
+        let mut missing = Vec::new();
+        for action in actions {
+            for meta in &action.accounts {
+                if !meta.is_writable || meta.pubkey == self.pubkey || !seen.insert(meta.pubkey) {
+                    continue;
+                }
+                let needs_prepare = loader
+                    .load(&meta.pubkey)
+                    .ok()
+                    .flatten()
+                    .is_none_or(|account| {
+                        account.is(AccountMode::Placeholder) && account.slot() == 0
+                    });
+                if needs_prepare {
+                    missing.push(meta.pubkey);
+                }
+            }
+        }
+        missing
     }
 
     /// Updates the account by patching in every field of `account`

@@ -70,6 +70,35 @@ pub(crate) fn finalize(
     Ok(())
 }
 
+/// Materializes the target as an empty system-owned placeholder when it does
+/// not exist yet; a target that already exists in any form is left untouched.
+///
+/// The existence check runs at execution time under the transaction's account
+/// locks, so concurrent transactions asserting the same missing account cannot
+/// race: the first one materializes it and the rest no-op.
+pub(crate) fn prepare(
+    ctx: &InvokeContext<'_, '_>,
+    target: IndexOfAccount,
+) -> Result<(), InstructionError> {
+    let mut account = ctx.transaction_context.accounts().try_borrow_mut(target)?;
+    if !account.is(AccountMode::Placeholder) || account.slot() != 0 {
+        ic_msg!(ctx, "MagicRoot: prepare skipped, target exists");
+        return Ok(());
+    }
+    let patches = [
+        AccountFieldPatch::Owner(solana_sdk_ids::system_program::id()),
+        AccountFieldPatch::Slot(1),
+    ];
+    for patch in patches {
+        if let Err(error) = patch.apply(&mut account) {
+            ic_msg!(ctx, "MagicRoot: {}", error);
+            return Err(InstructionError::InvalidArgument);
+        }
+    }
+    ic_msg!(ctx, "MagicRoot: prepared placeholder");
+    Ok(())
+}
+
 /// Marks the target account closed for removal from storage.
 pub(crate) fn delete(
     ctx: &mut InvokeContext<'_, '_>,

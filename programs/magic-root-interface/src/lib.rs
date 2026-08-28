@@ -21,6 +21,12 @@ pub enum MagicRootInstruction {
     /// (e.g. initializing a freshly created account); each is invoked via CPI
     /// against the accounts it declares.
     PostFinalize(Vec<Instruction>),
+    /// Materialize the target as an empty system-owned placeholder if it still
+    /// does not exist at execution time; a target that already exists is left
+    /// untouched. This makes the "create the shared writables my actions need"
+    /// step idempotent, so concurrent creates that name the same missing
+    /// account all converge on whichever transaction materializes it first.
+    Prepare,
 }
 
 impl MagicRootInstruction {
