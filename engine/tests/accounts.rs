@@ -528,7 +528,10 @@ async fn concurrent_creates_share_one_missing_writable() {
             ),
             "each create fails only its own PostFinalize check: {error:?}"
         );
-        assert!(te.get_account(target).is_none(), "failed create commits nothing");
+        assert!(
+            te.get_account(target).is_none(),
+            "failed create commits nothing"
+        );
     }
     assert!(
         te.get_account(shared).is_none(),
@@ -567,7 +570,9 @@ async fn prepare_creates_missing_and_noops_on_existing() {
     assert_eq!(unchanged.slot(), before.slot(), "slot untouched");
     assert_eq!(unchanged.data(), before.data(), "data untouched");
     assert!(
-        te.get_account(other).expect("second prepare committed").is(AccountMode::Placeholder),
+        te.get_account(other)
+            .expect("second prepare committed")
+            .is(AccountMode::Placeholder),
         "prepare still materializes the missing account in the same transaction"
     );
 

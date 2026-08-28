@@ -54,7 +54,10 @@ impl AccountAccessor<'_> {
                 instructions.push(MagicRootInstruction::Prepare.compose(pubkey)?);
             }
         }
-        instructions.extend(MagicRootInstruction::compose_account(self.pubkey, acc.into())?);
+        instructions.extend(MagicRootInstruction::compose_account(
+            self.pubkey,
+            acc.into(),
+        )?);
         if let Some(actions) = actions {
             instructions.push(MagicRootInstruction::PostFinalize(actions).compose(self.pubkey)?);
         }
@@ -72,11 +75,8 @@ impl AccountAccessor<'_> {
                 if !meta.is_writable || meta.pubkey == self.pubkey || !seen.insert(meta.pubkey) {
                     continue;
                 }
-                let needs_prepare = loader
-                    .load(&meta.pubkey)
-                    .ok()
-                    .flatten()
-                    .is_none_or(|account| {
+                let needs_prepare =
+                    loader.load(&meta.pubkey).ok().flatten().is_none_or(|account| {
                         account.is(AccountMode::Placeholder) && account.slot() == 0
                     });
                 if needs_prepare {
