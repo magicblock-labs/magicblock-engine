@@ -776,8 +776,8 @@ fn test_same_slot_reuse_when_size_matches() {
     assert_eq!(reload(&db, &key).data(), vec![2; 64]);
 }
 
-// Incremental +64-byte resizes stay in the slack span instead of appending
-// an exact-fit copy on every write.
+// Incremental +64-byte resizes reuse 32 KiB-rounded slack instead of
+// appending an exact-fit copy on every write.
 #[test]
 fn test_incremental_growth_reuses_slack_span() {
     let (_dir, db) = db();
@@ -789,7 +789,8 @@ fn test_incremental_growth_reuses_slack_span() {
     for i in 1..=2_000 {
         store(&db, key, mutable_data(1, vec![i as u8; 8 + i * 64], &owner));
     }
-    // Four 64 KiB pages, not 2,000 exact-fit copies.
+    // Four slack growths at 32 KiB-rounded images (spans ~64, ~128, ~192,
+    // then ~256 KiB plus headers; 81940 units total), not 2,000 exact-fit copies.
     assert!(
         cursor(&db) - start < 120_000,
         "incremental growth advanced the cursor by {}",
