@@ -110,8 +110,8 @@ impl PersistedStore {
         }
         if let Err(error) = &result {
             warn!(applied, ?error, "accounts persistence failed; rolling back");
-            // Only borrowed accounts need rollback here: owned inserts never
-            // mutate an existing borrowed image in place.
+            // Borrowed commits and in-place owned reuse write the mmap before
+            // the LMDB commit. Only borrowed views keep a sequence to undo.
             let processed = accounts.into_iter().take(applied).map(|(_, a)| a);
             Self::rollback(processed);
         }
@@ -210,6 +210,9 @@ impl PersistedStore {
     }
 
     /// Serializes an owned image into mapped storage and records its offset.
+    ///
+    /// Reuses the live slot when the new payload still fits. Otherwise
+    /// allocates a page-aligned span so small resizes do not append a copy.
     fn insert<'e>(
         &'e self,
         pubkey: &Pubkey,
@@ -217,8 +220,26 @@ impl PersistedStore {
         txn: OptRwTxn<'_, 'e>,
     ) -> Result<()> {
         let txn = write_txn(self.index.env(), txn)?;
-        let units = acc.units();
         let owner = acc.owner().into();
+        let live = self.index.offset(pubkey, txn)?;
+        let existing = match live {
+            // SAFETY: live offsets come from the persisted index.
+            Some(offset) => unsafe { BorrowedAccount::span(self.storage.at(offset)) },
+            None => 0,
+        };
+        let units = acc.units_at_least(existing);
+        if let Some(offset) = live
+            && existing >= acc.units()
+        {
+            self.index.update_owner(pubkey, owner, txn)?;
+            let ptr = self.storage.at(offset);
+            // SAFETY: `offset` is the live image and `existing` still fits.
+            unsafe {
+                let buffer = slice::from_raw_parts_mut(ptr.as_ptr(), existing as usize);
+                acc.serialize(buffer, pubkey);
+            }
+            return Ok(());
+        }
 
         let (ptr, offset) = if let Some(offset) = self.index.allocate(units, txn)? {
             let ptr = self.storage.at(offset);

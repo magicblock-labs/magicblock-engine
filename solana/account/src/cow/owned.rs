@@ -23,21 +23,40 @@ impl OwnedAccount {
         self.allocation() * 2 + IMAGE_OFFSET as u32
     }
 
+    /// Span that can hold this account, reusing `existing_span` when it fits.
+    ///
+    /// New allocations round each image up to 32 KiB so +64-byte resizes
+    /// overwrite the live slot instead of appending an exact-fit copy.
+    pub fn units_at_least(&self, existing_span: u32) -> u32 {
+        let need = self.units();
+        if existing_span >= need {
+            return existing_span;
+        }
+        if existing_span == 0 {
+            return need;
+        }
+        const IMAGE_SLACK: u32 = (32 * 1024 / crate::STORAGE_UNIT) as u32;
+        let alloc = self.allocation().div_ceil(IMAGE_SLACK) * IMAGE_SLACK;
+        alloc * 2 + IMAGE_OFFSET as u32
+    }
+
     /// Returns the storage units needed for one image, rounded up to alignment.
     fn allocation(&self) -> u32 {
         (STATIC_SIZE + self.data.len()).div_ceil(ALIGNMENT) as u32
     }
 
-    /// Writes the account into a buffer sized by `units`.
+    /// Writes the account into a buffer sized by `units` or a larger slack span.
     ///
     /// # Safety
     ///
-    /// `buf` must be exactly `units()` storage units long.
-    /// `pubkey` is written into the image prefix so borrowed iteration can
-    /// recover the full account key without consulting the index.
+    /// `buf` must be at least `units()` storage units long and have even image
+    /// space after the header. `pubkey` is written into the image prefix so
+    /// borrowed iteration can recover the full account key without consulting
+    /// the index.
     pub unsafe fn serialize(&self, buf: &mut [StorageUnit], pubkey: &Pubkey) {
         let ptr = NonNull::new_unchecked(buf.as_mut_ptr());
-        debug_assert_eq!(self.units() as usize, buf.len());
+        debug_assert!(buf.len() >= self.units() as usize);
+        debug_assert_eq!((buf.len() - IMAGE_OFFSET) % 2, 0);
 
         fn write<U, T: Sized>(ptr: NonNull<U>, v: T) -> NonNull<T> {
             // SAFETY: `serialize` requires a buffer sized for the full layout.
@@ -47,7 +66,7 @@ impl OwnedAccount {
             }
         }
 
-        let allocation = self.allocation();
+        let allocation = ((buf.len() - IMAGE_OFFSET) / 2) as u32;
         let ptr = write(ptr, AccountHeader::new(allocation));
         // The image prefix stores the account pubkey for later iteration.
         let ptr = write(ptr, *pubkey);

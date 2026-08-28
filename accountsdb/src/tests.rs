@@ -759,3 +759,41 @@ fn test_large_accounts_growth_and_defrag() {
         assert!(acc.data().iter().all(|&b| b == *fill));
     }
 }
+
+// Same-size owned writes reuse the live slot instead of appending a copy.
+#[test]
+fn test_same_slot_reuse_when_size_matches() {
+    let (_dir, db) = db();
+    let owner = Pubkey::new_unique();
+    let key = Pubkey::new_unique();
+    store(&db, key, mutable_data(1, vec![1; 64], &owner));
+    let start = cursor(&db);
+    let live = offset(&db, &key);
+
+    store(&db, key, mutable_data(2, vec![2; 64], &owner));
+    assert!(offset(&db, &key) == live);
+    assert_eq!(cursor(&db), start);
+    assert_eq!(reload(&db, &key).data(), vec![2; 64]);
+}
+
+// Incremental +64-byte resizes stay in the slack span instead of appending
+// an exact-fit copy on every write.
+#[test]
+fn test_incremental_growth_reuses_slack_span() {
+    let (_dir, db) = db();
+    let owner = Pubkey::new_unique();
+    let key = Pubkey::new_unique();
+    store(&db, key, mutable_data(1, vec![0; 8], &owner));
+    let start = cursor(&db);
+
+    for i in 1..=2_000 {
+        store(&db, key, mutable_data(1, vec![i as u8; 8 + i * 64], &owner));
+    }
+    // Four 64 KiB pages, not 2,000 exact-fit copies.
+    assert!(
+        cursor(&db) - start < 120_000,
+        "incremental growth advanced the cursor by {}",
+        cursor(&db) - start
+    );
+    assert_eq!(reload(&db, &key).data().len(), 8 + 2_000 * 64);
+}
