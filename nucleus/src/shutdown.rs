@@ -9,7 +9,7 @@
 
 use std::{
     error::Error,
-    io,
+    io, mem,
     time::{Duration, Instant},
 };
 
@@ -27,6 +27,20 @@ type HandleFuture = BoxFuture<'static, (Service, ShutdownTier, ShutdownReason)>;
 /// Background service tracked by the shutdown manager.
 #[derive(Clone, Copy, Debug)]
 pub enum Service {
+    /// Leader JSON-RPC and WebSocket ingress.
+    Rpc,
+    /// Process metrics endpoint.
+    Metrics,
+    /// Leader base-chain startup setup.
+    OnchainSetup,
+    /// Program-scheduled task service.
+    TaskScheduler,
+    /// Scheduled base-chain intent execution service.
+    IntentExecution,
+    /// Observed undelegation request service.
+    UndelegationRequests,
+    /// Periodic validator fee claiming service.
+    FeeClaim,
     /// Ledger append worker.
     LedgerAppender,
     /// Ledger read worker.
@@ -54,11 +68,13 @@ impl Service {
     fn tier(&self) -> ShutdownTier {
         use Service::*;
         match self {
-            ReplicationClient => ShutdownTier::One,
+            Rpc | OnchainSetup | TaskScheduler | IntentExecution | UndelegationRequests
+            | FeeClaim | ReplicationClient => ShutdownTier::One,
             PaceMaker => ShutdownTier::Two,
             // The pacemaker drains the sequencer and sends the appender's final
             // sync before either service reaches this tier.
             Sequencer | LedgerAppender => ShutdownTier::Three,
+            Metrics => ShutdownTier::Four,
             _ => ShutdownTier::Four,
         }
     }
@@ -113,23 +129,27 @@ impl ShutdownManager {
     ///
     /// Each tier gets `TIMEOUT` to report before the next tier is
     /// cancelled. Already terminated services are skipped by their tier.
-    pub async fn terminate(&mut self) {
+    pub async fn terminate(&mut self) -> ShutdownReason {
         info!("initiating graceful shutdown of the engine");
         let start = Instant::now();
         let mut timers = [start; ShutdownTier::COUNT];
+        let mut outcome = ShutdownReason::Signalled;
         for tier in ShutdownTier::ORDER {
             timers[tier as usize] = Instant::now();
             self.tokens[tier as usize].cancel();
             if self.pending[tier as usize] == 0 {
                 continue;
             }
-            if timeout(TIMEOUT, self.drain(tier, &timers)).await.is_err() {
+            if let Err(e) = timeout(TIMEOUT, self.drain(tier, &timers, &mut outcome)).await {
                 let remaining = self.pending[tier as usize];
                 let elapsed = timers[tier as usize].elapsed();
                 warn!(?tier, remaining, ?elapsed, "shutdown tier timed out");
+                let error = Box::new(io::Error::from(e));
+                outcome = outcome.combine(ShutdownReason::Error(error));
             }
         }
         info!(elapsed = ?start.elapsed(), "engine shutdown complete");
+        outcome
     }
 
     /// Register a service and return its cancellation handle.
@@ -148,7 +168,12 @@ impl ShutdownManager {
         }
     }
 
-    async fn drain(&mut self, tier: ShutdownTier, timers: &[Instant]) {
+    async fn drain(
+        &mut self,
+        tier: ShutdownTier,
+        timers: &[Instant],
+        outcome: &mut ShutdownReason,
+    ) {
         while self.pending[tier as usize] != 0 {
             let Some((service, tier, reason)) = self.handles.next().await else {
                 return;
@@ -156,7 +181,8 @@ impl ShutdownManager {
             // Another tier may finish while this one drains; debit its own pending count.
             self.pending(tier, -1);
             let elapsed = timers[tier as usize].elapsed();
-            Self::log(service, reason, elapsed);
+            Self::log(service, &reason, elapsed);
+            *outcome = mem::take(outcome).combine(reason);
         }
     }
 
@@ -164,7 +190,7 @@ impl ShutdownManager {
         self.pending[tier as usize] += op;
     }
 
-    fn log(service: Service, reason: ShutdownReason, elapsed: Duration) {
+    fn log(service: Service, reason: &ShutdownReason, elapsed: Duration) {
         match reason {
             ShutdownReason::Unexpected => {
                 warn!(?service, ?elapsed, "terminated unexpectedly")
@@ -221,6 +247,32 @@ pub enum ShutdownReason {
     Error(Box<dyn Error + Send + Sync + 'static>),
     /// Service staged state that must be installed by restarting the engine.
     RestartRequired,
+}
+
+impl ShutdownReason {
+    /// Combines independently observed shutdown reasons into one process outcome.
+    ///
+    /// The first concrete error is retained ahead of an unexpected exit, a
+    /// requested restart, or a clean signal. This lets callers wait for the
+    /// first terminating service, drain every remaining service, and decide the
+    /// process outcome without losing a later failure.
+    pub fn combine(self, next: Self) -> Self {
+        if next.exit_code() > self.exit_code() { next } else { self }
+    }
+
+    /// Returns the stable process exit code for this shutdown reason.
+    ///
+    /// `0` denotes a clean signal, `1` requests a restart, `2` denotes an
+    /// unexpected service exit, and `3` preserves a concrete service error.
+    /// [`Self::combine`] also uses this ordering to retain the strongest reason.
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Self::Signalled => 0,
+            Self::RestartRequired => 1,
+            Self::Unexpected => 2,
+            Self::Error(_) => 3,
+        }
+    }
 }
 
 impl ShutdownHandle {
