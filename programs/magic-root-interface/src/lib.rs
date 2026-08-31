@@ -7,6 +7,15 @@ use wincode::{SchemaRead, SchemaWrite};
 
 declare_id!("MagicRootDRJ5atQjSJUxFjXzjeZXMADHUDznbk22gy");
 
+/// Follow-up instructions and the program that delegated the finalized account.
+#[derive(SchemaRead, SchemaWrite)]
+pub struct PostFinalize {
+    /// Program that owned the delegated account at the matched base-layer slot.
+    pub source_program: Pubkey,
+    /// Instructions to invoke after account finalization.
+    pub actions: Vec<Instruction>,
+}
+
 /// Instructions accepted by the MagicRoot built-in program.
 #[derive(SchemaRead, SchemaWrite)]
 pub enum MagicRootInstruction {
@@ -20,7 +29,7 @@ pub enum MagicRootInstruction {
     /// Run follow-up instructions immediately after finalizing the same target
     /// (e.g. initializing a freshly created account); each is invoked via CPI
     /// against the accounts it declares.
-    PostFinalize(Vec<Instruction>),
+    PostFinalize(PostFinalize),
 }
 
 impl MagicRootInstruction {
@@ -58,10 +67,10 @@ impl MagicRootInstruction {
     ///
     /// [`PostFinalize`]: MagicRootInstruction::PostFinalize
     fn extend_metas(&self, accounts: &mut Vec<AccountMeta>) {
-        let Self::PostFinalize(ixs) = self else {
+        let Self::PostFinalize(post_finalize) = self else {
             return;
         };
-        for ix in ixs {
+        for ix in &post_finalize.actions {
             accounts.push(AccountMeta::new_readonly(ix.program_id, false));
             let metas = ix.accounts.clone().into_iter().map(|mut meta| {
                 meta.is_signer = false;

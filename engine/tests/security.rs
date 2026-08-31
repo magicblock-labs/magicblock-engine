@@ -12,6 +12,7 @@
 use engine::{EngineError, testkit::TestEngine};
 use keeper::testkit::{load_v42_data, load_v42_lamports, signed_view, store_v42, v42_builder};
 use magic_root_interface::MagicRootInstruction;
+use magic_root_interface::PostFinalize;
 use solana_account::{AccountFieldPatch, AccountMode};
 use solana_instruction::Instruction;
 use solana_instruction_error::InstructionError;
@@ -98,7 +99,10 @@ async fn post_finalize_immutable_action_is_rejected() {
     let key = Pubkey::new_unique();
     let mut ixs = compose_v42_replacement(key, AccountMode::ReadOnly, 1);
     let post_finalize_idx = ixs.len();
-    let post_finalize = MagicRootInstruction::PostFinalize(vec![E::lit(9).compose(key, &[])]);
+    let post_finalize = MagicRootInstruction::PostFinalize(PostFinalize {
+        source_program: Pubkey::new_unique(),
+        actions: vec![E::lit(9).compose(key, &[])],
+    });
     ixs.push(post_finalize.compose(key).unwrap());
     assert_eq!(
         te.execute(ixs.as_slice()).await,
@@ -132,9 +136,13 @@ async fn post_finalize_rejects_magic_root_ix() {
     .compose(key)
     .unwrap();
 
+    let post = PostFinalize {
+        source_program: owner,
+        actions: vec![patch],
+    };
     let error = te
         .account(key)
-        .create(account, Some(vec![patch]))
+        .create(account, Some(post))
         .await
         .expect_err("PostFinalize rejects a recursive MagicRoot patch");
     assert!(

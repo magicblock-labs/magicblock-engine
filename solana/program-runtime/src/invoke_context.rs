@@ -227,6 +227,13 @@ pub struct InvokeContext<'a, 'ix_data> {
     pub memory_contexts: MemoryContexts,
     /// Pairs of index in TX instruction trace and VM register trace
     register_traces: Vec<(usize, Vec<[u64; 12]>)>,
+    native_caller: Option<NativeCaller>,
+}
+
+#[derive(Clone, Copy)]
+struct NativeCaller {
+    program_id: Pubkey,
+    stack_height: usize,
 }
 
 impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
@@ -252,6 +259,7 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
             syscall_context: Vec::new(),
             memory_contexts: MemoryContexts::new(),
             register_traces: Vec::new(),
+            native_caller: None,
         }
     }
 
@@ -325,17 +333,43 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
         Ok(())
     }
 
-    /// Deprecated entrypoint for a cross-program invocation from a builtin program
-    // NOTE:
-    // we only keep it around for one special case of CPI with post-delegation actions
-    pub fn native_invoke(
+    /// Invokes an instruction from a builtin while attributing its direct frame
+    /// to `source_program`. Nested CPI continues to use its physical caller.
+    pub fn native_invoke_as(
         &mut self,
+        source_program: Pubkey,
         instruction: Instruction,
         signers: &[Pubkey],
     ) -> Result<(), InstructionError> {
+        let stack_height =
+            self.get_stack_height().checked_add(1).ok_or(InstructionError::CallDepth)?;
         self.prepare_next_cpi_instruction(instruction, signers)?;
-        self.process_instruction(&mut 0)?;
-        Ok(())
+        let native_caller = self.native_caller.replace(NativeCaller {
+            program_id: source_program,
+            stack_height,
+        });
+        let result = self.process_instruction(&mut 0);
+        self.native_caller = native_caller;
+        result
+    }
+
+    /// Returns the program authorized as the caller of the current instruction.
+    /// Scoped native provenance applies only to its direct child frame.
+    pub fn effective_caller(&self) -> Result<Option<Pubkey>, InstructionError> {
+        let stack_height = self.get_stack_height();
+        if let Some(caller) = self.native_caller
+            && caller.stack_height == stack_height
+        {
+            return Ok(Some(caller.program_id));
+        }
+        let Some(parent_level) = stack_height.checked_sub(2) else {
+            return Ok(None);
+        };
+        self.transaction_context
+            .get_instruction_context_at_nesting_level(parent_level)
+            .and_then(|instruction| instruction.get_program_key())
+            .copied()
+            .map(Some)
     }
 
     /// Helper to prepare for process_instruction() when the instruction is not a top level one,
@@ -1062,6 +1096,8 @@ mod tests {
     enum MockInstruction {
         NoopSuccess,
         NoopFail,
+        AssertEffectiveCaller(Pubkey),
+        InvokeAndAssertEffectiveCaller(Pubkey),
         ModifyOwned,
         ModifyNotOwned,
         ModifyReadonly,
@@ -1104,6 +1140,22 @@ mod tests {
                 match instruction {
                     MockInstruction::NoopSuccess => (),
                     MockInstruction::NoopFail => return Err(InstructionError::GenericError),
+                    MockInstruction::AssertEffectiveCaller(expected) => {
+                        assert_eq!(invoke_context.effective_caller()?, Some(expected));
+                    }
+                    MockInstruction::InvokeAndAssertEffectiveCaller(expected) => {
+                        let target = *instruction_context.get_key_of_instruction_account(0)?;
+                        let extra = *instruction_context.get_key_of_instruction_account(1)?;
+                        let inner_instruction = Instruction::new_with_bincode(
+                            *program_id,
+                            &MockInstruction::AssertEffectiveCaller(expected),
+                            vec![
+                                AccountMeta::new(target, false),
+                                AccountMeta::new_readonly(extra, false),
+                            ],
+                        );
+                        invoke_context.native_invoke_signed(inner_instruction, &[])?;
+                    }
                     MockInstruction::ModifyOwned => instruction_context
                         .try_borrow_instruction_account(0)?
                         .set_data_from_slice(&[1])?,
@@ -1796,6 +1848,90 @@ mod tests {
         let result = invoke_context.native_invoke_signed(inner_instruction, signer_seeds);
         invoke_context.pop().unwrap();
         result
+    }
+
+    fn run_native_invoke_as_test(
+        source_program: Pubkey,
+        instruction: Instruction,
+    ) -> (Result<(), InstructionError>, Option<Pubkey>) {
+        let target_account = AccountSharedData::new(100, 0, &TEST_CALLEE_PROGRAM_ID);
+        let mock_extra_account = AccountSharedData::new(0, 1, &system_program::id());
+        let mut caller_program_account = AccountSharedData::new(1, 1, &native_loader::id());
+        caller_program_account.set_executable(true);
+        let mut callee_program_account = AccountSharedData::new(1, 1, &native_loader::id());
+        callee_program_account.set_executable(true);
+        let transaction_accounts = vec![
+            (TEST_ACCOUNT_KEY, target_account),
+            (TEST_CALLER_PROGRAM_ID, caller_program_account),
+            (TEST_MOCK_EXTRA_KEY, mock_extra_account),
+            (TEST_CALLEE_PROGRAM_ID, callee_program_account),
+        ];
+
+        with_mock_invoke_context!(invoke_context, transaction_context, transaction_accounts);
+        let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::default();
+        program_cache_for_tx_batch.replenish(
+            TEST_CALLEE_PROGRAM_ID,
+            Arc::new(ProgramCacheEntry::new_builtin((
+                MockBuiltin::vm,
+                MockBuiltin::codegen,
+            ))),
+        );
+        invoke_context.program_cache_for_tx_batch = &mut program_cache_for_tx_batch;
+
+        let instruction_accounts =
+            (0..4).map(|i| InstructionAccount::new(i, false, i < 2)).collect::<Vec<_>>();
+        invoke_context
+            .transaction_context
+            .configure_top_level_instruction_for_tests(1, instruction_accounts, vec![])
+            .unwrap();
+        invoke_context.push().unwrap();
+
+        let result = invoke_context.native_invoke_as(source_program, instruction, &[]);
+        let effective_caller = invoke_context.effective_caller().unwrap();
+        invoke_context.pop().unwrap();
+        (result, effective_caller)
+    }
+
+    /// Proves scoped native provenance reaches only the direct action frame and
+    /// is cleared after both successful nested CPI and failed action execution.
+    #[test]
+    fn native_invoke_as_scopes_effective_caller() {
+        let direct = Instruction::new_with_bincode(
+            TEST_CALLEE_PROGRAM_ID,
+            &MockInstruction::AssertEffectiveCaller(TEST_WRONG_PROGRAM_ID),
+            vec![
+                AccountMeta::new(TEST_ACCOUNT_KEY, false),
+                AccountMeta::new_readonly(TEST_MOCK_EXTRA_KEY, false),
+            ],
+        );
+        let (result, caller_after) = run_native_invoke_as_test(TEST_WRONG_PROGRAM_ID, direct);
+        assert_eq!(result, Ok(()));
+        assert_eq!(caller_after, None);
+
+        let nested = Instruction::new_with_bincode(
+            TEST_CALLEE_PROGRAM_ID,
+            &MockInstruction::InvokeAndAssertEffectiveCaller(TEST_CALLEE_PROGRAM_ID),
+            vec![
+                AccountMeta::new(TEST_ACCOUNT_KEY, false),
+                AccountMeta::new_readonly(TEST_MOCK_EXTRA_KEY, false),
+                AccountMeta::new_readonly(TEST_CALLEE_PROGRAM_ID, false),
+            ],
+        );
+        let (result, caller_after) = run_native_invoke_as_test(TEST_WRONG_PROGRAM_ID, nested);
+        assert_eq!(result, Ok(()));
+        assert_eq!(caller_after, None);
+
+        let failing = Instruction::new_with_bincode(
+            TEST_CALLEE_PROGRAM_ID,
+            &MockInstruction::NoopFail,
+            vec![
+                AccountMeta::new(TEST_ACCOUNT_KEY, false),
+                AccountMeta::new_readonly(TEST_MOCK_EXTRA_KEY, false),
+            ],
+        );
+        let (result, caller_after) = run_native_invoke_as_test(TEST_WRONG_PROGRAM_ID, failing);
+        assert_eq!(result, Err(InstructionError::GenericError));
+        assert_eq!(caller_after, None);
     }
 
     // Valid PDA seeds grant signer privilege to the derived address.

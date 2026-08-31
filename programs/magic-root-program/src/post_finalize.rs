@@ -1,4 +1,4 @@
-use solana_instruction::Instruction;
+use magic_root_interface::PostFinalize;
 use solana_instruction_error::InstructionError;
 use solana_program_runtime::invoke_context::InvokeContext;
 use solana_svm_log_collector::ic_msg;
@@ -9,16 +9,20 @@ use solana_svm_log_collector::ic_msg;
 /// in a mode this engine may mutate.
 pub(crate) fn process(
     ctx: &mut InvokeContext<'_, '_>,
-    actions: Vec<Instruction>,
+    post_finalize: PostFinalize,
 ) -> Result<(), InstructionError> {
-    ic_msg!(ctx, "MagicRoot: post-finalize {} action(s)", actions.len());
-    for action in actions {
+    ic_msg!(
+        ctx,
+        "MagicRoot: post-finalize {} action(s)",
+        post_finalize.actions.len()
+    );
+    for action in post_finalize.actions {
         let signers: Vec<_> = action
             .accounts
             .iter()
             .filter_map(|meta| meta.is_signer.then_some(meta.pubkey))
             .collect();
-        ctx.native_invoke(action, &signers)?;
+        ctx.native_invoke_as(post_finalize.source_program, action, &signers)?;
     }
 
     let instruction = ctx.transaction_context.get_current_instruction_context()?;
