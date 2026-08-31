@@ -126,13 +126,6 @@ impl PersistedStore {
     }
 
     /// Flushes the mapped storage and LMDB index to durable storage.
-    ///
-    /// Only a `sync` flush forces the LMDB index to disk: the env runs with
-    /// `NO_SYNC`, so `index.flush()` is a full fsync whose latency grows with
-    /// the dirty set. Doing that on every slot boundary stalls block
-    /// production under write-heavy load; durability is instead established
-    /// at checksum boundaries, and a torn async flush is caught by
-    /// [`Self::validate`] on startup.
     pub(crate) fn flush(&self, sync: bool) -> heed::Result<()> {
         let _timer = metrics::time(Operation::Flush);
         if sync {
