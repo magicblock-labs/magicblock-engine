@@ -128,8 +128,8 @@ impl PersistedStore {
     /// Flushes the mapped storage and LMDB index to durable storage.
     pub(crate) fn flush(&self, sync: bool) -> heed::Result<()> {
         let _timer = metrics::time(Operation::Flush);
-        self.index.flush()?;
         if sync {
+            self.index.flush()?;
             let checksum = self.checksum()?;
             self.meta().checksum.store(checksum, Release);
         }
