@@ -7,10 +7,18 @@ use wincode::{SchemaRead, SchemaWrite};
 
 declare_id!("MagicRootDRJ5atQjSJUxFjXzjeZXMADHUDznbk22gy");
 
-/// Follow-up instructions and the program that delegated the finalized account.
+/// Trusted provenance and follow-up instructions for a finalized account.
+///
+/// `source_program` becomes the effective caller of each direct action. Code
+/// constructing this payload must therefore verify it against authoritative
+/// provenance, such as the owner in a slot-matched delegation record, before
+/// submitting [`MagicRootInstruction::PostFinalize`]. It must not be copied
+/// from untrusted action data. The source program need not equal the finalized
+/// account's current owner because projected accounts may deliberately retain
+/// a different state owner.
 #[derive(SchemaRead, SchemaWrite)]
 pub struct PostFinalize {
-    /// Program that owned the delegated account at the matched base-layer slot.
+    /// Verified program to expose as the effective caller of each direct action.
     pub source_program: Pubkey,
     /// Instructions to invoke after account finalization.
     pub actions: Vec<Instruction>,

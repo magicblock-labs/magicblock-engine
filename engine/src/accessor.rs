@@ -34,7 +34,10 @@ pub struct TransactionAccessor<'a> {
 
 impl AccountAccessor<'_> {
     /// Creates the account by patching in every field and finalizing it,
-    /// optionally running follow-up `actions` once it is finalized.
+    /// optionally running follow-up actions once it is finalized.
+    ///
+    /// Callers supplying `post_finalize` must verify its trusted provenance as
+    /// required by [`PostFinalize`] before invoking this method.
     pub async fn create(
         &self,
         acc: impl Into<OwnedAccount>,
