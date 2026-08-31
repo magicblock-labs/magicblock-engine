@@ -7,6 +7,23 @@ use wincode::{SchemaRead, SchemaWrite};
 
 declare_id!("MagicRootDRJ5atQjSJUxFjXzjeZXMADHUDznbk22gy");
 
+/// Trusted provenance and follow-up instructions for a finalized account.
+///
+/// `source_program` becomes the effective caller of each direct action. Code
+/// constructing this payload must therefore verify it against authoritative
+/// provenance, such as the owner in a slot-matched delegation record, before
+/// submitting [`MagicRootInstruction::PostFinalize`]. It must not be copied
+/// from untrusted action data. The source program need not equal the finalized
+/// account's current owner because projected accounts may deliberately retain
+/// a different state owner.
+#[derive(SchemaRead, SchemaWrite)]
+pub struct PostFinalize {
+    /// Verified program to expose as the effective caller of each direct action.
+    pub source_program: Pubkey,
+    /// Instructions to invoke after account finalization.
+    pub actions: Vec<Instruction>,
+}
+
 /// Instructions accepted by the MagicRoot built-in program.
 #[derive(SchemaRead, SchemaWrite)]
 pub enum MagicRootInstruction {
@@ -20,7 +37,7 @@ pub enum MagicRootInstruction {
     /// Run follow-up instructions immediately after finalizing the same target
     /// (e.g. initializing a freshly created account); each is invoked via CPI
     /// against the accounts it declares.
-    PostFinalize(Vec<Instruction>),
+    PostFinalize(PostFinalize),
 }
 
 impl MagicRootInstruction {
@@ -58,10 +75,10 @@ impl MagicRootInstruction {
     ///
     /// [`PostFinalize`]: MagicRootInstruction::PostFinalize
     fn extend_metas(&self, accounts: &mut Vec<AccountMeta>) {
-        let Self::PostFinalize(ixs) = self else {
+        let Self::PostFinalize(post_finalize) = self else {
             return;
         };
-        for ix in ixs {
+        for ix in &post_finalize.actions {
             accounts.push(AccountMeta::new_readonly(ix.program_id, false));
             let metas = ix.accounts.clone().into_iter().map(|mut meta| {
                 meta.is_signer = false;

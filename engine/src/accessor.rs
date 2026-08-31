@@ -3,7 +3,7 @@
 use std::{sync::atomic::Ordering, time::Duration};
 
 use keeper::{ExecutionRecord, TransactionView};
-use magic_root_interface::MagicRootInstruction;
+use magic_root_interface::{MagicRootInstruction, PostFinalize};
 use processor::{SequencerMessage, Simulation, SimulatorMessage};
 use solana_account::OwnedAccount;
 use solana_instruction::Instruction;
@@ -34,15 +34,19 @@ pub struct TransactionAccessor<'a> {
 
 impl AccountAccessor<'_> {
     /// Creates the account by patching in every field and finalizing it,
-    /// optionally running follow-up `actions` once it is finalized.
+    /// optionally running follow-up actions once it is finalized.
+    ///
+    /// Callers supplying `post_finalize` must verify its trusted provenance as
+    /// required by [`PostFinalize`] before invoking this method.
     pub async fn create(
         &self,
         acc: impl Into<OwnedAccount>,
-        actions: Option<Vec<Instruction>>,
+        post_finalize: Option<PostFinalize>,
     ) -> Result<()> {
         let mut instructions = MagicRootInstruction::compose_account(self.pubkey, acc.into())?;
-        if let Some(actions) = actions {
-            instructions.push(MagicRootInstruction::PostFinalize(actions).compose(self.pubkey)?);
+        if let Some(post_finalize) = post_finalize {
+            let ix = MagicRootInstruction::PostFinalize(post_finalize);
+            instructions.push(ix.compose(self.pubkey)?);
         }
         self.execute(instructions).await
     }

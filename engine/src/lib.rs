@@ -36,6 +36,7 @@ pub mod testkit;
 
 pub use accessor::{AccountAccessor, TransactionAccessor};
 pub use error::{EngineError, ReplayError, Result};
+pub use magic_root_interface::PostFinalize;
 pub use transaction::{IntoTransactionView, TransactionVerifier, VerifiedTransaction};
 
 use crate::pacemaker::{ExternalPacer, PaceMaker};

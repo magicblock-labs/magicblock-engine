@@ -6,7 +6,7 @@
 //! that post-finalize actions actually run.
 #![cfg(test)]
 
-use engine::{Engine, EngineError, testkit::TestEngine};
+use engine::{Engine, EngineError, PostFinalize, testkit::TestEngine};
 use keeper::testkit::{
     V42_ID, load_v42_data, load_v42_lamports, patterned_bytes, store_v42, v42_builder,
 };
@@ -212,8 +212,12 @@ async fn account_create_accepts_max_data_with_post_finalize() {
         .data(data.clone());
     let action = transfer(source, output, 1);
 
+    let post = PostFinalize {
+        source_program: V42_ID,
+        actions: vec![action],
+    };
     te.account(key)
-        .create(account, Some(vec![action]))
+        .create(account, Some(post))
         .await
         .expect("maximum-sized account and post-finalize action execute atomically");
 
@@ -233,12 +237,13 @@ async fn account_create_accepts_max_data_with_post_finalize() {
     let excessive_cpis = (1..CPI_CALLS)
         .fold(E::lit(1).cpi(), |expr, _| expr + E::lit(1).cpi())
         .compose(output, &[]);
+    let post = PostFinalize {
+        source_program: V42_ID,
+        actions: vec![transfer(source, output, 1), excessive_cpis],
+    };
     let error = te
         .account(failed_key)
-        .create(
-            failed_account,
-            Some(vec![transfer(source, output, 1), excessive_cpis]),
-        )
+        .create(failed_account, Some(post))
         .await
         .expect_err("257 V42 self-CPIs exceed the trace limit");
 
@@ -426,8 +431,12 @@ async fn create_runs_post_finalize_actions() {
     let ok_key = Pubkey::new_unique();
     let acc = v42_builder(0, AccountMode::Delegated);
     let benign = transfer(source, ok_key, 1);
+    let post = PostFinalize {
+        source_program: V42_ID,
+        actions: vec![benign],
+    };
     te.account(ok_key)
-        .create(acc, Some(vec![benign]))
+        .create(acc, Some(post))
         .await
         .expect("create with a succeeding post-finalize action");
     assert_eq!(
@@ -446,7 +455,11 @@ async fn create_runs_post_finalize_actions() {
     let bad_key = Pubkey::new_unique();
     let failing = (E::lit(i64::MIN) - E::lit(1)).compose(bad_key, &[]);
     let acc = v42_builder(0, AccountMode::Delegated);
-    let result = te.account(bad_key).create(acc, Some(vec![failing])).await;
+    let post = PostFinalize {
+        source_program: V42_ID,
+        actions: vec![failing],
+    };
+    let result = te.account(bad_key).create(acc, Some(post)).await;
     assert!(
         result.is_err(),
         "failing post-finalize action surfaces an error"
