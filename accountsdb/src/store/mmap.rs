@@ -10,7 +10,7 @@ use std::{
     os::fd::AsRawFd,
     path::Path,
     ptr::NonNull,
-    sync::atomic::{AtomicU32, AtomicU64, Ordering::*},
+    sync::atomic::{AtomicU64, Ordering::*},
 };
 
 use memmap2::{MmapMut, MmapOptions};
@@ -39,7 +39,7 @@ const INIT_STORAGE_SIZE: u64 = STORAGE_BLOCK + DATABASE_META_RESERVATION as u64;
 #[cfg(feature = "testkit")]
 const MMAP_SIZE: usize = 64 * MB;
 #[cfg(not(feature = "testkit"))]
-const MMAP_SIZE: usize = u32::MAX as usize * STORAGE_UNIT + DATABASE_META_RESERVATION;
+const MMAP_SIZE: usize = 1024 * nucleus::GB;
 
 /// One allocation inside the mapped storage.
 pub(crate) struct Allocation {
@@ -145,7 +145,7 @@ pub(crate) struct DatabaseMeta {
     /// Database statistics.
     stats: Stats,
     /// Next allocation cursor.
-    pub(super) cursor: AtomicU32,
+    pub(super) cursor: AtomicU64,
 }
 
 impl MappedStorage {
@@ -200,7 +200,7 @@ impl MappedStorage {
         let meta = self.meta();
         if meta.version != VERSION {
             Err(AccountsDBError::UnsupportedVersion(meta.version))
-        } else if Self::bytes(meta.cursor.load(Acquire) as u64) > meta.len.load(Acquire) {
+        } else if Self::bytes(meta.cursor.load(Acquire)) > meta.len.load(Acquire) {
             Err(AccountsDBError::Corruption)
         } else {
             Ok(())
@@ -220,12 +220,12 @@ impl MappedStorage {
     }
 
     /// Allocates a fresh span of `units` storage units.
-    pub(crate) fn allocate(&self, units: u32) -> Result<Allocation> {
+    pub(crate) fn allocate(&self, units: u64) -> Result<Allocation> {
         let meta = self.meta();
         let mut offset = meta.cursor.load(Acquire);
         loop {
             let end = offset.checked_add(units).ok_or(AccountsDBError::Allocation)?;
-            let needed = Self::bytes(end as u64);
+            let needed = Self::bytes(end);
             if needed > meta.len.load(Acquire) {
                 self.grow(needed)?;
             }
@@ -248,20 +248,20 @@ impl MappedStorage {
     }
 
     /// Returns the current allocation cursor in storage units.
-    pub(crate) fn cursor(&self) -> u32 {
+    pub(crate) fn cursor(&self) -> u64 {
         self.meta().cursor.load(Acquire)
     }
 
     /// Shrinks the file to the current cursor.
-    pub(super) fn shrink(&self, units: u32) -> io::Result<()> {
-        self.resize(Self::bytes(units as u64), u64::le)?;
+    pub(super) fn shrink(&self, units: u64) -> io::Result<()> {
+        self.resize(Self::bytes(units), u64::le)?;
         self.meta().cursor.store(units, Release);
         Ok(())
     }
 
     /// Returns the active byte range, including the metadata reservation.
     fn active(&self) -> Range<usize> {
-        0..Self::bytes(self.cursor() as u64) as usize
+        0..Self::bytes(self.cursor()) as usize
     }
 
     /// Converts storage units into file bytes, including the metadata reservation.

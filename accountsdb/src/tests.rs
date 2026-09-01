@@ -98,7 +98,7 @@ fn close(db: &AccountsDB, pubkey: &Pubkey) {
 }
 
 /// Allocation high-water mark of the persisted store, in storage units.
-fn cursor(db: &AccountsDB) -> u32 {
+fn cursor(db: &AccountsDB) -> u64 {
     db.persisted.storage.cursor()
 }
 
@@ -110,7 +110,7 @@ fn offset(db: &AccountsDB, pubkey: &Pubkey) -> impl Copy + PartialEq + use<> {
 }
 
 /// Defragments until a pass makes no change and returns the reclaimed total.
-fn defrag_to_stable(db: &AccountsDB) -> u32 {
+fn defrag_to_stable(db: &AccountsDB) -> u64 {
     let mut total = 0;
     loop {
         // SAFETY: the test is the sole owner of the store during defrag.
@@ -123,17 +123,17 @@ fn defrag_to_stable(db: &AccountsDB) -> u32 {
 }
 
 /// Builds a mutable account with an exact persisted span.
-fn mutable_units(lamports: u64, units: u32, owner: &Pubkey) -> AccountSharedData {
+fn mutable_units(lamports: u64, units: u64, owner: &Pubkey) -> AccountSharedData {
     let account = mutable_at_least(lamports, units, owner);
-    assert_eq!(account.owned().units(), units);
+    assert_eq!(u64::from(account.owned().units()), units);
     account
 }
 
 /// Builds the smallest mutable account spanning at least `units` storage units.
-fn mutable_at_least(lamports: u64, units: u32, owner: &Pubkey) -> AccountSharedData {
+fn mutable_at_least(lamports: u64, units: u64, owner: &Pubkey) -> AccountSharedData {
     (0..=units as usize * solana_account::STORAGE_UNIT)
         .map(|len| mutable_data(lamports, vec![0; len], owner))
-        .find(|account| account.owned().units() >= units)
+        .find(|account| u64::from(account.owned().units()) >= units)
         .unwrap()
 }
 
@@ -418,9 +418,9 @@ fn test_defragment_preserves_live_accounts() {
 fn test_defragment_best_fit_and_deferred_holes() {
     let owner = Pubkey::new_unique();
     let small = mutable_units(1, 21, &owner);
-    let small_units = small.owned().units();
+    let small_units = u64::from(small.owned().units());
     let medium = mutable_at_least(2, MIN_REMAINDER, &owner);
-    let medium_units = medium.owned().units();
+    let medium_units = u64::from(medium.owned().units());
 
     // Two adjacent component holes form one run. The small tail account leaves
     // a useful remainder, which the following account consumes exactly.

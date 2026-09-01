@@ -14,13 +14,13 @@ use crate::{
 use super::PersistedStore;
 
 /// Smallest useful destination remainder, in 8-byte storage units.
-pub(crate) const MIN_REMAINDER: u32 = 43;
-type Fit = (u32, Offset, usize);
+pub(crate) const MIN_REMAINDER: u64 = 43;
+type Fit = (u64, Offset, usize);
 
 /// Result of one committed packing pass.
 pub(crate) struct Defragged {
     pub(crate) moved: usize,
-    pub(crate) reclaimed: u32,
+    pub(crate) reclaimed: u64,
 }
 
 impl Defragged {
@@ -33,11 +33,11 @@ impl Defragged {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Hole {
     offset: Offset,
-    units: u32,
+    units: u64,
 }
 
 impl Hole {
-    fn new((units, offset): (u32, Offset)) -> Self {
+    fn new((units, offset): (u64, Offset)) -> Self {
         Self { offset, units }
     }
 
@@ -49,16 +49,21 @@ impl Hole {
 /// Adjacent entry-time holes treated as one packing destination.
 struct Run {
     parts: Range<usize>,
-    free: Hole,
+    offset: Offset,
+    units: u64,
 }
 
 impl Run {
-    fn take(&mut self, units: u32) -> Offset {
-        debug_assert!(units <= self.free.units);
-        let dst = self.free.offset;
-        self.free.offset = self.free.offset + units;
-        self.free.units -= units;
+    fn take(&mut self, units: u64) -> Offset {
+        debug_assert!(units <= self.units);
+        let dst = self.offset;
+        self.offset = self.offset + units;
+        self.units -= units;
         dst
+    }
+
+    fn end(&self) -> Offset {
+        Offset(self.offset.0 + self.units)
     }
 }
 
@@ -67,7 +72,7 @@ impl Run {
 struct Move {
     src: Offset,
     dst: Offset,
-    units: u32,
+    units: u64,
 }
 
 impl Move {
@@ -170,21 +175,22 @@ impl<'a> Defrag<'a> {
             }
             runs.push(Run {
                 parts: first..i,
-                free: Hole { offset, units: end - offset },
+                offset,
+                units: end - offset,
             });
         }
         runs
     }
 
     /// Selects the best exact fit or the best fit with a useful remainder.
-    fn fit(fit: &BTreeSet<Fit>, units: u32) -> Option<Fit> {
+    fn fit(fit: &BTreeSet<Fit>, units: u64) -> Option<Fit> {
         let &(largest, _, _) = fit.last()?;
         if units > largest {
             return None;
         }
 
         let low = (units, Offset(0), 0);
-        let high = (units, Offset(u32::MAX), usize::MAX);
+        let high = (units, Offset(u64::MAX), usize::MAX);
         if let Some(exact) = fit.range(low..=high).next() {
             return Some(*exact);
         }
@@ -208,31 +214,31 @@ impl<'a> Defrag<'a> {
             .runs
             .iter()
             .enumerate()
-            .map(|(i, run)| (run.free.units, run.free.offset, i))
+            .map(|(i, run)| (run.units, run.offset, i))
             .collect();
         let mut eligible = self.runs.len();
 
         for src in accounts {
             // Runs are already ordered by their physical end.
-            while eligible > 0 && self.runs[eligible - 1].free.end() > src {
+            while eligible > 0 && self.runs[eligible - 1].end() > src {
                 let i = eligible - 1;
-                fit.remove(&(self.runs[i].free.units, self.runs[i].free.offset, i));
+                fit.remove(&(self.runs[i].units, self.runs[i].offset, i));
                 eligible -= 1;
             }
             if fit.is_empty() {
                 break;
             }
 
-            let units = BorrowedAccount::span(self.store.storage.at(src));
+            let units = u64::from(BorrowedAccount::span(self.store.storage.at(src)));
             let Some((remaining, start, i)) = Self::fit(&fit, units) else {
                 continue;
             };
             fit.remove(&(remaining, start, i));
             let dst = self.runs[i].take(units);
             self.moves.push(Move { src, dst, units });
-            let free = self.runs[i].free;
-            if free.units > 0 {
-                fit.insert((free.units, free.offset, i));
+            let run = &self.runs[i];
+            if run.units > 0 {
+                fit.insert((run.units, run.offset, i));
             }
         }
     }
@@ -244,21 +250,27 @@ impl<'a> Defrag<'a> {
         let mut tail = self.tail;
 
         loop {
-            while run > 0 && self.runs[run - 1].free.units == 0 {
+            while run > 0 && self.runs[run - 1].units == 0 {
                 run -= 1;
             }
-            let free = (run > 0).then(|| self.runs[run - 1].free);
+            let free = (run > 0).then(|| {
+                let run = &self.runs[run - 1];
+                (run.offset, run.end())
+            });
             let source = self.moves.get(movement).copied().map(Move::source);
-            let (hole, from_run) = match (free, source) {
-                (Some(free), Some(source)) => (free.max(source), free.offset >= source.offset),
-                (Some(free), None) => (free, true),
-                (None, Some(source)) => (source, false),
+            let (offset, end, from_run) = match (free, source) {
+                (Some((offset, end)), Some(source)) if offset >= source.offset => {
+                    (offset, end, true)
+                }
+                (Some(_), Some(source)) => (source.offset, source.end(), false),
+                (Some((offset, end)), None) => (offset, end, true),
+                (None, Some(source)) => (source.offset, source.end(), false),
                 (None, None) => break,
             };
-            if hole.end() != tail {
+            if end != tail {
                 break;
             }
-            tail = hole.offset;
+            tail = offset;
             if from_run {
                 run -= 1;
             } else {
@@ -321,21 +333,23 @@ impl<'a> Defrag<'a> {
     fn publish(&self, tail: Offset, txn: &mut heed::RwTxn<'_>) -> Result<()> {
         for run in &self.runs {
             for &hole in &self.holes[run.parts.clone()] {
-                let offset = hole.offset.max(run.free.offset);
+                let offset = hole.offset.max(run.offset);
                 let end = hole.end().min(tail);
                 if offset == hole.offset && end == hole.end() {
                     continue;
                 }
                 self.store.index.freelist.delete_one_duplicate(txn, &hole.units, &hole.offset)?;
                 if offset < end {
-                    self.store.index.freelist.put(txn, &(end - offset), &offset)?;
+                    let units = end - offset;
+                    self.store.index.freelist.put(txn, &units, &offset)?;
                 }
             }
         }
         for movement in &self.moves {
             if movement.src < tail {
                 let end = movement.source().end().min(tail);
-                self.store.index.freelist.put(txn, &(end - movement.src), &movement.src)?;
+                let units = end - movement.src;
+                self.store.index.freelist.put(txn, &units, &movement.src)?;
             }
         }
         Ok(())

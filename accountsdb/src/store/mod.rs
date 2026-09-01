@@ -217,7 +217,7 @@ impl PersistedStore {
         txn: OptRwTxn<'_, 'e>,
     ) -> Result<()> {
         let txn = write_txn(self.index.env(), txn)?;
-        let units = acc.units();
+        let units = u64::from(acc.units());
         let owner = acc.owner().into();
 
         let (ptr, offset) = if let Some(offset) = self.index.allocate(units, txn)? {
@@ -245,7 +245,7 @@ impl PersistedStore {
     /// Returns one persisted span to the freelist.
     fn free(&self, offset: Offset, txn: &mut heed::RwTxn<'_>) -> Result<()> {
         // SAFETY: `offset` was returned by the index and still points at a valid image.
-        let space = unsafe { BorrowedAccount::span(self.storage.at(offset)) };
+        let space = u64::from(unsafe { BorrowedAccount::span(self.storage.at(offset)) });
         self.index.freelist.put(txn, &space, &offset)?;
         Ok(())
     }
