@@ -40,6 +40,8 @@ const INIT_STORAGE_SIZE: u64 = STORAGE_BLOCK + DATABASE_META_RESERVATION as u64;
 const MMAP_SIZE: usize = 64 * MB;
 #[cfg(not(feature = "testkit"))]
 const MMAP_SIZE: usize = 1024 * nucleus::GB;
+/// Account-image capacity of the mapped region, in storage units.
+const STORAGE_CAPACITY: u64 = ((MMAP_SIZE - DATABASE_META_RESERVATION) / STORAGE_UNIT) as u64;
 
 /// One allocation inside the mapped storage.
 pub(crate) struct Allocation {
@@ -199,12 +201,12 @@ impl MappedStorage {
     pub(crate) fn validate(&self) -> Result<()> {
         let meta = self.meta();
         if meta.version != VERSION {
-            Err(AccountsDBError::UnsupportedVersion(meta.version))
-        } else if Self::bytes(meta.cursor.load(Acquire)) > meta.len.load(Acquire) {
-            Err(AccountsDBError::Corruption)
-        } else {
-            Ok(())
+            return Err(AccountsDBError::UnsupportedVersion(meta.version));
         }
+        let cursor = meta.cursor.load(Acquire);
+        (cursor <= STORAGE_CAPACITY && Self::bytes(cursor) <= meta.len.load(Acquire))
+            .then_some(())
+            .ok_or(AccountsDBError::Corruption)
     }
 
     /// Returns a pointer inside the account image region.
@@ -224,7 +226,10 @@ impl MappedStorage {
         let meta = self.meta();
         let mut offset = meta.cursor.load(Acquire);
         loop {
-            let end = offset.checked_add(units).ok_or(AccountsDBError::Allocation)?;
+            let end = offset
+                .checked_add(units)
+                .filter(|end| *end <= STORAGE_CAPACITY)
+                .ok_or(AccountsDBError::Allocation)?;
             let needed = Self::bytes(end);
             if needed > meta.len.load(Acquire) {
                 self.grow(needed)?;
@@ -264,7 +269,7 @@ impl MappedStorage {
         0..Self::bytes(self.cursor()) as usize
     }
 
-    /// Converts storage units into file bytes, including the metadata reservation.
+    /// Converts storage units into bytes within the mapped region.
     fn bytes(units: u64) -> u64 {
         units * STORAGE_UNIT as u64 + DATABASE_META_RESERVATION as u64
     }
