@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use accountsdb::AccountLoader;
 use agave_feature_set::FeatureSet;
 use agave_transaction_view::{
     MAGICBLOCK_INSTRUCTION_TRACE_LENGTH, transaction_version::TransactionVersion,
@@ -12,7 +13,6 @@ use solana_compute_budget_instruction::instructions_processor::process_compute_b
 use solana_program_runtime::loaded_programs::{ProgramCache, ProgramRuntimeEnvironments};
 use solana_svm::{
     account_loader::CheckedTransactionDetails,
-    transaction_processing_callback::TransactionProcessingCallback,
     transaction_processor::{
         ExecutionRecordingConfig, LoadAndExecuteSanitizedTransactionOutput,
         TransactionBatchProcessor, TransactionProcessingConfig, TransactionProcessingEnvironment,
@@ -21,7 +21,10 @@ use solana_svm::{
 use solana_sysvar::clock::Clock;
 use solana_transaction_error::TransactionResult;
 
-use crate::{Result, callback::SVMCallback};
+use crate::{
+    Result,
+    callback::{InvokeCallback, LoadCallback},
+};
 
 /// SVM batch processor together with its per-block environment and recording
 /// config, shared verbatim by the executor and simulator workers.
@@ -57,10 +60,7 @@ impl SvmContext {
         };
         let mut processor = TransactionBatchProcessor::new(block.slot + 1, cache);
         let accessor = state.accounts();
-        let callback = SVMCallback::<false> {
-            loader: accessor.loader(),
-            featureset: state.features(),
-        };
+        let callback = LoadCallback::<false> { loader: accessor.loader() };
         processor.fill_missing_sysvar_cache_entries(&callback);
         let config = TransactionProcessingConfig {
             log_messages_bytes_limit: None,
@@ -70,9 +70,9 @@ impl SvmContext {
     }
 
     /// Loads and executes a single transaction through the SVM.
-    pub(crate) fn execute(
+    pub(crate) fn execute<const LOAD_OWNED: bool>(
         &self,
-        callback: &impl TransactionProcessingCallback,
+        loader: AccountLoader<'_>,
         txn: &ResolvedTransaction,
         features: &FeatureSet,
     ) -> LoadAndExecuteSanitizedTransactionOutput {
@@ -85,8 +85,11 @@ impl SvmContext {
                 };
             }
         };
+        let load = LoadCallback::<LOAD_OWNED> { loader };
+        let invoke = InvokeCallback { featureset: features };
         self.processor.load_and_execute_sanitized_transaction(
-            callback,
+            load,
+            &invoke,
             txn,
             details,
             &self.env,

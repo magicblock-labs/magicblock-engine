@@ -34,6 +34,11 @@ The LMDB index under `CURRENT/index` contains:
 - `programs`: owner tag to account offsets.
 - `freelist`: image size to reusable offsets.
 
+Read transactions use LMDB's thread-local reader slots, with capacity for 256
+reader threads. Dropping a transaction ends its active snapshot, while its slot
+remains cached for reuse by the same thread. Keeping snapshots short therefore
+limits old-page retention without giving up reader-slot reuse.
+
 `PersistedProgramIter` retains its read transaction for the persisted portion of
 iteration. The optional `testkit` feature uses smaller maps and growth blocks
 without changing the on-disk format.

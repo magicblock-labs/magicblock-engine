@@ -33,7 +33,7 @@ use {
     },
     solana_pubkey::Pubkey,
     solana_rent::Rent,
-    solana_svm_callback::TransactionProcessingCallback,
+    solana_svm_callback::{InvokeContextCallback, TransactionProcessingCallback},
     solana_svm_feature_set::SVMFeatureSet,
     solana_svm_log_collector::LogCollector,
     solana_svm_transaction::svm_transaction::SVMTransaction,
@@ -181,9 +181,13 @@ impl TransactionBatchProcessor {
     }
 
     /// Loads accounts, prepares programs, and executes one sanitized transaction.
-    pub fn load_and_execute_sanitized_transaction<CB: TransactionProcessingCallback>(
+    ///
+    /// The owned loading callback is dropped as soon as account loading finishes.
+    /// Invocation then uses the separate borrowed callback.
+    pub fn load_and_execute_sanitized_transaction(
         &self,
-        callbacks: &CB,
+        load: impl TransactionProcessingCallback,
+        invoke: &impl InvokeContextCallback,
         tx: &impl SVMTransaction,
         details: CheckedTransactionDetails,
         environment: &TransactionProcessingEnvironment,
@@ -205,7 +209,8 @@ impl TransactionBatchProcessor {
                 .loaded_accounts_data_size_limit,
             fee_details: details.compute_budget_and_limits.fee_details,
         };
-        let load_result = load_transaction(callbacks, tx, details);
+        let load_result = load_transaction(&load, tx, details);
+        drop(load);
 
         let processing_result = match load_result {
             TransactionLoadResult::NotLoaded(err) => Err(err),
@@ -218,7 +223,7 @@ impl TransactionBatchProcessor {
                 );
 
                 let mut executed_tx = self.execute_loaded_transaction(
-                    callbacks,
+                    invoke,
                     tx,
                     loaded_transaction,
                     &mut program_cache_for_tx_batch,
@@ -264,7 +269,7 @@ impl TransactionBatchProcessor {
 
     /// Executes a transaction using already loaded accounts.
     #[allow(clippy::too_many_arguments)]
-    fn execute_loaded_transaction<CB: TransactionProcessingCallback>(
+    fn execute_loaded_transaction<CB: InvokeContextCallback>(
         &self,
         callback: &CB,
         tx: &impl SVMTransaction,

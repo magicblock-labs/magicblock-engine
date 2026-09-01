@@ -91,6 +91,7 @@ impl Index {
         let env = unsafe {
             EnvOpenOptions::new()
                 .max_dbs(3)
+                .max_readers(256)
                 .map_size(INDEX_MAP_SIZE)
                 .flags(EnvFlags::WRITE_MAP)
                 .flags(EnvFlags::NO_READ_AHEAD)

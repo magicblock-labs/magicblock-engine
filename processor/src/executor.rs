@@ -21,7 +21,6 @@ use tracing::{error, info};
 
 use crate::{
     Result,
-    callback::SVMCallback,
     metrics::{self, FailureKind},
     sequencer::{ReadyTransaction, Ticket},
     svm::SvmContext,
@@ -169,12 +168,8 @@ impl TransactionExecutor {
     /// Loads and executes one transaction through the SVM, committing either
     /// its raw state transition (replay) or full execution.
     fn process(&mut self, txn: ResolvedTransaction) -> Result<()> {
-        let accessor = self.state.accounts();
-        let callback = SVMCallback::<false> {
-            loader: accessor.loader(),
-            featureset: self.state.features(),
-        };
-        let output = self.svm.execute(&callback, &txn, self.state.features());
+        let accounts = self.state.accounts();
+        let output = self.svm.execute::<false>(accounts.loader(), &txn, self.state.features());
         if !output.processing_result.was_processed_with_successful_result() {
             metrics::failed_transaction(FailureKind::Execution);
         }
