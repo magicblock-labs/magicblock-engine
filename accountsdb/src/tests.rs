@@ -29,8 +29,12 @@ fn db() -> (TempDir, AccountsDB) {
 fn mutable_data(lamports: u64, data: Vec<u8>, owner: &Pubkey) -> AccountSharedData {
     let mut a = AccountSharedData::new(lamports, data.len(), owner);
     a.set_data_from_slice(&data);
-    a.set_mode(AccountMode::Delegated).unwrap();
+    transition(&mut a, AccountMode::Delegated);
     a
+}
+
+fn transition(account: &mut AccountSharedData, mode: AccountMode) {
+    account.set_lifecycle(mode, account.slot()).unwrap();
 }
 
 /// Empty mutable (persisted) account; `owner` defaults to the system program.
@@ -84,12 +88,12 @@ fn reload(db: &AccountsDB, pubkey: &Pubkey) -> AccountSharedData {
 fn close(db: &AccountsDB, pubkey: &Pubkey) {
     let mut acc = reload(db, pubkey);
     if acc.is(AccountMode::Delegated) {
-        acc.set_mode(AccountMode::Transient).unwrap();
+        transition(&mut acc, AccountMode::Transient);
     }
     if acc.is(AccountMode::Transient) {
-        acc.set_mode(AccountMode::ReadOnly).unwrap();
+        transition(&mut acc, AccountMode::ReadOnly);
     }
-    acc.set_mode(AccountMode::Closed).unwrap();
+    transition(&mut acc, AccountMode::Closed);
     store(db, *pubkey, acc);
 }
 
@@ -171,7 +175,7 @@ fn test_routing_and_persistence_flips() {
     // Transient is immutable to programs but remains persistent while its
     // lifecycle state is unresolved.
     let mut flip = reload(&db, &a);
-    flip.set_mode(AccountMode::Transient).unwrap();
+    transition(&mut flip, AccountMode::Transient);
     flip.set_lamports(30);
     store(&db, a, flip);
     let transient = reload(&db, &a);
@@ -181,14 +185,14 @@ fn test_routing_and_persistence_flips() {
 
     // Resolving to ReadOnly evicts the persisted copy into volatile.
     let mut flip = reload(&db, &a);
-    flip.set_mode(AccountMode::ReadOnly).unwrap();
+    transition(&mut flip, AccountMode::ReadOnly);
     store(&db, a, flip);
     assert!(!in_persisted(&db, &a) && in_volatile(&db, &a));
     assert_eq!(lamports(&db, &a), 30);
 
     // ReadOnly → Delegated evicts it back into persisted.
     let mut flip = reload(&db, &a);
-    flip.set_mode(AccountMode::Delegated).unwrap();
+    transition(&mut flip, AccountMode::Delegated);
     store(&db, a, flip);
     assert!(in_persisted(&db, &a) && !in_volatile(&db, &a));
 
@@ -232,8 +236,8 @@ fn test_store_kind_migration_invariants() {
         let base = cursor(&db);
 
         let mut account = reload(&db, &key);
-        account.set_mode(AccountMode::Transient).unwrap();
-        account.set_mode(AccountMode::ReadOnly).unwrap();
+        transition(&mut account, AccountMode::Transient);
+        transition(&mut account, AccountMode::ReadOnly);
         account.set_owner(volatile_owner);
         account.set_lamports(20);
         store(&db, key, account);
@@ -255,7 +259,7 @@ fn test_store_kind_migration_invariants() {
         assert!(program(&db, &persisted_owner).is_empty());
 
         let mut account = reload(&db, &key);
-        account.set_mode(AccountMode::Delegated).unwrap();
+        transition(&mut account, AccountMode::Delegated);
         account.set_owner(persisted_owner);
         store(&db, key, account);
 

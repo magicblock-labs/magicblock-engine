@@ -472,8 +472,12 @@ mod tests {
             .executable(true)
             .build::<AccountSharedData>();
 
-        AccountFieldPatch::Mode(AccountMode::Ephemeral).apply(&mut account).unwrap();
-        AccountFieldPatch::Slot(42).apply(&mut account).unwrap();
+        AccountFieldPatch::Lifecycle {
+            mode: AccountMode::Ephemeral,
+            slot: 42,
+        }
+        .apply(&mut account)
+        .unwrap();
         account.set_flags(StateFlags::EXECUTABLE);
         AccountFieldPatch::DataAt { offset: 0, data: vec![4, 5] }
             .apply(&mut account)

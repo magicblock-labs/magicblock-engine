@@ -223,7 +223,8 @@ async fn replays_large_transactions_during_catch_up_and_live_streaming() {
         .data(patterned_bytes(CREATE_DATA_LEN, 1));
     leader
         .account(account)
-        .create(created, None)
+        .await
+        .materialize(created, None)
         .await
         .expect("large account creation commits");
 
@@ -259,7 +260,8 @@ async fn replays_large_transactions_during_catch_up_and_live_streaming() {
         .data(patterned_bytes(UPDATE_DATA_LEN, 2));
     leader
         .account(account)
-        .update(updated)
+        .await
+        .materialize(updated, None)
         .await
         .expect("large account update commits");
 
@@ -453,7 +455,8 @@ async fn streams_and_resumes_without_duplicate_application() {
     let sponsored = Pubkey::new_unique();
     leader
         .account(sponsored)
-        .create(v42_builder(0, AccountMode::Delegated), None)
+        .await
+        .materialize(v42_builder(0, AccountMode::Delegated), None)
         .await
         .expect("sponsored account creation commits");
     let authority_after = leader.get_account(authority).expect("leader sponsor remains").lamports();

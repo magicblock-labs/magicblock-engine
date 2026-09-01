@@ -174,9 +174,11 @@ mod tests {
     #[test]
     fn writable_account_guard() {
         let mut transitioned = account(AccountMode::Delegated);
-        transitioned.set_mode(AccountMode::Transient).unwrap();
+        let transitioned_slot = transitioned.slot();
+        transitioned.set_lifecycle(AccountMode::Transient, transitioned_slot).unwrap();
         let mut closed = account(AccountMode::Ephemeral);
-        closed.set_mode(AccountMode::Closed).unwrap();
+        let closed_slot = closed.slot();
+        closed.set_lifecycle(AccountMode::Closed, closed_slot).unwrap();
 
         // A dirty, writable, immutable operand is rejected — unless the tx is
         // privileged or it legally entered a transaction-final mode. Mutable or

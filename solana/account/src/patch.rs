@@ -28,7 +28,7 @@ pub enum AccountPatchError {
     },
 }
 
-/// A single-field account patch.
+/// A bounded account-image patch.
 #[cfg_attr(feature = "wincode", derive(wincode::SchemaRead, wincode::SchemaWrite))]
 pub enum AccountFieldPatch {
     /// Replaces the lamport balance.
@@ -42,10 +42,13 @@ pub enum AccountFieldPatch {
         /// Bytes to write.
         data: Vec<u8>,
     },
-    /// Replaces the slot.
-    Slot(Slot),
-    /// Replaces the account mode.
-    Mode(AccountMode),
+    /// Replaces the account lifecycle.
+    Lifecycle {
+        /// Requested lifecycle mode.
+        mode: AccountMode,
+        /// Requested lifecycle slot.
+        slot: Slot,
+    },
     /// Resizes the data buffer to an exact length, zero-filling when growing.
     DataLen(usize),
 }
@@ -59,9 +62,8 @@ impl AccountFieldPatch {
     pub fn apply(self, account: &mut AccountSharedData) -> Result<(), AccountPatchError> {
         match self {
             Self::Lamports(v) => account.set_lamports(v),
-            Self::Slot(v) => return account.set_slot(v),
             Self::Owner(v) => account.set_owner(v),
-            Self::Mode(v) => return account.set_mode(v),
+            Self::Lifecycle { mode, slot } => return account.set_lifecycle(mode, slot),
             Self::DataAt { offset, data } => account.set_data_at(offset, &data),
             Self::DataLen(len) => account.resize(len, 0),
         }
@@ -69,17 +71,15 @@ impl AccountFieldPatch {
     }
 
     /// Decomposes an owned account into the ordered sequence of patches that
-    /// reconstruct its non-flag fields: lamports, mode, slot, owner, the exact
+    /// reconstruct its non-flag fields: lamports, lifecycle, owner, the exact
     /// data length, then the data in `MAX_DATA_CHUNK_SIZE`-sized chunks.
-    ///
-    /// Mode precedes slot so consumers can distinguish an equal-slot mode
-    /// transition from a duplicate replacement by inspecting the mode dirty
-    /// marker when they apply the slot patch.
     pub fn sequence(account: OwnedAccount) -> Vec<Self> {
-        let mut sequence = Vec::with_capacity(6);
+        let mut sequence = Vec::with_capacity(5);
         sequence.push(Self::Lamports(account.core.lamports));
-        sequence.push(Self::Mode(account.core.mode));
-        sequence.push(Self::Slot(account.core.slot));
+        sequence.push(Self::Lifecycle {
+            mode: account.core.mode,
+            slot: account.core.slot,
+        });
         sequence.push(Self::Owner(account.core.owner));
         sequence.push(Self::DataLen(account.data.len()));
         let mut offset = 0;
@@ -98,8 +98,7 @@ impl fmt::Debug for AccountFieldPatch {
         match self {
             Self::Lamports(v) => write!(f, "lamports={v}"),
             Self::Owner(v) => write!(f, "owner={v}"),
-            Self::Slot(v) => write!(f, "slot={v}"),
-            Self::Mode(v) => write!(f, "mode={v:?}"),
+            Self::Lifecycle { mode, slot } => write!(f, "lifecycle={mode:?}@{slot}"),
             Self::DataAt { offset, data } => write!(f, "data@{offset}+{}", data.len()),
             Self::DataLen(len) => write!(f, "data_len={len}"),
         }

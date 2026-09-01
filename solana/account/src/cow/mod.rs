@@ -97,6 +97,12 @@ impl PartialEq for AccountSharedData {
 
 impl Eq for AccountSharedData {}
 
+impl PartialEq<OwnedAccount> for AccountSharedData {
+    fn eq(&self, other: &OwnedAccount) -> bool {
+        self.deref() == &other.core && self.cow.data() == other.data.as_slice()
+    }
+}
+
 impl AccountSharedData {
     /// Returns a reference to the inner copy-on-write representation.
     pub fn cow(&self) -> &CoWAccount {
@@ -209,29 +215,31 @@ impl AccountSharedData {
         self.cow.set_data_from_slice(data);
     }
 
-    /// Sets a legal account mode transition and marks the mode dirty.
+    /// Applies mode and slot as one validated lifecycle transition.
     ///
-    /// Reapplying the current mode is a no-op so callers can distinguish a
-    /// genuine lifecycle transition from an unchanged account. Invalid
-    /// transitions leave the account and its dirty markers unchanged.
-    pub fn set_mode(&mut self, to: AccountMode) -> Result<(), AccountPatchError> {
-        use AccountMode::*;
-        let from = self.mode;
-
-        if from == to {
-            return Ok(());
+    /// Equal slots require a genuine mode transition. Validation precedes
+    /// translation, so an error leaves the account and dirty markers unchanged.
+    pub fn set_lifecycle(
+        &mut self,
+        mode: AccountMode,
+        slot: Slot,
+    ) -> Result<(), AccountPatchError> {
+        let from_mode = self.mode;
+        let mode_changed = from_mode != mode;
+        if mode_changed && !from_mode.allows_transition(mode, self.slot, slot) {
+            return Err(AccountPatchError::InvalidModeTransition { from: from_mode, to: mode });
         }
-        let allowed = match (from, to) {
-            (ReadOnly | Placeholder, to) => to != Transient,
-            (Delegated, Transient) | (Transient, ReadOnly) | (Ephemeral, Closed) => true,
-            _ => false,
-        };
-        if !allowed {
-            Err(AccountPatchError::InvalidModeTransition { from, to })?;
+        let from_slot = self.slot;
+        if slot < from_slot || (slot == from_slot && !mode_changed) {
+            return Err(AccountPatchError::InvalidSlotTransition { from: from_slot, to: slot });
         }
         self.translate();
-        self.dirty.set(DirtyMarkers::MODE, true);
-        self.mode = to;
+        if mode_changed {
+            self.dirty.insert(DirtyMarkers::MODE);
+            self.mode = mode;
+        }
+        self.dirty.insert(DirtyMarkers::SLOT);
+        self.slot = slot;
         Ok(())
     }
 
@@ -251,23 +259,6 @@ impl AccountSharedData {
         let n = self.data().len().saturating_sub(offset).min(data.len());
         self.data_as_mut_slice()[offset..offset + n].copy_from_slice(&data[..n]);
         self.extend_from_slice(&data[n..]);
-    }
-
-    /// Sets a non-regressing account slot.
-    ///
-    /// Reapplying the current slot is accepted only after a genuine mode change
-    /// in the same transaction. Rejected transitions leave the account and its
-    /// dirty markers unchanged.
-    pub(crate) fn set_slot(&mut self, to: Slot) -> Result<(), AccountPatchError> {
-        let from = self.slot;
-        let mode_changed = self.dirty.contains(DirtyMarkers::MODE);
-        if to < from || (to == from && !mode_changed) {
-            Err(AccountPatchError::InvalidSlotTransition { from, to })?;
-        }
-        self.translate();
-        self.dirty.set(DirtyMarkers::SLOT, true);
-        self.slot = to;
-        Ok(())
     }
 
     /// Replaces all state flags and marks them dirty when the value changes.
@@ -591,7 +582,7 @@ pub enum AccountMode {
     #[default]
     Placeholder = 0,
     /// Not writable by users (exists on chain, but not delegated)
-    ReadOnly = 1,
+    ReadOnly,
     /// Internal account used for sysvars, features, and precompiles.
     System,
     /// Account delegated to the current ER node instance.
@@ -605,6 +596,19 @@ pub enum AccountMode {
 }
 
 impl AccountMode {
+    /// Returns whether a privileged lifecycle operation may transition from
+    /// this mode to `to`. Reapplying the same mode is not a transition.
+    pub fn allows_transition(self, to: Self, from_slot: Slot, to_slot: Slot) -> bool {
+        use AccountMode::*;
+        match (self, to) {
+            (from, to) if from == to => false,
+            (ReadOnly | Placeholder, to) => to != Transient,
+            (Transient, Delegated) => to_slot > from_slot,
+            (Delegated, Transient) | (Transient, ReadOnly) | (Ephemeral, Closed) => true,
+            _ => false,
+        }
+    }
+
     /// Returns `true` for modes that may be mutated by user programs.
     pub fn mutable(&self) -> bool {
         use AccountMode::*;

@@ -1,13 +1,12 @@
 //! Read-side cache primitives keeper owns: the slot-based `ExpiringCache` and the
-//! `AccountCache` missing-load coordination.
+//! `AccountCache` account-mutation coordination.
 
 use std::sync::Arc;
 
-use solana_account::{AccountBuilder, AccountMode};
+use solana_account::AccountMode;
 use solana_pubkey::Pubkey;
 
-use super::TestKeeper;
-use crate::cache::{AccountCache, AccountLoad, AccountWait, ExpiringCache, MissingAccount};
+use crate::cache::{AccountCache, ExpiringCache};
 
 // `ExpiringCache` evicts lazily on push, never on read; re-inserting an existing
 // key is a no-op; `update` replaces only present values.
@@ -45,76 +44,72 @@ fn expiring_cache_lazy_eviction() {
     assert_eq!(cache.get(&1), Some(11));
 }
 
-// Two callers racing on the same missing account get exactly one loader and one
-// waiter; committing caches the account while dropping the load guard does not.
+/// Proves an accessor holds mutation ownership across materialization, while
+/// mode changes, deletion, and stale eviction checks keep recency coherent.
 #[tokio::test]
-async fn account_load_release_paths_wake_waiters() {
+async fn account_lease_coordinates_recency_and_waiters() {
     use AccountMode::*;
     let modes = [ReadOnly, Placeholder, Delegated, Ephemeral, Transient, System];
     for mode in modes {
-        for commit in [true, false] {
-            let cache = Arc::new(AccountCache::new(256));
-            let pk = Pubkey::new_unique();
-            let (load, wait) = reserve_load_and_wait(&cache, pk);
+        let cache = Arc::new(AccountCache::new(256));
+        let pk = Pubkey::new_unique();
+        let lease = cache.lock(pk).await;
+        let mut waiter = Box::pin(cache.lock(pk));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), &mut waiter)
+                .await
+                .is_err()
+        );
 
-            let waiter = tokio::spawn(async move { wait.wait().await });
-            if commit {
-                load.complete(mode).await;
-            } else {
-                drop(load)
-            }
+        lease.materialized(mode).await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1), &mut waiter)
+                .await
+                .is_err(),
+            "materialization retains ownership"
+        );
+        drop(lease);
+        drop(waiter.await);
 
-            assert_eq!(
-                waiter.await.unwrap(),
-                (pk, commit),
-                "waiter returns the load outcome"
-            );
-            let tracked = matches!(mode, ReadOnly | Placeholder | System);
-            assert_eq!(cache.lru.get_sync(&pk).is_some(), tracked && commit);
-            assert!(matches!(cache.reserve(pk), MissingAccount::Load(_)));
-        }
+        let tracked = matches!(mode, ReadOnly | Placeholder | System);
+        assert_eq!(cache.lru.get_sync(&pk).is_some(), tracked);
     }
-}
 
-// `ensure` is the production seam over `AccountCache`: it skips accounts already
-// resident in storage (promoting them) and hands back a coordination item only
-// for the ones missing, with the first caller owning the load.
-#[tokio::test]
-async fn ensure_reserves_only_missing_accounts() {
-    let keeper = TestKeeper::new().await;
-    let present = Pubkey::new_unique();
-    let missing = Pubkey::new_unique();
-    keeper
-        .accounts()
-        .store(&[(present, AccountBuilder::default().lamports(1).build())])
-        .unwrap();
+    let cache = Arc::new(AccountCache::new(256));
+    let pk = Pubkey::new_unique();
+    let lease = cache.lock(pk).await;
+    lease.materialized(ReadOnly).await;
+    drop(lease);
+    assert!(cache.lru.get_sync(&pk).is_some(), "read-only is admitted");
+    let eviction = cache.lock(pk).await;
+    assert!(
+        !eviction.cached_eviction_applies(ReadOnly),
+        "an older eviction is rejected after readmission"
+    );
+    drop(eviction);
+    assert!(
+        cache.lru.get_sync(&pk).is_some(),
+        "rejecting stale eviction leaves recency unchanged"
+    );
 
-    // The accessor must outlive the iterator that borrows it.
-    let accounts = keeper.accounts();
-    let reserved: Vec<_> = accounts.ensure(&[present, missing]).collect();
+    let lease = cache.lock(pk).await;
+    lease.materialized(Delegated).await;
+    drop(lease);
+    assert!(
+        cache.lru.get_sync(&pk).is_none(),
+        "authoritative transition removes recency"
+    );
 
-    // The resident account is skipped entirely; only the missing one surfaces,
-    // and the first caller to reach it owns the load.
-    assert_eq!(reserved.len(), 1, "only the missing account is reserved");
-    let MissingAccount::Load(load) = &reserved[0] else {
-        panic!("first reservation of a missing account owns the load");
-    };
-    assert_eq!(load.pubkey, missing);
-
-    // The reservation stays live while the load guard is held, so a concurrent
-    // `ensure` of the same account waits instead of racing a second load.
-    let again: Vec<_> = accounts.ensure(&[missing]).collect();
-    assert!(matches!(again.as_slice(), [MissingAccount::Wait(_)]));
-
-    keeper.close().await;
-}
-
-fn reserve_load_and_wait(cache: &Arc<AccountCache>, pk: Pubkey) -> (AccountLoad, AccountWait) {
-    let MissingAccount::Load(load) = cache.reserve(pk) else {
-        panic!("first reservation must own the load");
-    };
-    let MissingAccount::Wait(wait) = cache.reserve(pk) else {
-        panic!("concurrent reservation must wait");
-    };
-    (load, wait)
+    let lease = cache.lock(pk).await;
+    assert!(
+        lease.cached_eviction_applies(ReadOnly),
+        "an account absent from recency remains eligible for eviction"
+    );
+    lease.materialized(ReadOnly).await;
+    lease.deleted();
+    drop(lease);
+    assert!(
+        cache.lru.get_sync(&pk).is_none(),
+        "deletion removes recency"
+    );
 }

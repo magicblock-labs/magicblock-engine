@@ -27,7 +27,7 @@ pub struct PostFinalize {
 /// Instructions accepted by the MagicRoot built-in program.
 #[derive(SchemaRead, SchemaWrite)]
 pub enum MagicRootInstruction {
-    /// Apply a single-field patch to the target account.
+    /// Apply one bounded account-image patch to the target account.
     Patch(AccountFieldPatch),
     /// Replace the target's complete flag value and, when executable, load it
     /// into the transaction's program cache. Does not change lamports.

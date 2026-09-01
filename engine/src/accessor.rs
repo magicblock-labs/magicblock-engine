@@ -2,12 +2,11 @@
 
 use std::{sync::atomic::Ordering, time::Duration};
 
-use keeper::{ExecutionRecord, TransactionView};
+use keeper::{AccountLease, ExecutionRecord, TransactionView, error::KeeperError};
 use magic_root_interface::{MagicRootInstruction, PostFinalize};
 use processor::{SequencerMessage, Simulation, SimulatorMessage};
-use solana_account::OwnedAccount;
+use solana_account::{AccountMode, AccountSharedData, OwnedAccount};
 use solana_instruction::Instruction;
-use solana_pubkey::Pubkey;
 use solana_transaction::TransactionResult;
 use tokio::time;
 
@@ -20,9 +19,12 @@ use crate::{
 /// Upper bound on awaiting a submitted transaction's committed result.
 const EXECUTION_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// Account-scoped operations bound to a single `pubkey`.
+/// Exclusive mutation access to one account.
+///
+/// Dropping the accessor releases the account for the next caller. Keeping it
+/// across a failed operation allows a serialized fallback attempt.
 pub struct AccountAccessor<'a> {
-    pub(crate) pubkey: Pubkey,
+    pub(crate) lease: AccountLease,
     pub(crate) engine: &'a Engine,
 }
 
@@ -33,34 +35,61 @@ pub struct TransactionAccessor<'a> {
 }
 
 impl AccountAccessor<'_> {
-    /// Creates the account by patching in every field and finalizing it,
+    /// Reads the current account without copying its backing data.
+    /// `reader` may run more than once if a concurrent publish changes the image.
+    pub fn read<R>(&self, reader: impl Fn(&AccountSharedData) -> R) -> Result<Option<R>> {
+        self.engine
+            .accounts()
+            .loader()
+            .read(&self.lease.pubkey(), reader)
+            .map_err(|err| EngineError::from(KeeperError::from(err)))
+    }
+
+    /// Materializes the account by patching in every field and finalizing it,
     /// optionally running follow-up actions once it is finalized.
     ///
     /// Callers supplying `post_finalize` must verify its trusted provenance as
     /// required by [`PostFinalize`] before invoking this method.
-    pub async fn create(
-        &self,
+    /// The accessor retains mutation ownership after both success and failure,
+    /// and may be reused before it is dropped.
+    pub async fn materialize(
+        &mut self,
         acc: impl Into<OwnedAccount>,
         post_finalize: Option<PostFinalize>,
     ) -> Result<()> {
-        let mut instructions = MagicRootInstruction::compose_account(self.pubkey, acc.into())?;
+        let pubkey = self.lease.pubkey();
+        let acc = acc.into();
+        let mode = acc.mode();
+        let mut instructions = MagicRootInstruction::compose_account(pubkey, acc)?;
         if let Some(post_finalize) = post_finalize {
             let ix = MagicRootInstruction::PostFinalize(post_finalize);
-            instructions.push(ix.compose(self.pubkey)?);
+            instructions.push(ix.compose(pubkey)?);
         }
-        self.execute(instructions).await
-    }
-
-    /// Updates the account by patching in every field of `account`
-    pub async fn update(&self, acc: impl Into<OwnedAccount>) -> Result<()> {
-        let instructions = MagicRootInstruction::compose_account(self.pubkey, acc.into())?;
-        self.execute(instructions).await
+        self.execute(instructions).await?;
+        self.lease.materialized(mode).await;
+        Ok(())
     }
 
     /// Closes the account.
-    pub async fn delete(&self) -> Result<()> {
-        let instructions = vec![MagicRootInstruction::Delete.compose(self.pubkey)?];
-        self.execute(instructions).await
+    pub async fn delete(&mut self) -> Result<()> {
+        let pubkey = self.lease.pubkey();
+        let instructions = vec![MagicRootInstruction::Delete.compose(pubkey)?];
+        self.execute(instructions).await?;
+        self.lease.deleted();
+        Ok(())
+    }
+
+    /// Releases a satisfied request, promoting non-authoritative state in
+    /// recency before this accessor is dropped.
+    pub async fn satisfy(self, mode: AccountMode) {
+        if !mode.authoritative() {
+            self.lease.materialized(mode).await;
+        }
+    }
+
+    /// Returns this accessor only if an earlier cache eviction still applies.
+    pub fn into_cached_eviction(self, mode: AccountMode) -> Option<Self> {
+        self.lease.cached_eviction_applies(mode).then_some(self)
     }
 
     /// Composes the instructions into a signed engine transaction, executes it,

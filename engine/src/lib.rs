@@ -119,9 +119,11 @@ impl Engine {
         self.sync(true).map_err(Into::into)
     }
 
-    /// Returns an accessor for mutating the account at `pubkey`.
-    pub fn account(&self, pubkey: Pubkey) -> AccountAccessor<'_> {
-        AccountAccessor { engine: self, pubkey }
+    /// Waits for exclusive account-mutation ownership, held until the returned
+    /// accessor is dropped.
+    pub async fn account(&self, pubkey: Pubkey) -> AccountAccessor<'_> {
+        let lease = self.accounts().lock(pubkey).await;
+        AccountAccessor { engine: self, lease }
     }
 
     /// Returns an accessor for signing and submitting transactions.

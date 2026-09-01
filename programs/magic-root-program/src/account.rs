@@ -6,7 +6,7 @@ use solana_program_runtime::{invoke_context::InvokeContext, loaded_programs::Pro
 use solana_svm_log_collector::ic_msg;
 use solana_transaction_context::{IndexOfAccount, MAX_ACCOUNT_DATA_LEN};
 
-/// Applies a single-field patch to the target account.
+/// Applies one bounded patch to the target account.
 pub(crate) fn patch(
     ctx: &InvokeContext<'_, '_>,
     target: IndexOfAccount,
@@ -77,7 +77,8 @@ pub(crate) fn delete(
 ) -> Result<(), InstructionError> {
     let mut acc = ctx.transaction_context.accounts().try_borrow_mut(target)?;
 
-    if let Err(error) = acc.set_mode(AccountMode::Closed) {
+    let slot = acc.slot();
+    if let Err(error) = acc.set_lifecycle(AccountMode::Closed, slot) {
         ic_msg!(ctx, "MagicRoot: {}", error);
         return Err(InstructionError::InvalidArgument);
     }

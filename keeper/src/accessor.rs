@@ -2,7 +2,7 @@
 
 use std::{ops::Deref, path::PathBuf, sync::Arc};
 
-use accountsdb::{AccountEntry, AccountLoader, AccountsDB, AccountsDBError};
+use accountsdb::{AccountEntry, AccountsDB, AccountsDBError};
 use ledger::{
     LedgerRequestError,
     request::*,
@@ -30,8 +30,7 @@ use solana_transaction_error::TransactionError;
 use tokio::sync::mpsc::Receiver;
 
 use crate::{
-    ExecutionRecord, FullTransaction, Keeper, ResolvedTransaction,
-    cache::{AccountCache, MissingAccount},
+    AccountLease, ExecutionRecord, FullTransaction, Keeper, ResolvedTransaction,
     error::Result,
     subscriptions::TransactionLogs,
     util::{execution_commit, request, transaction_status},
@@ -42,42 +41,10 @@ pub struct AccountsAccessor<'a> {
     pub(crate) keeper: &'a Keeper,
 }
 
-/// Cursor over accounts missing from local storage.
-///
-/// Each item either gives the caller load ownership or waits for another
-/// caller that already owns the load.
-pub struct MissingAccounts<'a> {
-    index: usize,
-    accounts: &'a [Pubkey],
-    loader: AccountLoader<'a>,
-    cache: &'a Arc<AccountCache>,
-}
-
-impl<'a> Iterator for MissingAccounts<'a> {
-    type Item = MissingAccount;
-    /// Returns the next account that still needs resolution.
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let pubkey = self.accounts.get(self.index)?;
-            self.index += 1;
-            if self.loader.contains(pubkey).unwrap_or_default() {
-                self.cache.promote(pubkey);
-                continue;
-            }
-            return Some(self.cache.reserve(*pubkey));
-        }
-    }
-}
-
 impl<'a> AccountsAccessor<'a> {
-    /// Coordinates loading of accounts missing from local storage.
-    pub fn ensure(&'a self, accounts: &'a [Pubkey]) -> MissingAccounts<'a> {
-        MissingAccounts {
-            index: 0,
-            accounts,
-            loader: self.keeper.accountsdb.loader(),
-            cache: &self.keeper.caches.accounts,
-        }
+    /// Waits for exclusive mutation ownership of `pubkey`.
+    pub async fn lock(&self, pubkey: Pubkey) -> AccountLease {
+        self.keeper.caches.accounts.lock(pubkey).await
     }
 
     /// Returns recent transaction signatures that mention the account.
@@ -98,7 +65,7 @@ impl<'a> AccountsAccessor<'a> {
         self.keeper.subscriptions.programs.subscribe(program).await
     }
 
-    /// Subscribes as the sole receiver of account pubkeys evicted from the recent-load cache.
+    /// Subscribes as the sole receiver of account pubkeys evicted from the recency cache.
     ///
     /// Returns an error if the process-lifetime eviction receiver was already registered.
     pub fn subscribe_evictions(&self) -> Result<Receiver<Pubkey>> {
