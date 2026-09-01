@@ -24,7 +24,9 @@ operations used for initialization, sysvars, and administrative writes do not.
 `CURRENT/storage.db` contains a metadata header followed by account images in the
 borrowed `solana-account` layout. Each image includes its full pubkey so scans can
 recover keys without the index. Offsets are measured in 8-byte `StorageUnit`s.
-The transaction counter is metadata and is not part of the account checksum.
+They are persisted as 64-bit values, and production reserves a 1 TiB virtual
+mapping that is backed by the file only as it grows. The transaction counter is
+metadata and is not part of the account checksum.
 
 The LMDB index under `CURRENT/index` contains:
 

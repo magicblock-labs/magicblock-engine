@@ -149,7 +149,8 @@ impl AccountsDB {
     /// This must run only after validation and before loaders or iterators are
     /// created. Vacated sources become eligible on the following pass, and all
     /// successful passes are flushed synchronously before returning.
-    pub fn compact(&mut self) -> Result<u32> {
+    /// Returns the total number of reclaimed 8-byte storage units.
+    pub fn compact(&mut self) -> Result<u64> {
         let mut reclaimed = 0;
         let mut changed = false;
         loop {
@@ -291,7 +292,7 @@ pub enum AccountsDBError {
     #[error("LMDB index error: {0}")]
     Index(#[source] heed::Error),
     /// Storage allocation would exceed the maximum mapped size.
-    #[error("mapped storage exceeded the 32 GiB limit")]
+    #[error("mapped storage exceeded the maximum mapped size")]
     Allocation,
     /// Opened database version is not supported by current implementation.
     #[error("unsupported database version: {0:?}")]

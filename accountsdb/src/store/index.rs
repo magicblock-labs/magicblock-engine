@@ -11,7 +11,7 @@ use heed::{
 };
 use solana_pubkey::Pubkey;
 
-use crate::store::kv::{KeyTail, Offset, OwnerAndOffset, PubkeyBytes, U32LE};
+use crate::store::kv::{KeyTail, Offset, OwnerAndOffset, PubkeyBytes, U64LE};
 
 /// LMDB map size for the index database.
 #[cfg(feature = "testkit")]
@@ -78,7 +78,7 @@ pub(crate) struct Index {
     /// Owner keytag -> offset.
     pub(super) programs: Database<KeyTail, Offset>,
     /// Image size -> offset.
-    pub(super) freelist: Database<U32LE, Offset, IntegerComparator>,
+    pub(super) freelist: Database<U64LE, Offset, IntegerComparator>,
 }
 
 impl Index {
@@ -139,7 +139,7 @@ impl Index {
     }
 
     /// Takes a freed span from the freelist when one matches `units`.
-    pub(crate) fn allocate(&self, units: u32, txn: &mut RwTxn<'_>) -> Result<Option<Offset>> {
+    pub(crate) fn allocate(&self, units: u64, txn: &mut RwTxn<'_>) -> Result<Option<Offset>> {
         let offset = self.freelist.get(txn, &units)?;
         if let Some(offset) = offset {
             self.freelist.delete_one_duplicate(txn, &units, &offset)?;
