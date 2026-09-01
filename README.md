@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/edition-2024-blue" alt="Edition 2024">
   <img src="https://img.shields.io/badge/Solana-SVM-14F195?logo=solana&logoColor=white" alt="Solana SVM">
   <img src="https://img.shields.io/badge/status-experimental-yellow" alt="Status experimental">
-  <img src="https://img.shields.io/badge/version-0.4.0-lightgrey" alt="Version 0.4.0">
+  <img src="https://img.shields.io/badge/version-0.4.1-lightgrey" alt="Version 0.4.1">
 </p>
 
 ---
