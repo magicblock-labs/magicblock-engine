@@ -96,6 +96,7 @@ impl<'a> AccountsAccessor<'a> {
         clock.slot = block.slot;
         clock.unix_timestamp = block.time;
         cacc.serialize_data(&clock).map_err(AccountsDBError::from)?;
+        drop(loader);
         self.store(&[(SlotHashes::id(), hacc), (Clock::id(), cacc)]).map_err(Into::into)
     }
 }

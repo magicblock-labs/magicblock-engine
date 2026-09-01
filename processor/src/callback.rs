@@ -10,18 +10,39 @@ use tracing::error;
 
 use accountsdb::AccountLoader;
 
-/// Bridges the SVM to keeper-backed account loads.
+/// Bridges SVM transaction loading to keeper-backed accounts.
 ///
 /// When `LOAD_OWNED` is set, loaded accounts are copied to owned data; this is
 /// used by simulation, which must always operate on owned account copies.
-pub(crate) struct SVMCallback<'a, const LOAD_OWNED: bool> {
+pub(crate) struct LoadCallback<'a, const LOAD_OWNED: bool> {
     /// Reads accounts from the engine's accounts store.
     pub(crate) loader: AccountLoader<'a>,
+}
+
+impl<const LO: bool> InvokeContextCallback for LoadCallback<'_, LO> {}
+
+impl<const LOAD_OWNED: bool> TransactionProcessingCallback for LoadCallback<'_, LOAD_OWNED> {
+    fn get_account_shared_data(&self, pubkey: &Pubkey) -> Option<(AccountSharedData, Slot)> {
+        self.loader
+            .load(pubkey)
+            .inspect_err(|error| error!(?error, "accountsdb load error"))
+            .unwrap_or_default()
+            .map(|mut acc| {
+                if LOAD_OWNED {
+                    acc = acc.owned().into();
+                }
+                (acc, 0)
+            })
+    }
+}
+
+/// Supplies feature-dependent behavior while the SVM invokes programs.
+pub(crate) struct InvokeCallback<'a> {
     /// Active feature set governing precompiles and runtime behavior.
     pub(crate) featureset: &'a FeatureSet,
 }
 
-impl<'a, const LO: bool> InvokeContextCallback for SVMCallback<'a, LO> {
+impl InvokeContextCallback for InvokeCallback<'_> {
     fn is_precompile(&self, program_id: &Pubkey) -> bool {
         agave_precompiles::is_precompile(program_id, |id| self.featureset.is_active(id))
     }
@@ -35,20 +56,5 @@ impl<'a, const LO: bool> InvokeContextCallback for SVMCallback<'a, LO> {
         agave_precompiles::get_precompile(program_id, |id| self.featureset.is_active(id))
             .ok_or(PrecompileError::InvalidPublicKey)
             .and_then(|p| p.verify(data, &instruction_datas, self.featureset))
-    }
-}
-
-impl<'a, const LOAD_OWNED: bool> TransactionProcessingCallback for SVMCallback<'a, LOAD_OWNED> {
-    fn get_account_shared_data(&self, pubkey: &Pubkey) -> Option<(AccountSharedData, Slot)> {
-        self.loader
-            .load(pubkey)
-            .inspect_err(|error| error!(?error, "accountsdb load error"))
-            .unwrap_or_default()
-            .map(|mut acc| {
-                if LOAD_OWNED {
-                    acc = acc.owned().into();
-                }
-                (acc, 0)
-            })
     }
 }

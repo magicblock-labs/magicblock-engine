@@ -16,7 +16,7 @@ use tokio::{
 };
 use tracing::debug;
 
-use crate::{Result, Simulation, SimulatorMessage, callback::SVMCallback, svm::SvmContext};
+use crate::{Result, Simulation, SimulatorMessage, svm::SvmContext};
 
 /// Worker that simulates transactions against current state without committing.
 pub struct TransactionSimulator {
@@ -97,12 +97,8 @@ impl TransactionSimulator {
             let _ = simulation.response.send(error);
             return;
         };
-        let accessor = self.state.accounts();
-        let callback = SVMCallback::<true> {
-            loader: accessor.loader(),
-            featureset: self.state.features(),
-        };
-        let output = self.svm.execute(&callback, &txn, self.state.features());
+        let accounts = self.state.accounts();
+        let output = self.svm.execute::<true>(accounts.loader(), &txn, self.state.features());
         let execution = ExecutionRecord {
             result: output.processing_result,
             balances: output.balance_collector,
