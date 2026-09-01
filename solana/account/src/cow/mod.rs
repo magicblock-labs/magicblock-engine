@@ -604,7 +604,10 @@ impl AccountMode {
             (from, to) if from == to => false,
             (ReadOnly | Placeholder, to) => to != Transient,
             (Transient, Delegated) => to_slot > from_slot,
-            (Delegated, Transient) | (Transient, ReadOnly) | (Ephemeral, Closed) => true,
+            (Delegated, Transient)
+            | (Transient, ReadOnly)
+            | (Transient, Placeholder)
+            | (Ephemeral, Closed) => true,
             _ => false,
         }
     }
