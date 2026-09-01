@@ -205,18 +205,18 @@ impl<'a> AccountLoader<'a> {
     /// Reuse the loader for batch lookups to keep them on the same persisted
     /// index snapshot. Persisted accounts take precedence over volatile ones.
     pub fn load(&self, pubkey: &Pubkey) -> Result<Option<AccountSharedData>> {
-        let txn = &mut self.txn.borrow_mut();
-        if let Some(acc) = self.db.persisted.load(txn, pubkey)? {
-            metrics::load(StoreKind::Persisted);
-            return Ok(Some(acc.into()));
-        }
-        let account = self.db.volatile.load(pubkey).map(Into::into);
-        if account.is_some() {
+        if let Some(account) = self.db.volatile.load(pubkey) {
             metrics::load(StoreKind::Volatile);
+            return Ok(Some(account.into()));
+        }
+        let txn = &mut self.txn.borrow_mut();
+        let account = self.db.persisted.load(txn, pubkey)?;
+        if account.is_some() {
+            metrics::load(StoreKind::Persisted);
         } else {
             metrics::load(StoreKind::Absent);
         }
-        Ok(account)
+        Ok(account.map(Into::into))
     }
 
     /// Applies `reader` to an account image stable across a concurrent publish.
