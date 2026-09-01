@@ -146,7 +146,7 @@ fn test_account_patch_transition_errors() {
         .build::<AccountSharedData>();
 
     assert_eq!(
-        account.set_mode(AccountMode::ReadOnly),
+        account.set_lifecycle(AccountMode::ReadOnly, 10),
         Err(AccountPatchError::InvalidModeTransition {
             from: AccountMode::Delegated,
             to: AccountMode::ReadOnly,
@@ -156,20 +156,32 @@ fn test_account_patch_transition_errors() {
     assert!(account.markers().is_empty());
 
     assert_eq!(
-        AccountFieldPatch::Slot(10).apply(&mut account),
+        AccountFieldPatch::Lifecycle {
+            mode: AccountMode::Delegated,
+            slot: 10,
+        }
+        .apply(&mut account),
         Err(AccountPatchError::InvalidSlotTransition { from: 10, to: 10 })
     );
     assert_eq!(account.slot(), 10);
     assert!(account.markers().is_empty());
 
-    account.set_mode(AccountMode::Transient).unwrap();
-    AccountFieldPatch::Slot(10).apply(&mut account).unwrap();
+    AccountFieldPatch::Lifecycle {
+        mode: AccountMode::Transient,
+        slot: 10,
+    }
+    .apply(&mut account)
+    .unwrap();
     assert!(account.markers().contains(DirtyMarkers::MODE));
     assert!(account.markers().contains(DirtyMarkers::SLOT));
 
     let markers = *account.markers();
     assert_eq!(
-        AccountFieldPatch::Slot(9).apply(&mut account),
+        AccountFieldPatch::Lifecycle {
+            mode: AccountMode::ReadOnly,
+            slot: 9,
+        }
+        .apply(&mut account),
         Err(AccountPatchError::InvalidSlotTransition { from: 10, to: 9 })
     );
     assert_eq!(account.slot(), 10);
@@ -178,7 +190,7 @@ fn test_account_patch_transition_errors() {
     let mut ephemeral = AccountBuilder::default()
         .mode(AccountMode::Ephemeral)
         .build::<AccountSharedData>();
-    ephemeral.set_mode(AccountMode::Closed).unwrap();
+    ephemeral.set_lifecycle(AccountMode::Closed, 0).unwrap();
     assert!(ephemeral.is(AccountMode::Closed));
 }
 

@@ -2,7 +2,7 @@
 //! exposed by `AccountAccessor`. This path is untested below the engine: it needs
 //! the always-on MagicRoot builtin plus the executor's per-thread authority
 //! (MagicRoot authorizes the transaction's fee payer against it). Asserts the
-//! create/update/delete round-trip and the sponsor-balance invariant, and
+//! materialize/delete round-trip and the sponsor-balance invariant, and
 //! that post-finalize actions actually run.
 #![cfg(test)]
 
@@ -41,7 +41,7 @@ fn delegated(owner: Pubkey, data: Vec<u8>, slot: u64) -> OwnedAccount {
 }
 
 /// Materializes `mode`, entering transient through its required delegated state.
-async fn create_with(engine: &Engine, key: Pubkey, owner: Pubkey, mode: AccountMode) {
+async fn materialize_with(engine: &Engine, key: Pubkey, owner: Pubkey, mode: AccountMode) {
     let initial = if mode == AccountMode::Transient {
         delegated(owner, vec![1], SLOT - 1)
     } else {
@@ -49,32 +49,22 @@ async fn create_with(engine: &Engine, key: Pubkey, owner: Pubkey, mode: AccountM
     };
     engine
         .account(key)
-        .create(initial, None)
+        .await
+        .materialize(initial, None)
         .await
         .expect("initial account is created");
     if mode == AccountMode::Transient {
         engine
             .account(key)
-            .update(account(owner, vec![1], mode, SLOT))
+            .await
+            .materialize(account(owner, vec![1], mode, SLOT), None)
             .await
             .expect("delegated account enters transient");
     }
 }
 
-/// Asserts MagicRoot rejected the slot patch in a complete-account sequence.
-fn assert_non_advancing_slot(error: EngineError) {
-    let errored = matches!(
-        error,
-        EngineError::TransactionExecution(TransactionError::InstructionError(
-            2,
-            InstructionError::InvalidArgument
-        ))
-    );
-    assert!(errored, "unexpected replacement error: {error:?}");
-}
-
-/// Asserts MagicRoot rejected the mode patch in a complete-account sequence.
-fn assert_invalid_mode_transition(error: EngineError) {
+/// Asserts MagicRoot rejected the lifecycle patch in a complete-account sequence.
+fn assert_invalid_lifecycle(error: EngineError) {
     let errored = matches!(
         error,
         EngineError::TransactionExecution(TransactionError::InstructionError(
@@ -85,11 +75,10 @@ fn assert_invalid_mode_transition(error: EngineError) {
     assert!(errored, "unexpected replacement error: {error:?}");
 }
 
-// The full lifecycle. `create` materializes a fresh account by patching every
-// non-flag field, balancing lamport patches against the authority, then
-// finalizing its flags; `update` overwrites an existing account or materializes
-// a fresh key; and
-// `delete` closes it. Mutations here keep the balance constant after creation.
+// The full lifecycle. `materialize` patches every non-flag field, balances
+// lamport patches against the authority for a fresh account, and finalizes its
+// flags. Re-materialization overwrites the same key; `delete` closes it.
+// Mutations here keep the balance constant after initial materialization.
 #[tokio::test(flavor = "multi_thread")]
 async fn account_crud_lifecycle() {
     let te = TestEngine::new().await;
@@ -104,7 +93,7 @@ async fn account_crud_lifecycle() {
     );
     let authority_before = te.get_account(te.authority()).expect("sponsor exists").lamports();
 
-    te.account(key).create(created, None).await.unwrap();
+    te.account(key).await.materialize(created, None).await.unwrap();
 
     let acc = te.get_account(key).expect("created account exists");
     assert_eq!(acc.lamports(), LAMPORTS);
@@ -119,26 +108,30 @@ async fn account_crud_lifecycle() {
         "the lamport patch sponsors the created balance from the authority"
     );
 
-    // update overwrites the existing account in place: same-length data (the
+    // Re-materialization overwrites the account in place: same-length data (the
     // patch sequence replaces the exact data length) and identical lamports.
     // Read-only accounts remain replaceable after finalization.
     te.account(key)
-        .update(account(owner, vec![5; 16], AccountMode::ReadOnly, 11))
+        .await
+        .materialize(account(owner, vec![5; 16], AccountMode::ReadOnly, 11), None)
         .await
         .unwrap();
     let acc = te.get_account(key).expect("still exists");
-    assert_eq!(acc.data(), &[5; 16], "update replaced the data wholesale");
-    assert_eq!(acc.owner(), &owner, "update replaced the patched owner");
+    assert_eq!(acc.data(), &[5; 16], "materialization replaced the data");
+    assert_eq!(acc.owner(), &owner, "materialization replaced the owner");
     assert!(acc.is(AccountMode::ReadOnly));
 
     // delete: the account is gone from storage.
-    te.account(key).delete().await.unwrap();
+    te.account(key).await.delete().await.unwrap();
     assert!(te.get_account(key).is_none(), "deleted account is removed");
 
-    // update also materializes a fresh account the same way create does, minus
-    // the post-finalize actions.
+    // The same operation also materializes a fresh account without actions.
     let key2 = Pubkey::new_unique();
-    te.account(key2).update(delegated(owner, vec![3; 8], 10)).await.unwrap();
+    te.account(key2)
+        .await
+        .materialize(delegated(owner, vec![3; 8], 10), None)
+        .await
+        .unwrap();
     assert_eq!(te.get_account(key2).expect("materialized").data(), &[3; 8]);
 
     te.close().await;
@@ -149,7 +142,7 @@ async fn account_crud_lifecycle() {
 // then shrinking it below the boundary and to empty, proves replacement keeps
 // the exact data length. The caller supplies each successive current state.
 #[tokio::test(flavor = "multi_thread")]
-async fn account_clone_create_and_update_accept_large_data() {
+async fn account_clone_materialization_accepts_large_data() {
     const MAX_DATA_LEN: usize = 128 * 1024 + 1;
 
     let te = TestEngine::new().await;
@@ -175,11 +168,7 @@ async fn account_clone_create_and_update_accept_large_data() {
             .slot(SLOT + index as u64)
             .data(data.clone());
 
-        if index == 0 {
-            te.account(key).create(account, None).await.unwrap();
-        } else {
-            te.account(key).update(account).await.unwrap();
-        }
+        te.account(key).await.materialize(account, None).await.unwrap();
 
         let stored = te.get_account(key).expect("large account exists");
         assert_eq!(stored.lamports(), lamports);
@@ -196,7 +185,7 @@ async fn account_clone_create_and_update_accept_large_data() {
 /// action above trace index 64, while 257 subsequent V42 self-CPIs hit the CPI
 /// trace limit and roll back both the account creation and an earlier action.
 #[tokio::test(flavor = "multi_thread")]
-async fn account_create_accepts_max_data_with_post_finalize() {
+async fn account_materialization_accepts_max_data_with_post_finalize() {
     const CPI_CALLS: usize = 257;
 
     let te = TestEngine::new().await;
@@ -217,7 +206,8 @@ async fn account_create_accepts_max_data_with_post_finalize() {
         actions: vec![action],
     };
     te.account(key)
-        .create(account, Some(post))
+        .await
+        .materialize(account, Some(post))
         .await
         .expect("maximum-sized account and post-finalize action execute atomically");
 
@@ -243,7 +233,8 @@ async fn account_create_accepts_max_data_with_post_finalize() {
     };
     let error = te
         .account(failed_key)
-        .create(failed_account, Some(post))
+        .await
+        .materialize(failed_account, Some(post))
         .await
         .expect_err("257 V42 self-CPIs exceed the trace limit");
 
@@ -279,7 +270,7 @@ async fn account_program_cache_tracks_v42_lifecycle() {
     let closeable = AccountBuilder::from(seeded.clone())
         .mode(AccountMode::Ephemeral)
         .slot(seeded.slot() + 1);
-    te.account(program).create(closeable, None).await.unwrap();
+    te.account(program).await.materialize(closeable, None).await.unwrap();
 
     let output = Pubkey::new_unique();
     te.accounts()
@@ -319,7 +310,7 @@ async fn account_program_cache_tracks_v42_lifecycle() {
         .expect("rolled-back deletion preserves the shared cache entry");
     assert_eq!(load_v42_data(&te, output), Some(7));
 
-    te.account(program).delete().await.unwrap();
+    te.account(program).await.delete().await.unwrap();
     assert!(
         te.get_account(program).is_none(),
         "committed deletion removes the account"
@@ -352,9 +343,10 @@ async fn account_replacement_slot_ordering() {
         (AccountMode::Placeholder, AccountMode::Ephemeral),
     ] {
         let key = Pubkey::new_unique();
-        create_with(&te, key, owner, from).await;
+        materialize_with(&te, key, owner, from).await;
         te.account(key)
-            .update(account(owner, vec![2], to, SLOT))
+            .await
+            .materialize(account(owner, vec![2], to, SLOT), None)
             .await
             .expect("equal-slot mode transition is accepted");
 
@@ -377,10 +369,11 @@ async fn account_replacement_slot_ordering() {
             .unwrap();
         let error = te
             .account(key)
-            .update(account(owner, vec![2], to, SLOT))
+            .await
+            .materialize(account(owner, vec![2], to, SLOT), None)
             .await
             .expect_err("invalid mode transition is rejected");
-        assert_invalid_mode_transition(error);
+        assert_invalid_lifecycle(error);
 
         let unchanged = te.get_account(key).expect("rejected transition preserves the account");
         assert!(unchanged.is(from), "{from:?} does not transition to {to:?}");
@@ -390,23 +383,29 @@ async fn account_replacement_slot_ordering() {
 
     let key = Pubkey::new_unique();
     te.account(key)
-        .create(account(owner, vec![3], AccountMode::ReadOnly, SLOT), None)
+        .await
+        .materialize(account(owner, vec![3], AccountMode::ReadOnly, SLOT), None)
         .await
         .expect("baseline account is created");
 
     let error = te
         .account(key)
-        .update(account(owner, vec![4], AccountMode::ReadOnly, SLOT))
+        .await
+        .materialize(account(owner, vec![4], AccountMode::ReadOnly, SLOT), None)
         .await
         .expect_err("equal-slot replacement without a mode change is rejected");
-    assert_non_advancing_slot(error);
+    assert_invalid_lifecycle(error);
 
     let error = te
         .account(key)
-        .update(account(owner, vec![5], AccountMode::Delegated, SLOT - 1))
+        .await
+        .materialize(
+            account(owner, vec![5], AccountMode::Delegated, SLOT - 1),
+            None,
+        )
         .await
         .expect_err("a mode change never authorizes an older slot");
-    assert_non_advancing_slot(error);
+    assert_invalid_lifecycle(error);
 
     let unchanged = te.get_account(key).expect("rejected replacements preserve the account");
     assert!(unchanged.is(AccountMode::ReadOnly));
@@ -421,7 +420,7 @@ async fn account_replacement_slot_ordering() {
 // lets it through. The contrast proves the actions actually execute rather than
 // being silently dropped.
 #[tokio::test(flavor = "multi_thread")]
-async fn create_runs_post_finalize_actions() {
+async fn materialize_runs_post_finalize_actions() {
     let te = TestEngine::new().await;
 
     // A successful v42 transfer proves the post-finalize action ran after the
@@ -436,9 +435,10 @@ async fn create_runs_post_finalize_actions() {
         actions: vec![benign],
     };
     te.account(ok_key)
-        .create(acc, Some(post))
         .await
-        .expect("create with a succeeding post-finalize action");
+        .materialize(acc, Some(post))
+        .await
+        .expect("materialization with a succeeding post-finalize action");
     assert_eq!(
         load_v42_lamports(&te, source).expect("source remains"),
         source_before - 1,
@@ -459,7 +459,7 @@ async fn create_runs_post_finalize_actions() {
         source_program: V42_ID,
         actions: vec![failing],
     };
-    let result = te.account(bad_key).create(acc, Some(post)).await;
+    let result = te.account(bad_key).await.materialize(acc, Some(post)).await;
     assert!(
         result.is_err(),
         "failing post-finalize action surfaces an error"
@@ -467,6 +467,45 @@ async fn create_runs_post_finalize_actions() {
     assert!(
         te.get_account(bad_key).is_none(),
         "nothing commits when the action fails"
+    );
+
+    te.close().await;
+}
+
+/// Proves a failed activation keeps its account lease, blocks a competing
+/// waiter, and wakes that waiter only after a fallback materialization commits.
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_materialization_retains_lease_for_fallback() {
+    let te = TestEngine::new().await;
+    let key = Pubkey::new_unique();
+    let account = v42_builder(0, AccountMode::Delegated);
+    let mut accessor = te.account(key).await;
+    let failing = (E::lit(i64::MIN) - E::lit(1)).compose(key, &[]);
+    let post = PostFinalize {
+        source_program: V42_ID,
+        actions: vec![failing],
+    };
+    accessor
+        .materialize(account.clone(), Some(post))
+        .await
+        .expect_err("failed action rolls activation back");
+
+    let mut waiting = Box::pin(Engine::account(&te, key));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut waiting)
+            .await
+            .is_err(),
+        "failed first attempt retains the lease"
+    );
+    accessor
+        .materialize(account, None)
+        .await
+        .expect("fallback commits through the same lease");
+    drop(accessor);
+    drop(waiting.await);
+    assert!(
+        te.get_account(key).is_some_and(|account| account.is(AccountMode::Delegated)),
+        "fallback leaves the account in its terminal delegated state"
     );
 
     te.close().await;

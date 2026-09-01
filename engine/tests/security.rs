@@ -142,7 +142,8 @@ async fn post_finalize_rejects_magic_root_ix() {
     };
     let error = te
         .account(key)
-        .create(account, Some(post))
+        .await
+        .materialize(account, Some(post))
         .await
         .expect_err("PostFinalize rejects a recursive MagicRoot patch");
     assert!(

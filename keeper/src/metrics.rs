@@ -85,6 +85,11 @@ pub(crate) fn account_cache_insert() {
     metric::with_metrics(&METRICS, |m| m.account_cache_entries.inc());
 }
 
+/// Records an account leaving the recency cache without eviction.
+pub(crate) fn account_cache_remove() {
+    metric::with_metrics(&METRICS, |m| m.account_cache_entries.dec());
+}
+
 /// Refreshes block hash cache entry gauge.
 pub(crate) fn block_hash_entries(count: usize) {
     metric::with_metrics(&METRICS, |m| {

@@ -1,4 +1,4 @@
-//! Read-side caches owned by keeper.
+//! Caches and account-mutation coordination owned by keeper.
 
 use std::{collections::VecDeque, hash::Hash, sync::Arc};
 
@@ -7,7 +7,7 @@ use arc_swap::ArcSwap;
 use ledger::request::{BlockHistory, TransactionStatus};
 use nucleus::{Slot, ledger::Block, notifier::EventNotifier};
 use parking_lot::Mutex;
-use scc::{HashCache, HashMap, hash_map::Entry};
+use scc::{HashCache, HashMap, hash_cache::Entry as CacheEntry, hash_map::Entry};
 use solana_account::AccountMode;
 use solana_hash::Hash as SolanaHash;
 use solana_pubkey::Pubkey;
@@ -64,7 +64,7 @@ pub(crate) struct Caches {
     pub(crate) signatures: ExpiringCache<Signature, Option<TransactionStatus>>,
     /// Recent block hashes and latest block boundary.
     pub(crate) blocks: BlocksCache,
-    /// Account recency and missing-load coordination.
+    /// Account recency and mutation coordination.
     pub(crate) accounts: Arc<AccountCache>,
 }
 
@@ -92,18 +92,18 @@ impl Caches {
     }
 }
 
-/// Account access cache along with missing-account load reservations.
+/// Account access cache along with per-account mutation reservations.
 pub(crate) struct AccountCache {
-    /// Committed account loads, ordered by recent access.
+    /// Non-authoritative accounts, ordered by recent access.
     pub(crate) lru: HashCache<Pubkey, (), RandomState>,
-    /// In-flight account loads keyed by account pubkey.
+    /// In-flight account mutations keyed by account pubkey.
     pub(crate) reservations: HashMap<Pubkey, Arc<EventNotifier>, RandomState>,
-    /// Pubkeys evicted when a committed load displaces a cold account.
+    /// Pubkeys evicted when a materialization displaces a cold account.
     pub(crate) evictions: Unicast<Pubkey>,
 }
 
 impl AccountCache {
-    /// Creates missing-load coordination with the requested recent-load capacity.
+    /// Creates mutation coordination with the requested recency capacity.
     pub(crate) fn new(capacity: usize) -> Self {
         let lru = HashCache::with_capacity_and_hasher(256, capacity, Default::default());
         Self {
@@ -114,89 +114,123 @@ impl AccountCache {
     }
 }
 
-/// Load guard owned by the task responsible for one missing account.
-pub struct AccountLoad {
-    /// Account this guard is responsible for loading.
-    pub pubkey: Pubkey,
-    /// Cache reservation released on commit or drop.
-    cache: Option<Arc<AccountCache>>,
+/// Exclusive mutation guard for one account.
+pub struct AccountLease {
+    pubkey: Pubkey,
+    cache: Arc<AccountCache>,
+    released: Arc<EventNotifier>,
 }
 
-/// Wait handle for an account currently being loaded by another task.
-pub struct AccountWait(Pubkey, Arc<EventNotifier>);
-
-/// Coordination state for one account missing from local storage.
-pub enum MissingAccount {
-    /// Caller owns the load; dropping the guard releases waiters.
-    Load(AccountLoad),
-    /// Another caller is already loading the account.
-    Wait(AccountWait),
+/// Per-account mutation ownership state.
+enum AccountClaim {
+    Acquired(AccountLease),
+    Busy(Arc<EventNotifier>),
 }
 
-impl AccountLoad {
-    /// Completes the load, wakes waiters, and tracks non-authoritative modes for
-    /// eviction.
-    pub async fn complete(mut self, mode: AccountMode) {
-        let Some((cache, notifier)) = self.release() else {
-            return;
-        };
-        notifier.notify(true);
+impl AccountLease {
+    /// Returns the account protected by this lease.
+    pub fn pubkey(&self) -> Pubkey {
+        self.pubkey
+    }
+
+    /// Updates recency after materializing the account in `mode`.
+    pub async fn materialized(&self, mode: AccountMode) {
+        let evicted = self.cache.track(self.pubkey, mode);
+        if let Some(pubkey) = evicted {
+            self.cache.evictions.send(pubkey).await;
+        }
+    }
+
+    /// Removes a deleted account from recency.
+    pub fn deleted(&self) {
+        self.cache.remove_recency(&self.pubkey);
+    }
+
+    /// Returns whether an earlier recency eviction still applies to the
+    /// account's current mode and cache entry.
+    pub fn cached_eviction_applies(&self, mode: AccountMode) -> bool {
         if mode.authoritative() {
-            return;
+            return false;
         }
-        if let Ok(Some(evicted)) = cache.lru.put_sync(self.pubkey, ()) {
-            metrics::account_cache_eviction();
-            cache.evictions.send(evicted.0).await;
-        } else {
-            metrics::account_cache_insert()
-        }
-    }
-
-    fn release(&mut self) -> Option<(Arc<AccountCache>, Arc<EventNotifier>)> {
-        let cache = self.cache.take()?;
-        let (_, notifier) = cache.reservations.remove_sync(&self.pubkey)?;
-        Some((cache, notifier))
+        !self.cache.lru.contains_sync(&self.pubkey)
     }
 }
 
-impl Drop for AccountLoad {
-    /// Cancels the load reservation and wakes waiters without caching.
+impl Drop for AccountLease {
+    /// Releases mutation ownership and wakes callers waiting to re-evaluate.
     fn drop(&mut self) {
-        let Some((_, notifier)) = self.release() else {
-            return;
-        };
-        notifier.notify(false);
-    }
-}
-
-impl AccountWait {
-    /// Waits for the active loader and returns the pubkey plus whether it committed.
-    pub async fn wait(self) -> (Pubkey, bool) {
-        let result = self.1.notified().await;
-        (self.0, result)
+        self.cache.reservations.remove_sync(&self.pubkey);
+        self.released.notify(true);
     }
 }
 
 impl AccountCache {
-    /// Promotes `pubkey` only if it has already been committed to the cache.
-    pub(crate) fn promote(&self, pubkey: &Pubkey) {
-        self.lru.get_sync(pubkey);
+    /// Tracks a materialized account and returns one displaced from recency.
+    fn track(&self, pubkey: Pubkey, mode: AccountMode) -> Option<Pubkey> {
+        if !mode.authoritative() {
+            return self.admit_recency(pubkey);
+        }
+        self.remove_recency(&pubkey);
+        None
     }
 
-    /// Reserves a missing account load or returns a waiter for the active load.
-    pub(crate) fn reserve(self: &Arc<Self>, pubkey: Pubkey) -> MissingAccount {
+    /// Promotes an existing entry or admits `pubkey`, returning any displaced
+    /// account.
+    fn admit_recency(&self, pubkey: Pubkey) -> Option<Pubkey> {
+        let entry = match self.lru.entry_sync(pubkey) {
+            CacheEntry::Occupied(entry) => {
+                // Entry access does not promote recency; release its lock and
+                // use the cache access API for that operation.
+                drop(entry);
+                self.lru.get_sync(&pubkey);
+                return None;
+            }
+            CacheEntry::Vacant(entry) => entry,
+        };
+        let (evicted, _) = entry.put_entry(());
+        if evicted.is_some() {
+            metrics::account_cache_eviction();
+        } else {
+            metrics::account_cache_insert();
+        }
+        evicted.map(|entry| entry.0)
+    }
+
+    /// Removes `pubkey` from recency and records an actual removal.
+    fn remove_recency(&self, pubkey: &Pubkey) {
+        if self.lru.remove_sync(pubkey).is_some() {
+            metrics::account_cache_remove();
+        }
+    }
+
+    /// Acquires mutation ownership or returns the current owner's release
+    /// notification.
+    fn claim(self: &Arc<Self>, pubkey: Pubkey) -> AccountClaim {
         match self.reservations.entry_sync(pubkey) {
             Entry::Occupied(e) => {
                 metrics::account_resolution_race();
-                MissingAccount::Wait(AccountWait(pubkey, e.get().clone()))
+                AccountClaim::Busy(e.get().clone())
             }
             Entry::Vacant(e) => {
                 let notifier = Arc::new(EventNotifier::default());
-                e.insert_entry(notifier);
-                MissingAccount::Load(AccountLoad {
+                e.insert_entry(notifier.clone());
+                AccountClaim::Acquired(AccountLease {
                     pubkey,
-                    cache: Some(self.clone()),
+                    cache: self.clone(),
+                    released: notifier,
                 })
+            }
+        }
+    }
+
+    /// Waits for exclusive mutation ownership of `pubkey`.
+    pub(crate) async fn lock(self: &Arc<Self>, pubkey: Pubkey) -> AccountLease {
+        loop {
+            match self.claim(pubkey) {
+                AccountClaim::Acquired(lease) => return lease,
+                AccountClaim::Busy(wait) => {
+                    wait.notified().await;
+                }
             }
         }
     }
