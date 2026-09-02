@@ -156,7 +156,9 @@ impl<'a> TransactionsAccessor<'a> {
         self.keeper.subscriptions.services.subscribe()
     }
 
-    /// Appends transaction bytes to the ledger, deduplicating by signature.
+    /// Appends transaction bytes to the ledger, deduplicating by the first 16
+    /// signature bytes. Distinct signatures with the same live prefix are
+    /// treated as already processed.
     ///
     /// Returns `Ok(true)` when the transaction was appended. On `Ok(false)`,
     /// the latest signature subscriber receives `AlreadyProcessed` or
