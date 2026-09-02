@@ -17,7 +17,7 @@ use crate::{
 
 /// Ordered work sent by the appender after it has assigned file spans.
 pub(crate) enum IndexMessage {
-    /// Transaction and account entries held until the following block marker or fence.
+    /// Transaction and account entries held until the following block marker or sync fence.
     Transaction {
         signature: Signature,
         accounts: AccountIndex,
