@@ -40,8 +40,8 @@ pub struct SequencerHandle {
 /// Work item handed to the transaction sequencer.
 #[derive(From)]
 pub enum SequencerMessage {
-    /// A transaction to schedule and execute.
-    Transaction(TransactionView),
+    /// A transaction with resolved account keys to schedule and execute.
+    Transaction(ResolvedTransaction),
     /// A block boundary to seal before scheduling further transactions.
     Block(Block),
     /// Finalize a block boundary, then pause before accepting subsequent work.

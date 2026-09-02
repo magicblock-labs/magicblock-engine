@@ -19,6 +19,8 @@ use crate::{
     subscriptions::{Subscription, Unicast},
 };
 
+const SIGNATURE_PREFIX_LEN: usize = 16;
+
 /// Block and transaction history captured at one authoritative startup boundary.
 pub(crate) struct CacheSeed {
     latest: Block,
@@ -60,12 +62,22 @@ impl CacheSeed {
 }
 
 pub(crate) struct Caches {
-    /// Recent signature statuses keyed by transaction signature.
-    pub(crate) signatures: ExpiringCache<Signature, Option<TransactionStatus>>,
+    /// Recent statuses keyed by a 128-bit signature prefix.
+    ///
+    /// A prefix collision is intentionally treated as the same transaction
+    /// while both entries are live.
+    pub(crate) signatures: ExpiringCache<[u8; SIGNATURE_PREFIX_LEN], Option<TransactionStatus>>,
     /// Recent block hashes and latest block boundary.
     pub(crate) blocks: BlocksCache,
     /// Account recency and mutation coordination.
     pub(crate) accounts: Arc<AccountCache>,
+}
+
+#[inline]
+pub(crate) fn prefix(signature: &Signature) -> [u8; SIGNATURE_PREFIX_LEN] {
+    let mut prefix = [0; SIGNATURE_PREFIX_LEN];
+    prefix.copy_from_slice(&signature.as_array()[..SIGNATURE_PREFIX_LEN]);
+    prefix
 }
 
 impl Caches {
@@ -86,7 +98,7 @@ impl Caches {
             let slot = block.block.slot;
             block.signatures.into_iter().map(move |status| (slot, status))
         }) {
-            caches.signatures.push(status.signature, Some(status.status), slot);
+            caches.signatures.push(prefix(&status.signature), Some(status.status), slot);
         }
         caches
     }
@@ -275,7 +287,7 @@ impl BlocksCache {
 /// existing key leaves its value and expiry slot unchanged.
 pub(crate) struct ExpiringCache<K, V> {
     /// Cached values by key.
-    index: HashMap<K, V>,
+    index: HashMap<K, V, RandomState>,
     /// Expiry order used for lazy eviction.
     queue: Mutex<VecDeque<ExpiringRecord<K>>>,
     /// Number of slots each entry lives after insertion.

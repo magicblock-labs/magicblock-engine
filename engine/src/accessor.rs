@@ -2,7 +2,9 @@
 
 use std::{sync::atomic::Ordering, time::Duration};
 
-use keeper::{AccountLease, ExecutionRecord, TransactionView, error::KeeperError};
+use keeper::{
+    AccountLease, ExecutionRecord, ResolvedTransaction, TransactionView, error::KeeperError,
+};
 use magic_root_interface::{MagicRootInstruction, PostFinalize};
 use processor::{SequencerMessage, Simulation, SimulatorMessage};
 use solana_account::{AccountMode, AccountSharedData, OwnedAccount};
@@ -121,8 +123,10 @@ impl<'a> TransactionAccessor<'a> {
         if self.engine.terminating.load(Ordering::Acquire) {
             return Err(EngineError::ShuttingDown);
         }
-        let signature = self.transaction.signatures()[0];
-        let msg = SequencerMessage::Transaction(self.transaction);
+        let transaction =
+            ResolvedTransaction::try_new(self.transaction, None, &Default::default())?;
+        let signature = transaction.signatures()[0];
+        let msg = SequencerMessage::Transaction(transaction);
         let rx = self.engine.transactions().subscribe_signature(signature).await;
         self.engine.sequencer.send(msg).await?;
         let status = time::timeout(EXECUTION_TIMEOUT, rx)
@@ -137,7 +141,9 @@ impl<'a> TransactionAccessor<'a> {
         if self.engine.terminating.load(Ordering::Acquire) {
             return Err(EngineError::ShuttingDown);
         }
-        let msg = SequencerMessage::Transaction(self.transaction);
+        let transaction =
+            ResolvedTransaction::try_new(self.transaction, None, &Default::default())?;
+        let msg = SequencerMessage::Transaction(transaction);
         self.engine.sequencer.send(msg).await.map_err(Into::into)
     }
 
