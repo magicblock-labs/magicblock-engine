@@ -308,8 +308,8 @@ async fn test_transaction_roundtrip() {
     assert!(status.is_none(), "unknown signature has no status");
 }
 
-/// Proves a final sync commits queued index work before acknowledging, leaving
-/// the transaction readable when the appender stops.
+/// Proves a final sync commits queued index work without a block boundary before
+/// acknowledging, leaving the transaction readable when the appender stops.
 #[tokio::test]
 async fn test_final_sync_commits_queued_index_work() {
     let (_dir, ledger) = ledger(u64::MAX);
@@ -324,7 +324,6 @@ async fn test_final_sync_commits_queued_index_work() {
     for event in recorded(sig, payload, 7) {
         tx.send(event).unwrap();
     }
-    tx.send(Event::Block(Block::new(7, 700))).unwrap();
     let (response, acknowledged) = oneshot::channel();
     tx.send(Event::Sync { response, is_final: true }).unwrap();
     acknowledged.await.unwrap();

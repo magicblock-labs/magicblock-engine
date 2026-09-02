@@ -292,11 +292,6 @@ impl IndexWriter {
         batch.durability(Some(mode)).commit().map_err(Into::into)
     }
 
-    /// Makes already committed batches durable without publishing pending mutations.
-    pub(crate) fn sync(&self) -> Result<()> {
-        self.db.persist(PersistMode::SyncData).map_err(Into::into)
-    }
-
     /// Queues the immutable keyspace's active memtable for background flushing.
     pub(crate) fn rotate_memtable(&self) -> Result<()> {
         self.keyspace.rotate_memtable()?;

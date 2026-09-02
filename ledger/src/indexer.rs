@@ -17,7 +17,7 @@ use crate::{
 
 /// Ordered work sent by the appender after it has assigned file spans.
 pub(crate) enum IndexMessage {
-    /// Transaction and account entries held until the following block marker.
+    /// Transaction and account entries held until the following block marker or fence.
     Transaction {
         signature: Signature,
         accounts: AccountIndex,
@@ -90,7 +90,7 @@ impl LedgerIndexer {
                         self.writer.rotate_memtable()?;
                         self.writer = self.ledger.index.writer(&keyspace);
                     } else {
-                        self.writer.sync()?;
+                        self.writer.persist(Durability::SyncData)?;
                     }
                     let _ = response.send(());
                 }
