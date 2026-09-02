@@ -5,19 +5,21 @@
 //! Single-response readers run synchronously on the test thread; replay uses a
 //! worker thread so the test can drain its bounded channel concurrently.
 //! Transactions are genuine wincode-serialized Solana transactions so the
-//! appender's account/signature extraction and the reader's block reconstruction
-//! exercise the real codecs.
+//! execution descriptors and the reader's block reconstruction exercise the
+//! real codecs.
 //!
-//! The appender publishes complete data at a block boundary (buffer flush +
-//! index commit + cursor publish), so every append batch here ends with a `Block`;
-//! that also mirrors how a caller must frame writes.
+//! The appender publishes data cursors and queues the index commit at a block
+//! boundary, so every append batch here ends with a `Block`; that also mirrors
+//! how a caller must frame writes.
 
 use std::{
     env,
     process::Command,
     sync::{Arc, atomic::Ordering::Acquire},
+    thread,
 };
 
+use agave_transaction_view::transaction_view::TransactionView;
 use nucleus::{
     MB, Slot,
     ledger::{Block, SuperblockSeal},
@@ -32,14 +34,15 @@ use tokio::sync::{broadcast, mpsc};
 use crate::{
     Ledger,
     appender::{LedgerAppender, SIZE_CHECK_FREQUENCY},
+    indexer::{IndexerHandle, LedgerIndexer},
     reader::LedgerReader,
     request::{
         AccountSignature, AccountSignaturesParams, BlockDetails, BlockParams, BlockResponse,
         ReadRequest, ReplayParams, RequestPayload, TransactionResponse,
     },
     schema::{
-        Balances, Event, Execution, ExecutionDetails, ExecutionHeader, OwnedBlockstoreEntry,
-        TransactionEntry,
+        AccountIndex, Balances, Event, Execution, ExecutionDetails, ExecutionHeader,
+        OwnedBlockstoreEntry, TransactionEntry,
     },
 };
 
@@ -55,6 +58,14 @@ fn ledger(size_limit: u64) -> (TempDir, Arc<Ledger>) {
     (dir, ledger)
 }
 
+/// Starts an index worker for an appender test.
+fn indexer(ledger: &Arc<Ledger>) -> IndexerHandle {
+    let (tx, rx) = flume::bounded(2_048);
+    let indexer = LedgerIndexer::new(ledger.clone(), rx).unwrap();
+    thread::spawn(move || indexer.run().unwrap());
+    IndexerHandle::new(tx)
+}
+
 /// Feeds `events` through a freshly opened appender and runs it to completion.
 ///
 /// The appender resumes from on-disk cursors, so successive calls model both
@@ -66,7 +77,13 @@ fn append(ledger: &Arc<Ledger>, events: Vec<Event>) {
         tx.send(event).unwrap();
     }
     drop(tx);
-    LedgerAppender::run(ledger.clone(), rx, position).unwrap();
+    LedgerAppender::run(ledger.clone(), rx, position, indexer(ledger)).unwrap();
+}
+
+/// Builds the compact account descriptor from a genuine transaction fixture.
+fn account_index(payload: &Arc<Vec<u8>>) -> AccountIndex {
+    let view = TransactionView::try_new_unsanitized(payload.clone()).unwrap();
+    AccountIndex::new(view.static_account_keys())
 }
 
 /// Proves a process crash recovers both the last strong boundary and a complete
@@ -114,13 +131,24 @@ fn execution(signature: Signature, slot: Slot, result: TransactionResult<()>) ->
     }
 }
 
+/// Builds a complete execution event from one transaction fixture.
+fn executed(
+    signature: Signature,
+    payload: &Arc<Vec<u8>>,
+    slot: Slot,
+    result: TransactionResult<()>,
+) -> Event {
+    Event::Execution {
+        execution: execution(signature, slot, result),
+        accounts: account_index(payload),
+    }
+}
+
 /// The `Transaction` + paired `Execution` events that record one transaction in
 /// a block at `slot` (execution result `Ok`).
 fn recorded(sig: Signature, payload: Arc<Vec<u8>>, slot: Slot) -> [Event; 2] {
-    [
-        Event::Transaction(TransactionEntry { signature: sig, payload }),
-        Event::Execution(execution(sig, slot, Ok(()))),
-    ]
+    let execution = executed(sig, &payload, slot, Ok(()));
+    [Event::Transaction(TransactionEntry { signature: sig, payload }), execution]
 }
 
 /// Ends superblock `id` and rotates the writer to the next one.
@@ -188,7 +216,7 @@ async fn replay(ledger: &Arc<Ledger>, superblock: u64) -> Vec<OwnedBlockstoreEnt
     reader_tx.send(ReadRequest::Replay(payload)).unwrap();
     drop(reader_tx);
     let ledger = ledger.clone();
-    let worker = std::thread::spawn(move || {
+    let worker = thread::spawn(move || {
         let mut shutdown = ShutdownManager::default();
         LedgerReader::new(ledger, reader_rx)
             .unwrap()
@@ -240,7 +268,7 @@ async fn test_transaction_roundtrip() {
             signature: sig,
             payload: bytes.clone(),
         }),
-        Event::Execution(execution(sig, 5, Ok(()))),
+        executed(sig, &bytes, 5, Ok(())),
         Event::Block(Block::new(5, 500)),
     ];
     append(&ledger, events);
@@ -258,12 +286,51 @@ async fn test_transaction_roundtrip() {
         .expect("status present");
     assert_eq!(status.slot, 5);
     assert!(status.result.is_ok());
+    let history = read(
+        &ledger,
+        AccountSignaturesParams {
+            pubkey: account,
+            limit: 10,
+            before: None,
+            until: None,
+        },
+        ReadRequest::AccountSignatures,
+    )
+    .await
+    .unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].signature, sig);
 
     // An unknown signature resolves to nothing on both surfaces.
     let missing = Signature::from([9; 64]);
     assert!(read_transaction(&ledger, missing).await.is_none());
     let status = read(&ledger, missing, ReadRequest::TransactionStatus).await.unwrap();
     assert!(status.is_none(), "unknown signature has no status");
+}
+
+/// Proves a final sync commits queued index work before acknowledging, leaving
+/// the transaction readable when the appender stops.
+#[tokio::test]
+async fn test_final_sync_commits_queued_index_work() {
+    let (_dir, ledger) = ledger(u64::MAX);
+    let (sig, payload) = transaction(&[Pubkey::new_unique()]);
+    let (tx, rx) = flume::bounded(8);
+    let (position, _) = broadcast::channel(8);
+    let appender_ledger = ledger.clone();
+    let indexer = indexer(&ledger);
+    let appender =
+        thread::spawn(move || LedgerAppender::run(appender_ledger, rx, position, indexer).unwrap());
+
+    for event in recorded(sig, payload, 7) {
+        tx.send(event).unwrap();
+    }
+    tx.send(Event::Block(Block::new(7, 700))).unwrap();
+    let (response, acknowledged) = oneshot::channel();
+    tx.send(Event::Sync { response, is_final: true }).unwrap();
+    acknowledged.await.unwrap();
+    appender.join().unwrap();
+
+    assert!(read_transaction(&ledger, sig).await.is_some());
 }
 
 // Blockstore payloads may exceed wincode's default 4 MiB preallocation limit.
@@ -309,9 +376,9 @@ async fn test_pending_requires_execution() {
         // Paired transaction: indexed and readable.
         Event::Transaction(TransactionEntry {
             signature: indexed,
-            payload: indexed_bytes,
+            payload: indexed_bytes.clone(),
         }),
-        Event::Execution(execution(indexed, 1, Ok(()))),
+        executed(indexed, &indexed_bytes, 1, Ok(())),
         // Transaction with no execution: written to the blockstore but never
         // indexed, so no read surface can resolve it.
         Event::Transaction(TransactionEntry {
@@ -319,7 +386,10 @@ async fn test_pending_requires_execution() {
             payload: orphan_bytes,
         }),
         // Execution with no pending transaction: dropped without error.
-        Event::Execution(execution(stray, 1, Ok(()))),
+        Event::Execution {
+            execution: execution(stray, 1, Ok(())),
+            accounts: AccountIndex::new(&[]),
+        },
         Event::Block(Block::new(1, 0)),
     ];
     append(&ledger, events);
@@ -512,13 +582,16 @@ async fn test_block_range_spans_superblocks() {
     append(
         &ledger,
         vec![
-            Event::Transaction(TransactionEntry { signature: ok, payload: ok_bytes }),
-            Event::Execution(execution(ok, 2, Ok(()))),
+            Event::Transaction(TransactionEntry {
+                signature: ok,
+                payload: ok_bytes.clone(),
+            }),
+            executed(ok, &ok_bytes, 2, Ok(())),
             Event::Transaction(TransactionEntry {
                 signature: failed,
-                payload: failed_bytes,
+                payload: failed_bytes.clone(),
             }),
-            Event::Execution(execution(failed, 2, failure.clone())),
+            executed(failed, &failed_bytes, 2, failure.clone()),
             Event::Transaction(TransactionEntry {
                 signature: unindexed,
                 payload: unindexed_bytes,

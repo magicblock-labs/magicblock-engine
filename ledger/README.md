@@ -26,15 +26,16 @@ requires a ledger-version bump and explicit compatibility handling.
 
 ## Append and read paths
 
-One appender owns ordered writes. Transaction bytes are appended first and kept
-pending until their execution metadata arrives; only then are transaction and
-account indexes inserted. Every durable sync flushes data and indexes, publishes
-durable file cursors, transfers the accumulated transaction count, and flushes
-ledger metadata. When the sync carries a block boundary, it also publishes that
-block's slot and increments the block count. A seal finalizes the active files
-and rotates to the next superblock. The successor metadata retains the sealed
-snapshot's checksum and cumulative transaction count so it remains
-self-describing after retention removes the preceding blockstore.
+One appender owns ordered data-file writes and remains authoritative for their
+spans. Executor threads attach compact account descriptors to execution events,
+and the appender forwards those descriptors and its file spans to one bounded,
+ordered index worker. At each block, the appender publishes data-file cursors
+before enqueueing the block marker; the worker then atomically commits that
+block's transaction, account, and block entries. A seal drains the index worker,
+finalizes the active files, and rotates both services to the next superblock. The
+successor metadata retains the sealed snapshot's checksum and cumulative
+transaction count so it remains self-describing after retention removes the
+preceding blockstore.
 
 Reader requests run on a worker pool. Each worker owns its decode buffers and
 reads only through published cursors. The ledger-wide Fjall index uses two
@@ -51,28 +52,35 @@ an execution index. This is a read-side projection only and does not change the
 on-disk blockstore or index format.
 
 Each block atomically commits its transaction, block, and account index changes.
-Ordinary boundaries flush data files and the Fjall journal to the operating
-system with `Buffer` durability before publishing cursors. Explicit syncs,
-seals, resets, shutdown, and retention boundaries additionally use file
-`sync_data` and Fjall `SyncData` before synchronously flushing metadata. Thus a
-process crash recovers complete published blocks, while an OS or power failure
-may discard the active tail after the last strong boundary. Sealing also queues
-the immutable keyspace's active memtable for background SST flushing so its
-journal history can be reclaimed.
+Index visibility is asynchronous: recent transaction and block lookups may be
+absent, account history omits trailing unindexed blocks, and the live signature
+cache may lead durable history. Explicit syncs, seals, resets, retention, and
+shutdown are ordered index drain fences and use file `sync_data` and Fjall
+`SyncData`. Ordinary block
+boundaries use `Buffer` durability. Thus a process crash can leave a published
+data tail without indexes; graceful shutdown is the supported complete-history
+boundary and no crash-tail index rebuild is performed. Sealing also queues the
+immutable keyspace's active memtable for background SST flushing so its journal
+history can be reclaimed.
 
 Within each superblock keyspace, a leading byte namespaces transaction, block,
-and account entries. The account index stores
+and account entries. Transaction keys retain 16 signature bytes, while account
+keys retain eight public-key bytes. The account index stores
 `account_tag || pubkey_prefix || execution_span_be` as its key and an empty
 value. Fixed-width big-endian slot and account-span key components make reverse
 Fjall ranges start at the newest entry. Opaque span values remain little-endian.
+Accounts with colliding eight-byte prefixes share history results. This layout
+has no compatibility path or ledger-version bump; deployment requires a fresh
+ledger directory.
 LZ4 is disabled because the realistic index fixture reduced closed-directory
 size by only 7.37%.
 
 During coordinated shutdown, one queue marker per reader closes the pool after
-earlier requests. A final appender sync flushes every preceding event, reports
-its durability result, and then closes the appender. Intermediate replication
-syncs flush without closing either service, and retained sender clones do not
-delay terminal shutdown.
+earlier requests. A final appender sync flushes every preceding event, fences the
+indexer, and reports completion. The appender then closes its sole index sender,
+allowing the drained worker to exit. Intermediate replication syncs fence without
+closing either service, and retained appender sender clones do not delay terminal
+shutdown.
 
 Replay is superblock-based. The consumer supplies the last sealed superblock
 already reflected in its state, and the reader streams each retained successor

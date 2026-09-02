@@ -43,6 +43,8 @@ pub enum Service {
     FeeClaim,
     /// Ledger append worker.
     LedgerAppender,
+    /// Ledger index worker.
+    LedgerIndexer,
     /// Ledger read worker.
     LedgerReader,
     /// Ledger replay worker.
@@ -73,7 +75,7 @@ impl Service {
             PaceMaker => ShutdownTier::Two,
             // The pacemaker drains the sequencer and sends the appender's final
             // sync before either service reaches this tier.
-            Sequencer | LedgerAppender => ShutdownTier::Three,
+            Sequencer | LedgerAppender | LedgerIndexer => ShutdownTier::Three,
             Metrics => ShutdownTier::Four,
             _ => ShutdownTier::Four,
         }

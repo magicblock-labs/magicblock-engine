@@ -5,8 +5,8 @@ use std::sync::Arc;
 use ledger::{
     request::{ReadRequest, RequestPayload, TransactionStatus},
     schema::{
-        Balances, CompiledInstruction, Cpis, Event, Execution, ExecutionDetails, ExecutionHeader,
-        Instruction, ReturnData,
+        AccountIndex, Balances, CompiledInstruction, Cpis, Event, Execution, ExecutionDetails,
+        ExecutionHeader, Instruction, ReturnData,
     },
 };
 use nucleus::Slot;
@@ -63,7 +63,11 @@ pub(crate) fn execution_commit(txn: &mut FullTransaction) -> ExecutionCommit {
         .ok()
         .map(|execution| execution_details(execution, txn.execution.balances.take()));
     let logs = details.as_ref().map(|d| Arc::clone(&d.logs)).unwrap_or_default();
-    let event = Event::Execution(Execution { header, details });
+    let accounts = AccountIndex::new(txn.transaction.static_account_keys());
+    let event = Event::Execution {
+        execution: Execution { header, details },
+        accounts,
+    };
 
     ExecutionCommit { signature, status, event, logs }
 }

@@ -6,10 +6,10 @@ use std::{
     thread::JoinHandle,
 };
 
-use agave_transaction_view::transaction_view::TransactionView;
 use bitcode::Buffer;
 use flume::Receiver;
 use nucleus::{Slot, ledger::BlockstorePosition};
+use oneshot::Sender as Response;
 use solana_signature::Signature;
 use tokio::sync::broadcast::Sender;
 use tracing::{info, warn};
@@ -19,11 +19,12 @@ use zstd::bulk::Compressor;
 use crate::{
     Ledger, Superblock, codec,
     error::{LedgerError, Result},
-    index::{IndexWriter, Span, TxSpan},
+    index::{Span, TxSpan},
+    indexer::{IndexMessage, IndexerHandle},
     metrics::{self, Operation},
     schema::{
-        Block, BlockstoreEntry, Event, Execution, ExecutionDetails, MAX_EXECUTION_DETAILS_SIZE,
-        SuperblockSeal, TransactionEntry, blockstore,
+        AccountIndex, Block, BlockstoreEntry, Event, Execution, ExecutionDetails,
+        MAX_EXECUTION_DETAILS_SIZE, SuperblockSeal, TransactionEntry, blockstore,
     },
     storage::{AppendFile, Durability},
 };
@@ -44,9 +45,9 @@ pub(crate) struct LedgerAppender {
     /// Writable files for the active superblock.
     writer: SuperblockWriter,
     /// Transactions waiting for their matching execution details.
-    pending: HashMap<Signature, PendingTx>,
-    /// Active superblock index writer and pending atomic boundary.
-    index: IndexWriter,
+    pending: HashMap<Signature, Span>,
+    /// Sole sender for ordered background indexing.
+    indexer: IndexerHandle,
     /// Outstanding physical cleanup for the last truncated superblock.
     truncation: Option<JoinHandle<Result<()>>>,
     /// Event stream from the execution pipeline.
@@ -63,6 +64,7 @@ impl LedgerAppender {
         ledger: Arc<Ledger>,
         rx: Receiver<Event>,
         position: Sender<BlockstorePosition>,
+        indexer: IndexerHandle,
     ) -> Result<()> {
         let head = ledger.meta.head();
         metrics::pending_transactions(0);
@@ -72,13 +74,12 @@ impl LedgerAppender {
             .get(&head)
             .cloned()
             .ok_or(LedgerError::Corruption("active superblock missing"))?;
-        let index = ledger.index.writer(&superblock.index);
         let writer = SuperblockWriter::new(superblock)?;
 
         let mut appender = Self {
             ledger,
             writer,
-            index,
+            indexer,
             truncation: None,
             rx,
             pending: HashMap::new(),
@@ -86,34 +87,36 @@ impl LedgerAppender {
             position,
         };
 
-        let result = appender.serve();
+        let result = loop {
+            let Ok(event) = appender.rx.recv() else { break appender.sync() };
+            let result = match event {
+                Event::Transaction(transaction) => appender.write_transaction(transaction),
+                Event::Execution { execution, accounts } => {
+                    appender.write_execution(execution, accounts)
+                }
+                Event::Block(block) => appender.write_block(block),
+                Event::Superblock { seal, response } => {
+                    let result = appender.seal(seal, false);
+                    acknowledge(&result, response);
+                    result
+                }
+                Event::Bootstrap(seal) => appender.seal(seal, true),
+                Event::Reset(slot) => appender.write_reset(slot),
+                Event::Sync { response, is_final } => {
+                    let result = appender.sync();
+                    acknowledge(&result, response);
+                    if is_final {
+                        break result;
+                    }
+                    result
+                }
+            };
+            if let Err(error) = result {
+                break Err(error);
+            }
+        };
         let truncation = appender.join_truncation();
         result.and(truncation)
-    }
-
-    /// Processes append events until all senders close or a final sync arrives.
-    fn serve(&mut self) -> Result<()> {
-        while let Ok(event) = self.rx.recv() {
-            match event {
-                Event::Transaction(transaction) => self.write_transaction(transaction)?,
-                Event::Execution(execution) => self.write_execution(execution)?,
-                Event::Block(block) => self.write_block(block)?,
-                Event::Superblock { seal, response } => {
-                    self.seal(seal, false)?;
-                    let _ = response.send(());
-                }
-                Event::Bootstrap(seal) => self.seal(seal, true)?,
-                Event::Reset(slot) => self.write_reset(slot)?,
-                Event::Sync { response, is_final } => {
-                    self.sync(None)?;
-                    let _ = response.send(());
-                    if is_final {
-                        return Ok(());
-                    }
-                }
-            }
-        }
-        self.sync(None)
     }
 
     /// Rotates to the next superblock directory.
@@ -127,7 +130,7 @@ impl LedgerAppender {
         superblock.meta.transactions.store(seal.transactions, Release);
         superblock.meta.flush()?;
         let writer = SuperblockWriter::new(superblock.clone())?;
-        let index = self.ledger.index.writer(&superblock.index);
+        let keyspace = superblock.index.clone();
 
         let mut superblocks = self.ledger.superblocks.write();
         superblocks.insert(head, superblock);
@@ -137,7 +140,7 @@ impl LedgerAppender {
         drop(superblocks);
 
         self.writer = writer;
-        self.index = index;
+        self.indexer.fence(Some(keyspace))?;
         let position = BlockstorePosition { superblock: head, offset: 0 };
         let _ = self.position.send(position);
         info!(head, "opened active superblock");
@@ -158,43 +161,35 @@ impl LedgerAppender {
     fn write_transaction(&mut self, transaction: TransactionEntry) -> Result<()> {
         let entry = BlockstoreEntry::Transaction(transaction.payload.as_slice());
         let span = self.writer.write_blockstore(&entry)?;
-        let entry = PendingTx {
-            transaction: transaction.payload,
-            span,
-        };
-        self.pending.insert(transaction.signature, entry);
+        self.pending.insert(transaction.signature, span);
         metrics::pending_transactions(self.pending.len());
         self.transactions += 1;
         Ok(())
     }
 
-    /// Writes execution details and adds transaction/account indexes.
-    fn write_execution(&mut self, execution: Execution) -> Result<()> {
+    /// Writes execution details and queues their authoritative spans for indexing.
+    fn write_execution(&mut self, execution: Execution, accounts: AccountIndex) -> Result<()> {
         let signature: Signature = execution.header.signature;
-        let Some(pending) = self.pending.remove(&signature) else {
+        let Some(blockstore) = self.pending.remove(&signature) else {
             warn!(%signature, "ledger execution arrived without a pending transaction; skipping");
             return Ok(());
         };
         metrics::pending_transactions(self.pending.len());
-        let execution = self.writer.write_execution(&execution)?;
+        let execution_span = self.writer.write_execution(&execution)?;
         let span = TxSpan {
-            blockstore: pending.span,
-            execution,
+            blockstore,
+            execution: execution_span,
         };
-        self.index.insert_transaction(&signature, span);
-        let view = TransactionView::try_new_unsanitized(pending.transaction)?;
-        let accounts = view.static_account_keys();
-        self.index.insert_accounts(accounts, span.execution);
-        Ok(())
+        self.indexer.send(IndexMessage::Transaction { signature, accounts, span })
     }
 
-    /// Writes a block boundary and publishes it after data and indexes reach the OS.
+    /// Publishes a block's data spans before queuing its atomic index commit.
     fn write_block(&mut self, block: Block) -> Result<()> {
         let span = self.writer.write_blockstore(&BlockstoreEntry::Block(block))?;
-        self.index.insert_block(block.slot, span);
         self.publish(Some(block.slot), Durability::Buffer)?;
+        self.indexer.send(IndexMessage::Block { slot: block.slot, span })?;
         if block.slot.is_multiple_of(SIZE_CHECK_FREQUENCY) && self.ledger.size_exceeded()? {
-            self.sync(None)?;
+            self.sync()?;
             self.truncate()?;
         }
         metrics::ledger_counts(&self.ledger);
@@ -217,9 +212,8 @@ impl LedgerAppender {
     /// Writes a superblock seal and prepares files for read-only access.
     fn write_superblock(&mut self, seal: SuperblockSeal) -> Result<()> {
         self.writer.write_blockstore(&BlockstoreEntry::Superblock(seal))?;
-        self.sync(None)?;
+        self.sync()?;
         self.writer.finalize()?;
-        self.index.rotate_memtable()?;
         info!(superblock = seal.id, "sealed superblock");
         Ok(())
     }
@@ -227,22 +221,21 @@ impl LedgerAppender {
     /// Writes and publishes a volatile-state reset marker.
     fn write_reset(&mut self, slot: Slot) -> Result<()> {
         self.writer.write_blockstore(&BlockstoreEntry::Reset(slot))?;
-        self.sync(None)?;
+        self.sync()?;
         info!(slot, "appended volatile state reset");
         Ok(())
     }
 
-    /// Makes files and indexes durable, publishes their cursors and accumulated
-    /// transaction count, and broadcasts the new blockstore position. When
-    /// `slot` is supplied, the same boundary also publishes block metadata.
-    fn sync(&mut self, slot: Option<Slot>) -> Result<()> {
-        self.publish(slot, Durability::SyncData)
+    /// Makes files and preceding block indexes durable, publishes accumulated
+    /// metadata, and broadcasts the new blockstore position.
+    fn sync(&mut self) -> Result<()> {
+        self.publish(None, Durability::SyncData)?;
+        self.indexer.fence(None)
     }
 
-    /// Publishes one complete boundary with buffered or data-synced durability.
+    /// Publishes one data-file boundary with buffered or data-synced durability.
     fn publish(&mut self, slot: Option<Slot>, durability: Durability) -> Result<()> {
         let cursors = self.writer.persist(durability)?;
-        self.index.persist(durability)?;
         self.writer.publish(cursors, slot, durability)?;
         self.ledger.meta.transactions.fetch_add(self.transactions, Release);
         if let Some(slot) = slot {
@@ -260,12 +253,10 @@ impl LedgerAppender {
     }
 }
 
-/// Transaction bytes already written but not yet paired with execution details.
-struct PendingTx {
-    /// Transaction bytes retained until execution details arrive for indexing.
-    transaction: Arc<Vec<u8>>,
-    /// Blockstore-file span of the transaction bytes.
-    span: Span,
+fn acknowledge(result: &Result<()>, response: Response<()>) {
+    if result.is_ok() {
+        let _ = response.send(());
+    }
 }
 
 /// Published byte cursors for the active superblock data files.
