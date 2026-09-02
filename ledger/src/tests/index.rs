@@ -9,7 +9,7 @@ use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 
 use crate::{
-    index::{Index, IndexReader, Span, TxSpan},
+    index::{Index, IndexReader, Span, TxSpan, account_prefix},
     storage::Durability,
 };
 
@@ -91,12 +91,14 @@ fn account_signature_duplicates() {
     let other = Pubkey::new_unique();
     let spans = [Span::new(100, 10), Span::new(200, 20), Span::new(300, 30)];
     let other_span = Span::new(400, 40);
+    let account_key = account_prefix(&account);
+    let other_key = account_prefix(&other);
 
     let mut writer = index.writer(&keyspace);
     for span in &spans {
-        writer.insert_accounts(&[account], *span);
+        writer.insert_accounts(&[account_key], *span);
     }
-    writer.insert_accounts(&[other], other_span);
+    writer.insert_accounts(&[other_key], other_span);
     writer.persist(Durability::Buffer).unwrap();
 
     // Account duplicate spans are newest-first, so later execution offsets are returned first.

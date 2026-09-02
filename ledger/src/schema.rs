@@ -9,14 +9,16 @@
 use std::sync::Arc;
 
 use bitcode::{Decode, Encode};
+use derive_more::Deref;
 use nucleus::Slot;
 pub use nucleus::ledger::{Block, SuperblockSeal};
 
+use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 use solana_transaction_error::TransactionResult;
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::index::Span;
+use crate::index::{AccountPrefix, Span, account_prefix};
 
 /// Byte offset into a ledger data file.
 pub(crate) type Offset = u64;
@@ -65,8 +67,14 @@ pub mod blockstore {
 pub enum Event {
     /// Transaction bytes accepted for later execution indexing.
     Transaction(TransactionEntry),
-    /// Runtime execution metadata for a previously appended transaction.
-    Execution(Execution),
+    /// Runtime execution metadata and compact account descriptor for a
+    /// previously appended transaction.
+    Execution {
+        /// Persisted execution metadata.
+        execution: Execution,
+        /// Account prefixes derived from the already parsed transaction.
+        accounts: AccountIndex,
+    },
     /// Block boundary marker and block hash.
     Block(Block),
     /// Seal the active superblock and rotate to a fresh directory.
@@ -95,6 +103,20 @@ pub struct TransactionEntry {
     pub signature: Signature,
     /// Serialized sanitized transaction bytes shared with the appender.
     pub payload: Arc<Vec<u8>>,
+}
+
+/// Namespaced account prefixes needed to index one executed transaction.
+///
+/// Prefixes are intentionally opaque outside the ledger. Colliding eight-byte
+/// prefixes share account-history results.
+#[derive(Deref)]
+pub struct AccountIndex(Vec<AccountPrefix>);
+
+impl AccountIndex {
+    /// Captures account prefixes from an already parsed transaction view.
+    pub fn new(accounts: &[Pubkey]) -> Self {
+        Self(accounts.iter().map(account_prefix).collect())
+    }
 }
 
 /// One typed entry in the blockstore stream.

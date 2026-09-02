@@ -39,6 +39,12 @@ pub enum LedgerError {
     /// The background superblock cleanup worker panicked.
     #[error("ledger truncation worker panicked")]
     TruncationPanic,
+    /// The ledger index worker stopped accepting ordered work.
+    #[error("ledger indexer channel closed")]
+    IndexerClosed,
+    /// The ledger index worker closed a fence without acknowledging it.
+    #[error("ledger indexer fence response channel closed")]
+    IndexerFenceClosed,
 }
 
 /// Errors returned while waiting for a ledger reader response.

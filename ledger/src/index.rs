@@ -26,18 +26,22 @@ const TRANSACTION: u8 = b't';
 const BLOCK: u8 = b'b';
 /// Account-to-offset key namespace.
 const ACCOUNT: u8 = b'a';
-/// Bytes kept from wide keys in compact index keys.
-const PREFIX_BYTES: usize = 16;
+/// Bytes kept from signatures in compact transaction keys.
+const SIGNATURE_PREFIX_BYTES: usize = 16;
+/// Bytes kept from public keys in compact account keys.
+const ACCOUNT_BYTES: usize = 8;
 /// Bytes occupied by one encoded span.
 const SPAN_BYTES: usize = size_of::<u64>();
 /// Bytes occupied by a transaction's two spans.
 const TX_SPAN_BYTES: usize = 2 * SPAN_BYTES;
 /// Bytes occupied by a namespaced truncated signature.
-const TX_KEY_BYTES: usize = 1 + PREFIX_BYTES;
+const TX_KEY_BYTES: usize = 1 + SIGNATURE_PREFIX_BYTES;
 /// Bytes occupied by a namespaced slot.
 const BLOCK_KEY_BYTES: usize = 1 + size_of::<Slot>();
 /// Bytes occupied by a namespaced account prefix.
-const ACCOUNT_PREFIX_BYTES: usize = 1 + PREFIX_BYTES;
+const ACCOUNT_PREFIX_BYTES: usize = 1 + ACCOUNT_BYTES;
+/// Namespaced public-key prefix handed from executors to the index worker.
+pub(crate) type AccountPrefix = [u8; ACCOUNT_PREFIX_BYTES];
 /// Bytes occupied by an account prefix and ordered execution span.
 const ACCOUNT_KEY_BYTES: usize = ACCOUNT_PREFIX_BYTES + SPAN_BYTES;
 /// Ledger-wide block cache capacity.
@@ -47,11 +51,8 @@ const JOURNAL_SIZE: u64 = 256 * MB as u64;
 /// Fjall maintenance workers assigned to the ledger index.
 const WORKERS: usize = 2;
 
-/// Truncated signature or account key.
-///
-/// The 16-byte prefix is a compact identity, not a collision-proof one. The
-/// index accepts the negligible collision risk to keep keys compact.
-type Prefix = [u8; PREFIX_BYTES];
+/// Truncated signature used as a compact transaction identity.
+type SignaturePrefix = [u8; SIGNATURE_PREFIX_BYTES];
 
 /// Packed span inside a ledger data file.
 ///
@@ -269,7 +270,7 @@ impl IndexWriter {
     }
 
     /// Adds account-to-execution entries for all static transaction accounts.
-    pub(crate) fn insert_accounts(&mut self, accounts: &[Pubkey], span: Span) {
+    pub(crate) fn insert_accounts(&mut self, accounts: &[AccountPrefix], span: Span) {
         for account in accounts {
             self.batch.insert(&self.keyspace, account_key(account, span), []);
         }
@@ -302,7 +303,7 @@ impl IndexWriter {
 fn transaction_key(signature: &Signature) -> [u8; TX_KEY_BYTES] {
     let mut key = [0; TX_KEY_BYTES];
     key[0] = TRANSACTION;
-    key[1..].copy_from_slice(&prefix(signature.as_array()));
+    key[1..].copy_from_slice(&signature_prefix(signature));
     key
 }
 
@@ -315,25 +316,25 @@ fn block_key(slot: Slot) -> [u8; BLOCK_KEY_BYTES] {
 }
 
 /// Returns the namespaced prefix shared by one account's entries.
-fn account_prefix(pubkey: &Pubkey) -> [u8; ACCOUNT_PREFIX_BYTES] {
-    let mut key = [0; ACCOUNT_PREFIX_BYTES];
-    key[0] = ACCOUNT;
-    key[1..].copy_from_slice(&prefix(pubkey.as_array()));
-    key
+pub(crate) fn account_prefix(pubkey: &Pubkey) -> AccountPrefix {
+    let mut prefix = [0; ACCOUNT_PREFIX_BYTES];
+    prefix[0] = ACCOUNT;
+    prefix[1..].copy_from_slice(&pubkey.as_array()[..ACCOUNT_BYTES]);
+    prefix
 }
 
 /// Returns the namespaced account entry key ordered by execution span.
-fn account_key(pubkey: &Pubkey, span: Span) -> [u8; ACCOUNT_KEY_BYTES] {
+fn account_key(prefix: &AccountPrefix, span: Span) -> [u8; ACCOUNT_KEY_BYTES] {
     let mut key = [0; ACCOUNT_KEY_BYTES];
-    key[..ACCOUNT_PREFIX_BYTES].copy_from_slice(&account_prefix(pubkey));
+    key[..ACCOUNT_PREFIX_BYTES].copy_from_slice(prefix);
     key[ACCOUNT_PREFIX_BYTES..].copy_from_slice(&span.key_bytes());
     key
 }
 
-/// Returns the compact prefix used by signature and account indexes.
-fn prefix<const N: usize>(bytes: &[u8; N]) -> Prefix {
-    let mut prefix = [0; PREFIX_BYTES];
-    prefix.copy_from_slice(&bytes[..PREFIX_BYTES]);
+/// Returns the compact prefix used by the signature index.
+fn signature_prefix(signature: &Signature) -> SignaturePrefix {
+    let mut prefix = [0; SIGNATURE_PREFIX_BYTES];
+    prefix.copy_from_slice(&signature.as_array()[..SIGNATURE_PREFIX_BYTES]);
     prefix
 }
 

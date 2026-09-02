@@ -24,6 +24,7 @@ mod appender;
 mod codec;
 mod error;
 mod index;
+mod indexer;
 mod metrics;
 mod reader;
 pub mod request;
@@ -37,6 +38,7 @@ use crate::{
     appender::{BLOCKSTORE_DB, EXECUTIONS_DB, LedgerAppender, SUPERBLOCK_META},
     error::Result,
     index::Index,
+    indexer::{IndexerHandle, LedgerIndexer},
     reader::LedgerReader,
     request::ReaderSender,
     schema::Event,
@@ -45,6 +47,7 @@ use crate::{
 
 const LEDGER_META: &str = "ledger.meta";
 const APPENDER_QUEUE_CAPACITY: usize = 2_048;
+const INDEXER_QUEUE_CAPACITY: usize = 2_048;
 const READER_QUEUE_CAPACITY: usize = 128;
 /// Current on-disk superblock format version.
 const VERSION: LedgerVersion = 1;
@@ -69,7 +72,7 @@ pub struct Ledger {
 }
 
 impl Ledger {
-    /// Opens ledger files and the global index, then starts the appender and reader pool.
+    /// Opens ledger files and indexes, then starts appender, indexer, and reader services.
     pub fn init(
         directory: impl AsRef<Path>,
         size_limit: u64,
@@ -80,11 +83,22 @@ impl Ledger {
         metrics::init(&ledger);
         let (appender_tx, rx) = flume::bounded(APPENDER_QUEUE_CAPACITY);
         let (position, _) = broadcast::channel(256);
+        let (index_tx, index_rx) = flume::bounded(INDEXER_QUEUE_CAPACITY);
+        let mut index_sh = shutdown.handle(Service::LedgerIndexer);
+        let indexer = LedgerIndexer::new(ledger.clone(), index_rx)?;
+        thread::Builder::new().name("ledger-indexer".into()).spawn(move || {
+            let reason = match indexer.run() {
+                Ok(()) => ShutdownReason::Signalled,
+                Err(error) => ShutdownReason::Error(Box::new(error)),
+            };
+            index_sh.terminate(reason);
+        })?;
+        let indexer = IndexerHandle::new(index_tx);
         let mut sh = shutdown.handle(Service::LedgerAppender);
-        let appender_ledger = ledger.clone();
-        let appender_position = position.clone();
+        let aledger = ledger.clone();
+        let aposition = position.clone();
         thread::Builder::new().name("ledger-appender".into()).spawn(move || {
-            let reason = match LedgerAppender::run(appender_ledger, rx, appender_position) {
+            let reason = match LedgerAppender::run(aledger, rx, aposition, indexer) {
                 Ok(()) => ShutdownReason::Signalled,
                 Err(error) => ShutdownReason::Error(Box::new(error)),
             };
@@ -167,7 +181,6 @@ impl Ledger {
             let id = meta.id;
             superblocks.insert(id, Superblock::open(meta, &index)?);
         }
-
         info!(?directory, superblocks = superblocks.len(), "opened ledger");
         Ok(Self {
             meta,
