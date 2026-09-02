@@ -113,7 +113,7 @@ impl TransactionExecutor {
     ) -> Result<ExecutorHandle> {
         let svm = SvmContext::new(&state, cache)?;
         let shutdown = shutdown.handle(Service::TransactionExecutor(id));
-        let (tx, rx) = mpsc::sync_channel(3);
+        let (tx, rx) = mpsc::sync_channel(2);
         let executor = Self {
             id,
             rx,

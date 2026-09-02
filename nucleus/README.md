@@ -22,9 +22,9 @@ zero when the system clock predates the epoch. Its default feature set is empty.
 - `metrics`: Prometheus metric construction, `engine_`-namespaced registration,
   labels, and timers.
 - `service`: the `metrics` and `shutdown` feature bundle.
-- `runtime`: transaction views, execution messages, sequencer handles, and
-  quiescence barriers, including atomic block-checkpoint pauses; it also enables
-  `ledger`, `service`, and `tls`.
+- `runtime`: transaction views, resolved-transaction execution messages,
+  sequencer handles, and quiescence barriers, including atomic block-checkpoint
+  pauses; it also enables `ledger`, `service`, and `tls`.
 - `tls`: thread-local MagicRoot authority and encoded service-message state.
 - `testkit`: engine-independent fixtures, temporary directories, Legacy/V0/V1
   transaction encoding, v42 instructions, transaction views, and tracing setup

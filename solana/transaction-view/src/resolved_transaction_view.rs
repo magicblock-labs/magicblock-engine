@@ -26,12 +26,10 @@ use {
 pub struct ResolvedTransactionView<D: TransactionData> {
     /// The parsed and sanitized transaction view.
     view: TransactionView<true, D>,
-    /// The resolved address lookups.
-    resolved_addresses: Option<LoadedAddresses>,
-    /// A cache for whether an address is writable.
+    /// One writable-account bit per possible account index.
     // Sanitized transactions are guaranteed to have a maximum of 256 keys,
     // because account indexing is done with a u8.
-    writable_cache: [bool; 256],
+    writable_cache: [u64; 4],
 }
 
 impl<D: TransactionData> Deref for ResolvedTransactionView<D> {
@@ -70,11 +68,7 @@ impl<D: TransactionData> ResolvedTransactionView<D> {
 
         let writable_cache =
             Self::cache_is_writable(&view, resolved_addresses_ref, reserved_account_keys);
-        Ok(Self {
-            view,
-            resolved_addresses,
-            writable_cache,
-        })
+        Ok(Self { view, writable_cache })
     }
 
     /// Helper function to check if an address is writable,
@@ -85,12 +79,12 @@ impl<D: TransactionData> ResolvedTransactionView<D> {
         view: &TransactionView<true, D>,
         resolved_addresses: Option<&LoadedAddresses>,
         reserved_account_keys: &HashSet<Pubkey>,
-    ) -> [bool; 256] {
+    ) -> [u64; 4] {
         // Build account keys so that we can iterate over and check if
         // an address is writable.
         let account_keys = AccountKeys::new(view.static_account_keys(), resolved_addresses);
 
-        let mut is_writable_cache = [false; 256];
+        let mut is_writable_cache = [0; 4];
         let num_static_account_keys = usize::from(view.num_static_account_keys());
         let num_writable_lookup_accounts = usize::from(view.total_writable_lookup_accounts());
         let num_signed_accounts = usize::from(view.num_required_signatures());
@@ -114,7 +108,9 @@ impl<D: TransactionData> ResolvedTransactionView<D> {
             };
 
             // If the key is reserved it cannot be writable.
-            is_writable_cache[index] = is_requested_write && !reserved_account_keys.contains(key);
+            if is_requested_write && !reserved_account_keys.contains(key) {
+                is_writable_cache[index / 64] |= 1 << (index % 64);
+            }
         }
 
         // If a program account is locked, it cannot be writable unless the
@@ -124,7 +120,9 @@ impl<D: TransactionData> ResolvedTransactionView<D> {
         let mut is_upgradable_loader_present = None;
         for ix in view.instructions_iter() {
             let program_id_index = usize::from(ix.program_id_index);
-            if is_writable_cache[program_id_index]
+            let word = program_id_index / 64;
+            let bit = 1 << (program_id_index % 64);
+            if is_writable_cache[word] & bit != 0
                 && !*is_upgradable_loader_present.get_or_insert_with(|| {
                     for key in account_keys.iter() {
                         if key == &bpf_loader_upgradeable::ID {
@@ -134,15 +132,16 @@ impl<D: TransactionData> ResolvedTransactionView<D> {
                     false
                 })
             {
-                is_writable_cache[program_id_index] = false;
+                is_writable_cache[word] &= !bit;
             }
         }
 
         is_writable_cache
     }
 
+    /// Returns no loaded addresses because sanitization rejects lookup tables.
     pub fn loaded_addresses(&self) -> Option<&LoadedAddresses> {
-        self.resolved_addresses.as_ref()
+        None
     }
 
     pub fn into_view(self) -> TransactionView<true, D> {
@@ -207,14 +206,13 @@ impl<D: TransactionData> SVMStaticMessage for ResolvedTransactionView<D> {
 
 impl<D: TransactionData> SVMMessage for ResolvedTransactionView<D> {
     fn account_keys(&self) -> AccountKeys<'_> {
-        AccountKeys::new(
-            self.view.static_account_keys(),
-            self.resolved_addresses.as_ref(),
-        )
+        AccountKeys::new(self.view.static_account_keys(), None)
     }
 
     fn is_writable(&self, index: usize) -> bool {
-        self.writable_cache.get(index).copied().unwrap_or(false)
+        self.writable_cache
+            .get(index / 64)
+            .is_some_and(|word| word & (1 << (index % 64)) != 0)
     }
 
     fn is_signer(&self, index: usize) -> bool {

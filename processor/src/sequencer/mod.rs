@@ -4,7 +4,7 @@
 use std::{sync::Arc, thread};
 
 use blake3::Hasher;
-use keeper::{Keeper, ResolvedTransaction, TransactionView};
+use keeper::{Keeper, ResolvedTransaction};
 use nucleus::{
     Slot,
     ledger::Block,
@@ -14,7 +14,7 @@ use nucleus::{
 use solana_hash::Hash;
 use solana_program_runtime::loaded_programs::ProgramCache;
 use solana_signature::Signature;
-use tokio::{runtime::Builder, sync::mpsc};
+use tokio::{runtime::Builder, sync::mpsc, task};
 use tracing::{debug, error, info};
 
 use crate::{
@@ -122,7 +122,7 @@ impl Sequencer {
         let runtime = Builder::new_current_thread().build()?;
         thread::Builder::new()
             .name("transaction-sequencer".into())
-            .spawn(move || runtime.block_on(self.run()))?;
+            .spawn(move || runtime.block_on(task::unconstrained(self.run())))?;
         Ok(())
     }
 
@@ -132,14 +132,14 @@ impl Sequencer {
         let mut reason = loop {
             let result = tokio::select! {
                 biased;
+                Some(msg) = self.rx.recv(), if self.accepting() => {
+                    self.handle_message(msg).await
+                }
                 Some(event) = self.executors.events.recv() => {
                     self.handle_event(event)
                 }
                 _ = self.shutdown.signalled() => {
                     break ShutdownReason::Signalled;
-                }
-                Some(msg) = self.rx.recv(), if self.accepting() => {
-                    self.handle_message(msg).await
                 }
             };
             if let Err(error) = result {
@@ -175,11 +175,7 @@ impl Sequencer {
     }
 
     /// Registers a transaction in input order and dispatches all ready work.
-    async fn schedule(&mut self, txn: TransactionView) -> Result<()> {
-        let Ok(txn) = ResolvedTransaction::try_new(txn, None, &Default::default()) else {
-            metrics::failed_transaction(FailureKind::SequencerDrop);
-            return Ok(());
-        };
+    async fn schedule(&mut self, txn: ResolvedTransaction) -> Result<()> {
         if !self.replay {
             if !self.state.transactions().append(&txn).await? {
                 metrics::failed_transaction(FailureKind::SequencerDrop);

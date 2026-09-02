@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 use crate::{SequencerMessage, SimulatorMessage, sequencer::Sequencer};
 use derive_more::Deref;
 use keeper::{
-    TransactionStatus, TransactionView,
+    ResolvedTransaction, TransactionStatus, TransactionView,
     testkit::{TestKeeper, V42_ID, load_v42_data, load_v42_lamports, signed_view, store_v42},
 };
 use nucleus::{
@@ -76,6 +76,7 @@ impl Harness {
 
     /// Queues a transaction on the execution path without waiting for commit.
     async fn execute(&self, tx: TransactionView) {
+        let tx = ResolvedTransaction::try_new(tx, None, &Default::default()).unwrap();
         self.handle.execution.send(SequencerMessage::Transaction(tx)).await.unwrap();
     }
 
