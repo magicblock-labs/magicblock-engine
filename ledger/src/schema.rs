@@ -26,6 +26,19 @@ pub(crate) type Offset = u64;
 /// Owned blockstore entry used when replaying persisted ledger data.
 pub type OwnedBlockstoreEntry = BlockstoreEntry<Vec<u8>>;
 
+/// Bytes retained from a signature for compact indexing and deduplication.
+pub const SIGNATURE_PREFIX_LEN: usize = 16;
+/// Compact transaction identity shared by the ledger index and keeper cache.
+/// Colliding prefixes intentionally identify the same transaction while retained.
+pub type SignaturePrefix = [u8; SIGNATURE_PREFIX_LEN];
+
+/// Returns the compact identity for a transaction signature.
+pub fn signature_prefix(signature: &Signature) -> SignaturePrefix {
+    let mut prefix = [0; SIGNATURE_PREFIX_LEN];
+    prefix.copy_from_slice(&signature.as_array()[..SIGNATURE_PREFIX_LEN]);
+    prefix
+}
+
 /// Largest encoded ledger entry representable by an index span.
 pub const MAX_ENTRY_SIZE: usize = Span::MAX_SIZE as usize;
 

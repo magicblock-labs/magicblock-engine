@@ -73,12 +73,6 @@ fn transaction_and_block_roundtrip() {
     assert_eq!(got.execution, txspan.execution);
     assert_eq!(reader.block(slot_a).unwrap(), Some(block_a));
     assert_eq!(reader.block(slot_b).unwrap(), Some(block_b));
-    assert_eq!(
-        reader.blocks(slot_a..=slot_b).map(|entry| entry.unwrap().0).collect::<Vec<_>>(),
-        vec![slot_b, slot_a],
-        "big-endian slot keys scan newest first"
-    );
-
     // Absent keys resolve to nothing rather than a stale or default hit.
     assert!(reader.transaction(&Signature::from([9; 64])).unwrap().is_none());
     assert_eq!(reader.block(99).unwrap(), None);

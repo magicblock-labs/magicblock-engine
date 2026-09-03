@@ -6,7 +6,7 @@ use accountsdb::{AccountEntry, AccountsDB, AccountsDBError};
 use ledger::{
     LedgerRequestError,
     request::*,
-    schema::{Event, SuperblockSeal, TransactionEntry},
+    schema::{Event, SuperblockSeal, TransactionEntry, signature_prefix},
 };
 use nucleus::{
     Slot,
@@ -31,7 +31,6 @@ use tokio::sync::mpsc::Receiver;
 
 use crate::{
     AccountLease, ExecutionRecord, FullTransaction, Keeper, ResolvedTransaction,
-    cache::prefix,
     error::Result,
     subscriptions::TransactionLogs,
     util::{execution_commit, request, transaction_status},
@@ -123,7 +122,7 @@ impl<'a> TransactionsAccessor<'a> {
 
     /// Loads the retained execution status for `signature`.
     pub async fn status(&self, signature: Signature) -> Result<Option<TransactionStatus>> {
-        if let Some(status) = self.keeper.caches.signatures.get(&prefix(&signature)) {
+        if let Some(status) = self.keeper.caches.signatures.get(&signature_prefix(&signature)) {
             return Ok(status);
         }
         Ok(request(self.keeper, signature, ReadRequest::TransactionStatus).await??)
@@ -168,7 +167,7 @@ impl<'a> TransactionsAccessor<'a> {
         let caches = &self.keeper.caches;
         let slot = caches.blocks.latest.load().slot + 1;
         let signature = transaction.signatures()[0];
-        let key = prefix(&signature);
+        let key = signature_prefix(&signature);
         let mut result = Ok(());
         if !caches.signatures.push(key, None, slot) {
             result = Err(TransactionError::AlreadyProcessed);
@@ -227,7 +226,7 @@ impl<'a> TransactionsAccessor<'a> {
         // Clear TLS unconditionally so unsent messages cannot leak into the next transaction.
         TlsManager::clear();
         subs.signatures.send(&commit.signature, &commit.status);
-        let key = &prefix(&commit.signature);
+        let key = &signature_prefix(&commit.signature);
         self.keeper.caches.signatures.update(key, Some(commit.status));
         Ok(())
     }
@@ -243,7 +242,7 @@ impl<'a> TransactionsAccessor<'a> {
         self.commit_state_transitions(&execution.result)?;
         let signature = transaction.signatures()[0];
         let status = transaction_status(&execution.result, execution.slot);
-        let key = prefix(&signature);
+        let key = signature_prefix(&signature);
         self.keeper.caches.signatures.push(key, Some(status), execution.slot);
         Ok(())
     }

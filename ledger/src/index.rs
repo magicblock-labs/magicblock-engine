@@ -1,6 +1,6 @@
 //! Fjall index schema and codecs for ledger blockstore entries.
 
-use std::{iter::Rev, ops::RangeInclusive, path::Path};
+use std::{iter::Rev, path::Path};
 
 use fjall::{
     CompressionType, Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode,
@@ -14,7 +14,7 @@ use solana_signature::Signature;
 use crate::{
     Superblock,
     error::{LedgerError, Result},
-    schema::Offset,
+    schema::{Offset, SIGNATURE_PREFIX_LEN, signature_prefix},
     storage::Durability,
 };
 
@@ -26,8 +26,6 @@ const TRANSACTION: u8 = b't';
 const BLOCK: u8 = b'b';
 /// Account-to-offset key namespace.
 const ACCOUNT: u8 = b'a';
-/// Bytes kept from signatures in compact transaction keys.
-const SIGNATURE_PREFIX_BYTES: usize = 16;
 /// Bytes kept from public keys in compact account keys.
 const ACCOUNT_BYTES: usize = 8;
 /// Bytes occupied by one encoded span.
@@ -35,7 +33,7 @@ const SPAN_BYTES: usize = size_of::<u64>();
 /// Bytes occupied by a transaction's two spans.
 const TX_SPAN_BYTES: usize = 2 * SPAN_BYTES;
 /// Bytes occupied by a namespaced truncated signature.
-const TX_KEY_BYTES: usize = 1 + SIGNATURE_PREFIX_BYTES;
+const TX_KEY_BYTES: usize = 1 + SIGNATURE_PREFIX_LEN;
 /// Bytes occupied by a namespaced slot.
 const BLOCK_KEY_BYTES: usize = 1 + size_of::<Slot>();
 /// Bytes occupied by a namespaced account prefix.
@@ -50,9 +48,6 @@ const CACHE_SIZE: u64 = 64 * MB as u64;
 const JOURNAL_SIZE: u64 = 256 * MB as u64;
 /// Fjall maintenance workers assigned to the ledger index.
 const WORKERS: usize = 2;
-
-/// Truncated signature used as a compact transaction identity.
-type SignaturePrefix = [u8; SIGNATURE_PREFIX_BYTES];
 
 /// Packed span inside a ledger data file.
 ///
@@ -122,24 +117,6 @@ pub(crate) struct TxSpan {
 /// Reverse account-index iterator over execution spans.
 pub(crate) struct AccountIter {
     inner: Rev<fjall::Iter>,
-}
-
-/// Reverse block-index iterator over `(slot, span)` pairs.
-pub(crate) struct BlockIter {
-    inner: Rev<fjall::Iter>,
-}
-
-impl Iterator for BlockIter {
-    type Item = Result<(Slot, Span)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(|entry| {
-            let (key, value) = entry.into_inner()?;
-            let key = key.get(1..).ok_or(LedgerError::Corruption("invalid slot key"))?;
-            let key = fixed(key, "invalid slot key")?;
-            Ok((u64::from_be_bytes(key), Span::from_value(&value)?))
-        })
-    }
 }
 
 impl Iterator for AccountIter {
@@ -235,15 +212,6 @@ impl<'a> IndexReader<'a> {
         self.0.get(block_key(slot))?.map(|value| Span::from_value(&value)).transpose()
     }
 
-    /// Scans a bounded slot range newest first.
-    pub(crate) fn blocks(&self, slots: RangeInclusive<Slot>) -> BlockIter {
-        let start = block_key(*slots.start());
-        let end = block_key(*slots.end());
-        BlockIter {
-            inner: self.0.range(start..=end).rev(),
-        }
-    }
-
     /// Returns execution spans that mention `pubkey`, newest first.
     pub(crate) fn accounts(&self, pubkey: &Pubkey, before: Option<Span>) -> AccountIter {
         let prefix = account_prefix(pubkey);
@@ -329,13 +297,6 @@ fn account_key(prefix: &AccountPrefix, span: Span) -> [u8; ACCOUNT_KEY_BYTES] {
     key[..ACCOUNT_PREFIX_BYTES].copy_from_slice(prefix);
     key[ACCOUNT_PREFIX_BYTES..].copy_from_slice(&span.key_bytes());
     key
-}
-
-/// Returns the compact prefix used by the signature index.
-fn signature_prefix(signature: &Signature) -> SignaturePrefix {
-    let mut prefix = [0; SIGNATURE_PREFIX_BYTES];
-    prefix.copy_from_slice(&signature.as_array()[..SIGNATURE_PREFIX_BYTES]);
-    prefix
 }
 
 /// Converts persisted bytes to a fixed-width array or reports corruption.

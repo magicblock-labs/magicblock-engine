@@ -20,7 +20,7 @@ use tokio::{sync::mpsc, time};
 use crate::{
     Result,
     error::RequestResult,
-    schema::{Block, Execution, ExecutionHeader, OwnedBlockstoreEntry},
+    schema::{Block, Execution, ExecutionHeader, OwnedBlockstoreEntry, SignaturePrefix},
 };
 
 /// Result returned by a full transaction lookup.
@@ -41,8 +41,8 @@ pub(crate) type AccountSignaturesPayload =
     RequestPayload<AccountSignaturesParams, AccountSignaturesReadResult>;
 /// Payload for a single-block lookup request.
 pub(crate) type BlockPayload = RequestPayload<BlockParams, BlockReadResult>;
-/// Payload for a contiguous block-range request.
-pub type BlockRangePayload = RequestPayload<Range<Slot>, Result<BlockHistory>>;
+/// Payload for streaming compact transaction history over a contiguous block range.
+pub type BlockRangePayload = RequestPayload<BlockRangeParams, Result<()>>;
 /// Payload for replaying owned blockstore entries after a sealed superblock.
 pub(crate) type ReplayPayload = RequestPayload<ReplayParams, Result<()>>;
 
@@ -95,24 +95,21 @@ impl From<ExecutionHeader> for TransactionStatus {
     }
 }
 
-/// Indexed transaction signature and terminal execution status.
-pub struct SignatureStatus {
-    /// Transaction signature.
-    pub signature: Signature,
-    /// Terminal execution status persisted for the transaction.
-    pub status: TransactionStatus,
-}
-
-/// Block boundary and indexed transaction statuses in block order.
-pub struct BlockWithSignatureStatuses {
+/// Block boundary and compact transaction identities in blockstore order.
+pub struct BlockHistoryEntry {
     /// Block boundary.
     pub block: Block,
-    /// Indexed transaction signatures and statuses.
-    pub signatures: Vec<SignatureStatus>,
+    /// First 16 signature bytes used by the processed-transaction cache.
+    pub signatures: Vec<SignaturePrefix>,
 }
 
-/// Blocks ordered newest-to-oldest, with transactions kept in block order.
-pub type BlockHistory = Vec<BlockWithSignatureStatuses>;
+/// Parameters for streaming a contiguous block range.
+pub struct BlockRangeParams {
+    /// Half-open slot range to stream.
+    pub range: Range<Slot>,
+    /// Channel receiving completed blocks in ascending slot order.
+    pub tx: mpsc::Sender<BlockHistoryEntry>,
+}
 
 /// Account-signature query parameters.
 pub struct AccountSignaturesParams {
@@ -146,7 +143,7 @@ pub enum ReadRequest {
     AccountSignatures(AccountSignaturesPayload),
     /// Block lookup by slot and detail level.
     Block(BlockPayload),
-    /// Contiguous block boundary lookup.
+    /// Raw blockstore scan over a contiguous block range.
     BlockRange(BlockRangePayload),
     /// Replay retained blockstore entries after an applied superblock seal.
     Replay(ReplayPayload),

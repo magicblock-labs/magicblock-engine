@@ -128,7 +128,7 @@ impl Ledger {
     }
 
     /// Iterates retained superblocks from newest to oldest.
-    pub fn iter(&self) -> impl Iterator<Item = Arc<Superblock>> + '_ {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = Arc<Superblock>> + '_ {
         let range = self.meta.superblocks();
         range.rev().filter_map(|id| self.superblocks.read().get(&id).cloned())
     }

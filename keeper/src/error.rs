@@ -5,6 +5,7 @@ use derive_more::From;
 use flume::SendError;
 use ledger::{LedgerError, LedgerRequestError, request::ReadRequest, schema::Event};
 use nucleus::shutdown::Service;
+use solana_pubkey::Pubkey;
 
 /// Errors produced while initializing, finalizing, or serving keeper state.
 #[derive(Debug, thiserror::Error, From)]
@@ -30,6 +31,9 @@ pub enum KeeperError {
     /// A process-lifetime unicast stream was already registered.
     #[error("subscription already registered: {0}")]
     SubscriptionRegistered(&'static str),
+    /// A sysvar required by persisted non-genesis state is missing.
+    #[error("missing required sysvar: {0}")]
+    MissingSysvar(Pubkey),
 }
 
 impl From<SendError<Event>> for KeeperError {
