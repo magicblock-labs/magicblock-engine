@@ -10,12 +10,12 @@ use accountsdb::{AccountEntry, AccountsDB, AccountsDBError, BackupOp, SnapshotEr
 use agave_feature_set::FeatureSet;
 use ledger::{
     Ledger, LedgerHandle,
-    request::{ReadRequest, RequestPayload},
+    request::{BlockRangeParams, ReadRequest, RequestPayload},
 };
 use nucleus::{
     Slot,
     config::{AccountsDBParams, Authority, BlockstoreParams, LedgerParams},
-    ledger::ACCOUNTSDB_SNAPSHOT_FILE,
+    ledger::{ACCOUNTSDB_SNAPSHOT_FILE, Block},
     shutdown::ShutdownManager,
 };
 use serde::Serialize;
@@ -34,12 +34,13 @@ use solana_sysvar::{
     rent::Rent,
     slot_hashes::{SlotHashes, SysvarId},
 };
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use crate::{
-    Keeper,
-    cache::{CacheSeed, Caches},
-    error::Result,
+    Keeper, LEDGER_STREAM_CAPACITY,
+    cache::Caches,
+    error::{KeeperError, Result},
     metrics,
     subscriptions::Subscriptions,
 };
@@ -79,8 +80,7 @@ impl KeeperBuilder {
     pub async fn build(mut self, shutdown: &mut ShutdownManager) -> Result<Keeper> {
         let ledger = Ledger::init(&self.ledger.directory, self.ledger.size_limit, shutdown)?;
         let accountsdb = self.accountsdb(&ledger)?;
-        let (seed, featureset) = self.prepopulate(&accountsdb, &ledger).await?;
-        let caches = self.caches(seed);
+        let (caches, featureset) = self.prepopulate(&accountsdb, &ledger).await?;
         metrics::init();
         Ok(Keeper {
             authority: self.authority,
@@ -98,11 +98,11 @@ impl KeeperBuilder {
         &mut self,
         accountsdb: &AccountsDB,
         ledger: &LedgerHandle,
-    ) -> Result<(CacheSeed, FeatureSet)> {
+    ) -> Result<(Caches, FeatureSet)> {
         let mut accounts = Vec::new();
         let featureset = self.seed_featureset(&mut accounts)?;
         self.seed_programs(&mut accounts)?;
-        let seed = self.seed_sysvars(accountsdb, ledger, &mut accounts).await?;
+        let caches = self.seed_sysvars(accountsdb, ledger, &mut accounts).await?;
         let authority = self.authority.pubkey();
         if accountsdb.loader().load(&authority)?.is_none() {
             let sponsor = AccountBuilder::default()
@@ -112,13 +112,13 @@ impl KeeperBuilder {
         }
         accounts.extend(self.accounts.drain());
         accountsdb.store(&accounts)?;
-        Ok((seed, featureset))
+        Ok((caches, featureset))
     }
 
     /// Builds read-side caches using blocktime-derived slot TTLs.
-    fn caches(&self, seed: CacheSeed) -> Caches {
+    fn caches(&self, latest: Block) -> Caches {
         Caches::new(
-            seed,
+            latest,
             self.ttl(BLOCK_CACHE_WINDOW),
             self.ttl(SIGNATURE_CACHE_WINDOW),
             self.accountsdb.lru_capacity,
@@ -177,46 +177,45 @@ impl KeeperBuilder {
         Ok(())
     }
 
-    /// Seeds sysvars derived from retained ledger state and keeper config.
-    ///
-    /// Returns the latest available block and its anchored retained history.
+    /// Seeds block-derived sysvars and builds the caches needed for this node's role.
     async fn seed_sysvars(
         &self,
         accountsdb: &AccountsDB,
         ledger: &LedgerHandle,
         accounts: &mut Vec<AccountEntry>,
-    ) -> Result<CacheSeed> {
+    ) -> Result<Caches> {
         let slot = accountsdb.slot();
         let loader = accountsdb.loader();
-        let slothashes = loader
-            .load(&SlotHashes::id())?
-            .map(|account| account.deserialize_data::<SlotHashes>().map_err(AccountsDBError::from))
-            .transpose()?;
-
-        let retained = self
-            .ttl(BLOCK_CACHE_WINDOW)
-            .max(self.ttl(SIGNATURE_CACHE_WINDOW))
-            .max(SLOTHASH_ENTRIES as Slot);
-        let start = slot.saturating_sub(retained - 1);
-        let (payload, handle) = RequestPayload::new(start..slot.saturating_add(1));
-        ledger.reader.send(ReadRequest::BlockRange(payload))?;
-        let history = handle.recv_timeout().await??;
-
-        if slothashes.is_none() {
-            // Keep the sysvar account at its fixed serialized capacity so live
-            // updates can replace entries without resizing the account.
-            let mut hashes = SlotHashes::new(&[Default::default(); SLOTHASH_ENTRIES]);
-            for block in history.iter().take(SLOTHASH_ENTRIES) {
-                hashes.add(block.block.slot, block.block.hash);
+        let id = SlotHashes::id();
+        // AccountsDB starts at slot 1 and the ledger starts at head 1. Only that
+        // pair is genesis; every later state must carry durable SlotHashes.
+        let genesis = slot == 1 && ledger.head() == 1;
+        let slothashes = match loader.load(&id)? {
+            Some(account) => {
+                account.deserialize_data::<SlotHashes>().map_err(AccountsDBError::from)?
             }
-            let acc = self.account(&hashes, &sysvar::ID)?;
-            accounts.push((SlotHashes::id(), acc.build()));
-        }
+            None if genesis => {
+                // Keep the sysvar account at its fixed serialized capacity so live
+                // updates can replace entries without resizing the account.
+                let hashes = SlotHashes::new(&[Default::default(); SLOTHASH_ENTRIES]);
+                let account = self.account(&hashes, &sysvar::ID)?;
+                accounts.push((id, account.build()));
+                hashes
+            }
+            None => return Err(KeeperError::MissingSysvar(id)),
+        };
 
-        let seed = CacheSeed::new(history, slothashes.as_ref());
+        // A remote authority makes this engine a replication client. Followers
+        // need retained dedup history; leaders deliberately retain only the tip
+        // so they can restart without scanning the ledger.
+        let caches = if self.authority.remote.is_some() {
+            self.follower_caches(ledger, slot, &slothashes).await?
+        } else {
+            self.leader_caches(&slothashes)
+        };
 
         // Set the clock slot one ahead from the last
-        let latest = seed.latest();
+        let latest = caches.latest();
         let clock = Clock {
             slot: latest.slot + 1,
             unix_timestamp: latest.time,
@@ -245,7 +244,52 @@ impl KeeperBuilder {
             EpochRewards::id(),
             self.account(&EpochRewards::default(), &sysvar::ID)?.build(),
         ));
-        Ok(seed)
+        Ok(caches)
+    }
+
+    /// Streams retained history into follower caches without materializing the range.
+    async fn follower_caches(
+        &self,
+        ledger: &LedgerHandle,
+        slot: Slot,
+        slothashes: &SlotHashes,
+    ) -> Result<Caches> {
+        let retained = self
+            .ttl(BLOCK_CACHE_WINDOW)
+            .max(self.ttl(SIGNATURE_CACHE_WINDOW))
+            .max(SLOTHASH_ENTRIES as Slot);
+        let (tx, mut rx) = mpsc::channel(LEDGER_STREAM_CAPACITY);
+        let params = BlockRangeParams {
+            range: slot.saturating_sub(retained - 1)..slot.saturating_add(1),
+            tx,
+        };
+        let (payload, response) = RequestPayload::new(params);
+        ledger.reader.send(ReadRequest::BlockRange(payload))?;
+
+        let caches = self.caches(persisted_latest(slothashes));
+        // Merge the two ascending streams so ExpiringCache's eviction queue
+        // stays ordered, preferring blockstore data for overlapping slots.
+        let mut persisted = slothashes.slot_hashes().iter().rev().copied().peekable();
+        while let Some(entry) = rx.recv().await {
+            while let Some((slot, hash)) = persisted.next_if(|(slot, _)| *slot < entry.block.slot) {
+                caches.restore_hash(slot, hash);
+            }
+            let _ = persisted.next_if(|(slot, _)| *slot == entry.block.slot);
+            caches.restore(entry);
+        }
+        response.recv().await??;
+        for (slot, hash) in persisted {
+            caches.restore_hash(slot, hash);
+        }
+        Ok(caches)
+    }
+
+    /// Restores only AccountsDB's latest boundary so replay can advance it from there.
+    fn leader_caches(&self, slothashes: &SlotHashes) -> Caches {
+        let latest = persisted_latest(slothashes);
+        let caches = self.caches(latest);
+        caches.restore_hash(latest.slot, latest.hash);
+        caches
     }
 
     /// Builds a rent-exempt system account containing a serialized sysvar-like state.
@@ -319,4 +363,14 @@ impl KeeperBuilder {
         }
         Err(SnapshotError::Missing.into())
     }
+}
+
+fn persisted_latest(slothashes: &SlotHashes) -> Block {
+    let hashes = slothashes.slot_hashes();
+    hashes.first().map_or(Block::default(), |&(slot, hash)| Block {
+        slot,
+        hash,
+        time: 0,
+        parent: hashes.get(1).map(|(_, hash)| *hash).unwrap_or_default(),
+    })
 }

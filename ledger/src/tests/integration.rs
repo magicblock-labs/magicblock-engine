@@ -37,12 +37,13 @@ use crate::{
     indexer::{IndexerHandle, LedgerIndexer},
     reader::LedgerReader,
     request::{
-        AccountSignature, AccountSignaturesParams, BlockDetails, BlockParams, BlockResponse,
-        ReadRequest, ReplayParams, RequestPayload, TransactionResponse,
+        AccountSignature, AccountSignaturesParams, BlockDetails, BlockHistoryEntry, BlockParams,
+        BlockRangeParams, BlockResponse, ReadRequest, ReplayParams, RequestPayload,
+        TransactionResponse,
     },
     schema::{
         AccountIndex, Balances, Event, Execution, ExecutionDetails, ExecutionHeader,
-        OwnedBlockstoreEntry, TransactionEntry,
+        OwnedBlockstoreEntry, TransactionEntry, signature_prefix,
     },
 };
 
@@ -229,6 +230,29 @@ async fn replay(ledger: &Arc<Ledger>, superblock: u64) -> Vec<OwnedBlockstoreEnt
     handle.recv().await.unwrap().unwrap();
     worker.join().unwrap();
     entries
+}
+
+/// Collects the bounded production block stream for assertions.
+async fn block_range(ledger: &Arc<Ledger>, range: std::ops::Range<Slot>) -> Vec<BlockHistoryEntry> {
+    let (tx, mut rx) = mpsc::channel(4);
+    let (payload, handle) = RequestPayload::new(BlockRangeParams { range, tx });
+    let (reader_tx, reader_rx) = flume::bounded(1);
+    reader_tx.send(ReadRequest::BlockRange(payload)).unwrap();
+    drop(reader_tx);
+    let ledger = ledger.clone();
+    let worker = thread::spawn(move || {
+        let mut shutdown = ShutdownManager::default();
+        LedgerReader::new(ledger, reader_rx)
+            .unwrap()
+            .run(shutdown.handle(Service::LedgerReader));
+    });
+    let mut blocks = Vec::new();
+    while let Some(block) = rx.recv().await {
+        blocks.push(block);
+    }
+    handle.recv().await.unwrap().unwrap();
+    worker.join().unwrap();
+    blocks
 }
 
 /// Appends one block at `slot` whose transactions touch `accounts` — one
@@ -561,11 +585,10 @@ async fn test_reopen_resumes_state() {
     assert_eq!(ledger.meta.blocks.load(Acquire), 2);
 }
 
-/// Proves block-range reads preserve cross-superblock block and indexed status order.
+/// Proves block-range scans preserve cross-superblock block and signature order.
 ///
-/// The reader walks blocks newest-first across segments while each block body
-/// remains in append order. Transactions without terminal execution metadata
-/// are deliberately omitted because they were never published to the index.
+/// The reader walks raw blockstore files without indexes, streaming blocks and
+/// each block body in append order.
 #[tokio::test]
 async fn test_block_range_spans_superblocks() {
     let (_dir, ledger) = ledger(u64::MAX);
@@ -600,34 +623,28 @@ async fn test_block_range_spans_superblocks() {
     );
     let third = block_of(&ledger, 3, 1);
 
-    let blocks = read(&ledger, 1..4, ReadRequest::BlockRange).await.unwrap();
-    // The full range comes back once each, newest-first, across the boundary.
+    let blocks = block_range(&ledger, 1..4).await;
+    // The full range comes back once each in storage order across the boundary.
     assert_eq!(
         blocks.iter().map(|b| b.block.slot).collect::<Vec<_>>(),
-        [3, 2, 1]
+        [1, 2, 3]
     );
-    assert_eq!(blocks[0].signatures[0].signature, third[0]);
-    assert!(blocks[0].signatures[0].status.result.is_ok());
+    assert_eq!(blocks[0].signatures[0], signature_prefix(&first[0]));
     assert_eq!(
-        blocks[1].signatures.len(),
-        2,
-        "unindexed transaction is omitted"
+        blocks[1].signatures,
+        [signature_prefix(&ok), signature_prefix(&failed), signature_prefix(&unindexed)],
+        "raw scan includes transactions independently of execution indexes"
     );
-    assert_eq!(blocks[1].signatures[0].signature, ok);
-    assert!(blocks[1].signatures[0].status.result.is_ok());
-    assert_eq!(blocks[1].signatures[1].signature, failed);
-    assert_eq!(blocks[1].signatures[1].status.result, failure);
-    assert_eq!(blocks[1].signatures[1].status.slot, 2);
-    assert_eq!(blocks[2].signatures[0].signature, first[0]);
+    assert_eq!(blocks[2].signatures[0], signature_prefix(&third[0]));
     // A sub-range inside one segment returns only its blocks.
-    let blocks = read(&ledger, 2..3, ReadRequest::BlockRange).await.unwrap();
+    let blocks = block_range(&ledger, 2..3).await;
     assert_eq!(blocks.iter().map(|b| b.block.slot).collect::<Vec<_>>(), [2]);
     // A tail past the retained tip yields the retained blocks without dropping
     // the boundary slot.
-    let blocks = read(&ledger, 1..9, ReadRequest::BlockRange).await.unwrap();
+    let blocks = block_range(&ledger, 1..9).await;
     assert_eq!(
         blocks.iter().map(|b| b.block.slot).collect::<Vec<_>>(),
-        [3, 2, 1]
+        [1, 2, 3]
     );
 }
 

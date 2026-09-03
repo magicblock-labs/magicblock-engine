@@ -48,6 +48,12 @@ ledger values. After replay actually runs, the final transaction counts must be
 equal or startup returns `ReplayError::StateMismatch`. Replay caches each
 re-executed terminal transaction result without appending it to the ledger.
 
+On a current-state restart, a leader restores only the latest blockhash and
+starts with an empty processed-signature cache. Transactions signed with older
+hashes are therefore rejected before execution. A replica restores the bounded
+blockhash and signature window from raw blockstore data; recovered signatures
+deduplicate replicated input without retaining historical statuses.
+
 Internal pacing appends one reset marker at the current slot and clears
 chain-mirrored volatile accounts before the pacemaker task starts. Internal
 system accounts remain available. Replicas use external pacing and retain

@@ -45,11 +45,12 @@ format. Point lookups read the latest visible value, while range and prefix
 iterators carry their own Fjall snapshot guard; the append-only index does not
 need a request-wide snapshot.
 
-Block-range reads return boundaries newest-first and include each indexed
-transaction's signature and terminal status in block order. Point and range
-reads share block-body decoding and omit transaction records that never acquired
-an execution index. This is a read-side projection only and does not change the
-on-disk blockstore or index format.
+Block-range reads scan published blockstore bytes directly, without consulting
+the index or executions file. They stream boundaries in storage order through a
+bounded channel, with the preceding transactions' 16-byte signature prefixes
+kept in blockstore order. Cancellation is checked between decoded entries. This
+is a read-side projection only and does not change the on-disk blockstore or
+index format.
 
 Each block atomically commits its transaction, block, and account index changes.
 Index visibility is asynchronous: recent transaction and block lookups may be

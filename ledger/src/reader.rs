@@ -2,13 +2,13 @@
 
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     ops::Range,
     os::unix::fs::FileExt,
     sync::{Arc, atomic::Ordering::Acquire},
 };
 
-use agave_transaction_view::transaction_view::SanitizedTransactionView;
+use agave_transaction_view::transaction_view::TransactionView;
 use bitcode::Buffer;
 use flume::Receiver;
 use nucleus::{
@@ -26,15 +26,15 @@ use crate::{
     metrics::{self, Operation},
     request::{
         AccountSignature, AccountSignaturesParams, AccountSignaturesPayload,
-        AccountSignaturesReadResult, BlockDetails, BlockHistory, BlockParams, BlockPayload,
-        BlockReadResult, BlockResponse, BlockWithSignatureStatuses, BlockWithSignatures,
+        AccountSignaturesReadResult, BlockDetails, BlockHistoryEntry, BlockParams, BlockPayload,
+        BlockRangeParams, BlockRangePayload, BlockReadResult, BlockResponse, BlockWithSignatures,
         BlockWithTransactions, FullBlockInfo, ReadRequest, ReplayParams, ReplayPayload,
-        SignatureStatus, TransactionPayload, TransactionReadResult, TransactionResponse,
-        TransactionStatusPayload, TransactionStatusReadResult,
+        TransactionPayload, TransactionReadResult, TransactionResponse, TransactionStatusPayload,
+        TransactionStatusReadResult,
     },
     schema::{
         Block, BlockstoreEntry, Execution, ExecutionHeader, MAX_EXECUTION_DETAILS_SIZE,
-        OwnedBlockstoreEntry, blockstore,
+        OwnedBlockstoreEntry, blockstore, signature_prefix,
     },
 };
 
@@ -97,7 +97,7 @@ impl LedgerReader {
                 }
                 ReadRequest::BlockRange(r) => {
                     let _timer = metrics::time(Operation::ReadBlockRange);
-                    let result = self.blocks(r.params);
+                    let result = self.blocks(&r);
                     let _ = r.response.send(result);
                 }
                 ReadRequest::Replay(r) => {
@@ -232,36 +232,55 @@ impl LedgerReader {
         self.block_response(&superblock, request, span).map(Some)
     }
 
-    /// Reads blocks and indexed transaction statuses in descending slot order.
-    fn blocks(&mut self, range: Range<Slot>) -> Result<BlockHistory> {
-        let mut blocks = Vec::with_capacity(range.clone().count());
-        let Some(last) = range.end.checked_sub(1) else { return Ok(blocks) };
+    /// Scans published blockstore entries without consulting ledger indexes.
+    fn blocks(&mut self, request: &BlockRangePayload) -> Result<()> {
+        let BlockRangeParams { range, tx } = &request.params;
+        if range.is_empty() {
+            return Ok(());
+        }
 
-        for superblock in self.ledger.clone().iter() {
+        for superblock in self.ledger.clone().iter().rev() {
+            if request.cancelled() || tx.is_closed() {
+                return Ok(());
+            }
             let start = superblock.meta.range.start.load(Acquire);
             let end = superblock.meta.range.end.load(Acquire);
-            let start = start.max(range.start);
-            let end = end.min(last);
-            if start > end {
+            if start >= range.end || end < range.start {
                 continue;
             }
-            let index = IndexReader::new(&superblock.index);
-            for entry in index.blocks(start..=end) {
-                let (slot, span) = entry?;
-                let block = self.block_entry(&superblock, slot, span)?;
-                let signatures = self
-                    .indexed_transactions(&superblock, &index, slot, span, None)?
-                    .into_iter()
-                    .map(|transaction| {
-                        let status = self.header(&superblock, transaction.execution)?.into();
-                        let signature = transaction.signature;
-                        Ok(SignatureStatus { signature, status })
-                    })
-                    .collect::<Result<_>>()?;
-                blocks.push(BlockWithSignatureStatuses { block, signatures });
+
+            // Transactions precede their block boundary and do not carry a
+            // slot, so only the current block's prefixes need buffering.
+            let mut signatures = Vec::new();
+            let complete = visit_blockstore(&superblock, |entry| {
+                if request.cancelled() || tx.is_closed() {
+                    return Ok(false);
+                }
+                match entry {
+                    BlockstoreEntry::Transaction(transaction) => {
+                        signatures.push(signature_prefix(&signature(&transaction)?));
+                    }
+                    BlockstoreEntry::Block(block) => {
+                        if block.slot >= range.end {
+                            return Ok(false);
+                        }
+                        if range.contains(&block.slot) {
+                            let signatures = std::mem::take(&mut signatures);
+                            return Ok(tx
+                                .blocking_send(BlockHistoryEntry { block, signatures })
+                                .is_ok());
+                        }
+                        signatures.clear();
+                    }
+                    BlockstoreEntry::Superblock(_) | BlockstoreEntry::Reset(_) => {}
+                }
+                Ok(true)
+            })?;
+            if !complete {
+                return Ok(());
             }
         }
-        Ok(blocks)
+        Ok(())
     }
 
     /// Streams committed blockstore entries after the requested superblock in storage order.
@@ -271,19 +290,14 @@ impl LedgerReader {
     fn replay(&mut self, request: &ReplayPayload) -> Result<()> {
         let ReplayParams { superblock, tx } = &request.params;
         for superblock in self.ledger.iter_after(*superblock) {
-            let limit = superblock.meta.cursors.blockstore.load(Acquire);
-            let mut reader = BufReader::new((&superblock.blockstore).take(limit));
-            loop {
+            let complete = visit_blockstore(&superblock, |entry| {
                 if request.cancelled() || tx.is_closed() {
-                    return Ok(());
+                    return Ok(false);
                 }
-                if reader.fill_buf()?.is_empty() {
-                    break;
-                }
-                let entry = blockstore::decode(&mut reader).map_err(Into::<Error>::into)?;
-                if tx.blocking_send(entry).is_err() {
-                    return Ok(());
-                }
+                Ok(tx.blocking_send(entry).is_ok())
+            })?;
+            if !complete {
+                return Ok(());
             }
         }
         Ok(())
@@ -501,7 +515,7 @@ impl ReadBuffers {
 }
 
 fn signature(transaction: &[u8]) -> Result<Signature> {
-    SanitizedTransactionView::try_new_sanitized(transaction, false)
+    TransactionView::try_new_unsanitized(transaction)
         .map(|transaction| transaction.signatures()[0])
         .map_err(Into::into)
 }
@@ -509,3 +523,23 @@ fn signature(transaction: &[u8]) -> Result<Signature> {
 // SAFETY: `LedgerReader` is moved into one background thread and keeps its
 // decoder and decompressor state on that thread for the reader lifetime.
 unsafe impl Send for LedgerReader {}
+
+/// Visits published entries in one superblock until EOF or the visitor stops.
+fn visit_blockstore(
+    superblock: &Superblock,
+    mut visit: impl FnMut(OwnedBlockstoreEntry) -> Result<bool>,
+) -> Result<bool> {
+    let limit = superblock.meta.cursors.blockstore.load(Acquire);
+    // Replay and startup history scans are serialized; every other reader uses
+    // positional I/O and therefore does not observe this cursor.
+    let mut file = &superblock.blockstore;
+    file.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(file.take(limit));
+    while !reader.fill_buf()?.is_empty() {
+        let entry = blockstore::decode(&mut reader).map_err(Into::<Error>::into)?;
+        if !visit(entry)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}

@@ -2,6 +2,7 @@
 
 use std::fs;
 
+use accountsdb::AccountEntry;
 use nucleus::testkit::{V42_ID, block, signed_view};
 use solana_account::{AccountBuilder, AccountMode, ReadableAccount};
 use solana_instruction::Instruction;
@@ -11,6 +12,7 @@ use solana_sdk_ids::{loader_v4, sysvar};
 use solana_sysvar::{
     clock::Clock, epoch_schedule::EpochSchedule, rent::Rent, slot_hashes::SysvarId,
 };
+use solana_transaction_error::TransactionError;
 
 use super::TestKeeper;
 use crate::ResolvedTransaction;
@@ -128,23 +130,59 @@ async fn recovers_the_newest_snapshot() {
     keeper.close().await;
 }
 
-/// Proves startup merges ledger history beyond SlotHashes and falls back to SlotHashes alone.
+/// Proves leaders retain one blockhash while followers restore history and deduplication.
 #[tokio::test]
 async fn restores_blockhash_history_from_ledger_and_snapshot() {
     let dirs = Dirs::default();
-    let builder = keeper_builder(&dirs);
+    let mut builder = keeper_builder(&dirs);
     let keeper = TestKeeper::from_builder(dirs, builder.clone()).await;
     for slot in 1..=600 {
         keeper.blocks().append(block(slot), false).unwrap();
     }
     let ledger_hash = block(50).hash;
     let snapshot_hash = block(100).hash;
+    let recent_hash = block(600).hash;
+    let payer = Keypair::new();
+    let (signature, view) = signed_view(
+        &payer,
+        [Instruction::new_with_bytes(V42_ID, &[], vec![])],
+        recent_hash,
+    );
+    let transaction =
+        ResolvedTransaction::try_new(view, Some(Default::default()), &Default::default()).unwrap();
+    assert!(keeper.transactions().append(&transaction).await.unwrap());
+    // Match the executor's committed-count update while deliberately omitting
+    // execution metadata, so recovery can only find this signature in blockstore.
+    keeper.accounts().commit(std::iter::empty::<&AccountEntry>()).unwrap();
+    keeper.blocks().append(block(601), false).unwrap();
+    let latest_hash = block(601).hash;
+    keeper.accounts().dump(None).unwrap();
     let dirs = keeper.close().await;
 
     let keeper = TestKeeper::from_builder(dirs, builder.clone()).await;
     assert!(
+        !keeper.blocks().is_valid(&ledger_hash),
+        "leader rejects every retained hash except the latest"
+    );
+    assert!(keeper.blocks().is_valid(&latest_hash));
+    keeper.accounts().dump(None).unwrap();
+    let dirs = keeper.close().await;
+
+    builder.authority.remote = Some(Pubkey::new_unique());
+    let keeper = TestKeeper::from_builder(dirs, builder.clone()).await;
+    assert!(
         keeper.blocks().is_valid(&ledger_hash),
-        "slot 50 remains inside the 600-slot TTL but outside SlotHashes"
+        "follower restores history beyond SlotHashes from the blockstore"
+    );
+    let status = keeper.transactions().subscribe_signature(signature).await;
+    assert!(!keeper.transactions().append(&transaction).await.unwrap());
+    assert_eq!(
+        status.await.unwrap().result,
+        Err(TransactionError::AlreadyProcessed)
+    );
+    assert!(
+        keeper.transactions().status(signature).await.unwrap().is_none(),
+        "recovered follower signature has no historical status"
     );
     keeper.accounts().dump(None).unwrap();
     let dirs = keeper.close().await;
@@ -167,7 +205,7 @@ async fn restores_blockhash_history_from_ledger_and_snapshot() {
         ResolvedTransaction::try_new(view, Some(Default::default()), &Default::default()).unwrap();
     assert!(
         keeper.transactions().append(&transaction).await.unwrap(),
-        "snapshot-retained non-latest hash remains valid without ledger history"
+        "follower accepts a snapshot-retained hash without ledger history"
     );
     keeper.close().await;
 }

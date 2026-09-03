@@ -27,13 +27,14 @@ async fn commit_and_seal(te: &mut TestEngine, key: Pubkey, value: i64) -> PathBu
     te.seal_and_archive().await
 }
 
-/// Verifies a startup-restored terminal status rejects the original bytes.
-async fn assert_restored_signature(
+/// Verifies startup rejects the original bytes without repeating their state change.
+async fn assert_rejected_transaction(
     te: &TestEngine,
     key: Pubkey,
     signature: Signature,
     transaction: Vec<u8>,
     value: i64,
+    duplicate_error: TransactionError,
 ) {
     let status = te
         .transactions()
@@ -52,7 +53,7 @@ async fn assert_restored_signature(
         .execute()
         .await
         .expect("duplicate submission returns a terminal status");
-    assert_eq!(result, Err(TransactionError::AlreadyProcessed));
+    assert_eq!(result, Err(duplicate_error));
     assert_eq!(
         load_v42_data(te, key),
         Some(value),
@@ -101,7 +102,15 @@ async fn replay_rebuilds_state_after_counter_lag() {
         Some(21),
         "both post-snapshot mutations were rebuilt purely from ledger replay"
     );
-    assert_restored_signature(&te2, key, signature, transaction, 21).await;
+    assert_rejected_transaction(
+        &te2,
+        key,
+        signature,
+        transaction,
+        21,
+        TransactionError::AlreadyProcessed,
+    )
+    .await;
     // The temporary replay sequencer must hand off to a working live one.
     te2.execute(&[E::lit(1).compose(key, &[])])
         .await
@@ -176,7 +185,15 @@ async fn clean_restart_reopens_persisted_and_volatile_state() {
         Some(21),
         "persisted tip state reopened as-is"
     );
-    assert_restored_signature(&te2, key, signature, transaction, 21).await;
+    assert_rejected_transaction(
+        &te2,
+        key,
+        signature,
+        transaction,
+        21,
+        TransactionError::BlockhashNotFound,
+    )
+    .await;
     assert_eq!(
         load_v42_data(&te2, direct),
         Some(7),

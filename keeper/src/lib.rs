@@ -44,6 +44,9 @@ pub use nucleus::runtime::{
     ExecutionRecord, FullTransaction, ResolvedTransaction, TransactionView,
 };
 
+/// Backpressure bound shared by startup ledger streams.
+const LEDGER_STREAM_CAPACITY: usize = 16;
+
 mod accessor;
 pub mod builder;
 mod cache;
@@ -129,7 +132,7 @@ impl Keeper {
         if accountsdb_slot >= ledger_slot && accountsdb_txns >= ledger_txns {
             return Ok(None);
         };
-        let (tx, rx) = mpsc::channel(16);
+        let (tx, rx) = mpsc::channel(LEDGER_STREAM_CAPACITY);
         let params = ReplayParams {
             tx,
             superblock: self.accountsdb.superblock(),
