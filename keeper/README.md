@@ -24,9 +24,15 @@ non-zero superblock interval used by pacing and cache TTL calculation. The
 shared accountsdb, blockstore, and ledger parameters are defined by nucleus;
 keeper consumes them when opening its durable stores and caches.
 
-Startup cache recovery depends on authority role. The newest persisted
-`SlotHashes` entry is the authoritative boundary, so an unreplayed ledger tail
-cannot advance startup state. Leaders keep only that hash valid; this rejects
+Startup preserves an existing `SlotHashes` account. If it is missing outside
+genesis, Keeper rebuilds its fixed-capacity image from block-only ledger lookups
+over at most 512 slots ending at the AccountsDB slot. Missing blocks are skipped;
+an empty result retains the genesis-initialized image, while read errors propagate.
+No transaction or execution data is read by this fallback.
+
+Startup cache recovery depends on authority role. The newest `SlotHashes` entry
+is the authoritative boundary, so an unreplayed ledger tail cannot advance
+startup state. Leaders keep only that hash valid; this rejects
 pre-restart transactions that reference older hashes without reconstructing
 signature history. Followers scan the retained blockstore window directly and
 seed each block hash and compact signature prefix as it streams, without index,

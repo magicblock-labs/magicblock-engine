@@ -10,7 +10,7 @@ use accountsdb::{AccountEntry, AccountsDB, AccountsDBError, BackupOp, SnapshotEr
 use agave_feature_set::FeatureSet;
 use ledger::{
     Ledger, LedgerHandle,
-    request::{BlockRangeParams, ReadRequest, RequestPayload},
+    request::{BlockDetails, BlockParams, BlockRangeParams, ReadRequest, RequestPayload},
 };
 use nucleus::{
     Slot,
@@ -38,10 +38,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use crate::{
-    Keeper, LEDGER_STREAM_CAPACITY,
-    cache::Caches,
-    error::{KeeperError, Result},
-    metrics,
+    Keeper, LEDGER_STREAM_CAPACITY, cache::Caches, error::Result, metrics,
     subscriptions::Subscriptions,
 };
 
@@ -187,27 +184,41 @@ impl KeeperBuilder {
         let slot = accountsdb.slot();
         let loader = accountsdb.loader();
         let id = SlotHashes::id();
-        // AccountsDB starts at slot 1 and the ledger starts at head 1. Only that
-        // pair is genesis; every later state must carry durable SlotHashes.
+        // AccountsDB starts at slot 1 and the ledger starts at head 1.
         let genesis = slot == 1 && ledger.head() == 1;
         let slothashes = match loader.load(&id)? {
             Some(account) => {
                 account.deserialize_data::<SlotHashes>().map_err(AccountsDBError::from)?
             }
-            None if genesis => {
+            None => {
                 // Keep the sysvar account at its fixed serialized capacity so live
                 // updates can replace entries without resizing the account.
-                let hashes = SlotHashes::new(&[Default::default(); SLOTHASH_ENTRIES]);
+                let mut hashes = SlotHashes::new(&[Default::default(); SLOTHASH_ENTRIES]);
+                if !genesis {
+                    // Leader shutdown does not dump volatile sysvars. Recover only
+                    // through AccountsDB's boundary, never an unapplied ledger tail.
+                    let start = slot.saturating_sub(SLOTHASH_ENTRIES as Slot - 1).max(1);
+                    for slot in start..=slot {
+                        let params = BlockParams {
+                            slot,
+                            details: BlockDetails::None,
+                        };
+                        let (payload, response) = RequestPayload::new(params);
+                        ledger.reader.send(ReadRequest::Block(payload))?;
+                        let Some(response) = response.recv().await?? else { continue };
+                        let block = response.block();
+                        hashes.add(block.slot, block.hash);
+                    }
+                }
                 let account = self.account(&hashes, &sysvar::ID)?;
                 accounts.push((id, account.build()));
                 hashes
             }
-            None => return Err(KeeperError::MissingSysvar(id)),
         };
 
         // A remote authority makes this engine a replication client. Followers
         // need retained dedup history; leaders deliberately retain only the tip
-        // so they can restart without scanning the ledger.
+        // without reconstructing signature history.
         let caches = if self.authority.remote.is_some() {
             self.follower_caches(ledger, slot, &slothashes).await?
         } else {
