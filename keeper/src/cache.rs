@@ -20,6 +20,9 @@ use crate::{
     subscriptions::{Subscription, Unicast},
 };
 
+/// Maximum number of expired entries swept by one cache push.
+pub(crate) const EVICTION_LIMIT: usize = 16;
+
 pub(crate) struct Caches {
     /// Recent statuses keyed by a 128-bit signature prefix.
     ///
@@ -237,14 +240,14 @@ impl BlocksCache {
     }
 }
 
-/// Concurrent cache with slot-based lazy eviction.
+/// Concurrent cache with bounded slot-based lazy eviction on push.
 ///
-/// Entries are evicted only when another entry is pushed. Re-inserting an
-/// existing key leaves its value and expiry slot unchanged.
+/// Expired entries remain readable and reject duplicates until swept by a push.
+/// Re-inserting an existing key leaves its value and expiry slot unchanged.
 pub(crate) struct ExpiringCache<K, V> {
     /// Cached values by key.
     index: HashMap<K, V, RandomState>,
-    /// Expiry order used for lazy eviction.
+    /// Expiry order; insertions must use nondecreasing slots.
     queue: Mutex<VecDeque<ExpiringRecord<K>>>,
     /// Number of slots each entry lives after insertion.
     ttl: Slot,
@@ -265,14 +268,17 @@ impl<K: Hash + Eq + Copy + 'static, V: Clone> ExpiringCache<K, V> {
         }
     }
 
-    /// Insert a key and evict entries expired at `slot`.
+    /// Evicts at most [`EVICTION_LIMIT`] entries expired at `slot`, then inserts a key.
     ///
-    /// Returns `false` if `key` already exists. Existing values and expiry slots
-    /// are left unchanged.
+    /// Returns `false` if `key` still exists after eviction. Existing values and
+    /// expiry slots are left unchanged.
     pub(crate) fn push(&self, key: K, value: V, slot: Slot) -> bool {
         let mut queue = self.queue.lock();
-        // Lazily evict expired entries from the front of the queue.
-        while let Some(expired) = queue.pop_front_if(|e| e.expired(slot)) {
+        // Bound eviction work while keeping removal and insertion synchronized.
+        for _ in 0..EVICTION_LIMIT {
+            let Some(expired) = queue.pop_front_if(|e| e.expired(slot)) else {
+                break;
+            };
             self.index.remove_sync(&expired.key);
         }
 

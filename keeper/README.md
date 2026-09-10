@@ -77,8 +77,12 @@ requests, flushes and closes the appender, then flushes accountsdb.
 
 ## Caches and subscriptions
 
-Signature and recent-block caches use slot-based TTLs with lazy eviction on
-insertion. The account cache is an LRU that also coordinates concurrent loads of
+Signature and recent-block caches use slot-based TTLs. Each push evicts at most
+`EVICTION_LIMIT` expired entries, then inserts under the same queue lock. Reads
+do not evict; expired entries remain readable and reject duplicates until swept.
+Expiration bursts drain across successive pushes in bounded batches. With
+sequential slots, block hashes need at most one removal per push.
+The account cache is an LRU that also coordinates concurrent loads of
 missing accounts. Only non-authoritative modes enter the eviction LRU;
 delegated, ephemeral, and unresolved transient state remains outside it.
 

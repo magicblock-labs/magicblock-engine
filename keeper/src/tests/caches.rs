@@ -6,10 +6,11 @@ use std::sync::Arc;
 use solana_account::AccountMode;
 use solana_pubkey::Pubkey;
 
-use crate::cache::{AccountCache, ExpiringCache};
+use crate::cache::{AccountCache, EVICTION_LIMIT, ExpiringCache};
 
-// `ExpiringCache` evicts lazily on push, never on read; re-inserting an existing
-// key is a no-op; `update` replaces only present values.
+/// Proves lazy eviction respects the per-push eviction limit, successive pushes
+/// drain expired entries, and duplicates are rejected until swept; updates
+/// affect only present keys.
 #[test]
 fn expiring_cache_lazy_eviction() {
     // ttl = 2 slots: a key pushed at slot s expires at s + 2.
@@ -23,12 +24,10 @@ fn expiring_cache_lazy_eviction() {
         "value left unchanged by the re-insert"
     );
 
-    // Eviction runs only on push: at slot 5 the entry is well past its expiry but
-    // stays readable until the next push sweeps the queue.
+    // Reads leave entries present until a push sweeps them.
     assert!(cache.contains(&1));
     assert_eq!(cache.get(&1), Some(10));
 
-    // A push at slot 5 first evicts everything expired at 5 (key 1), then inserts.
     assert!(cache.push(2, 20, 5));
     assert!(!cache.contains(&1), "expired key swept on the next push");
     assert_eq!(cache.get(&2), Some(20));
@@ -42,6 +41,67 @@ fn expiring_cache_lazy_eviction() {
     // A key re-admitted after expiry is a fresh insert again.
     assert!(cache.push(1, 11, 5));
     assert_eq!(cache.get(&1), Some(11));
+
+    // Cross two full batches and a partial batch at the exact expiry slot.
+    let limit = EVICTION_LIMIT as u64;
+    let burst = 2 * limit + 2;
+    let fresh = burst + 1;
+    for key in 3..=burst {
+        assert!(cache.push(key, key, 5));
+    }
+    assert!(!cache.push(burst, 99, 6));
+    assert_eq!(
+        cache.len(),
+        burst as usize,
+        "entries survive until their expiry slot"
+    );
+
+    assert!(
+        !cache.push(burst, 99, 7),
+        "unswept expired key rejects duplicates"
+    );
+    assert_eq!(
+        cache.len(),
+        (burst - limit) as usize,
+        "even a rejected push sweeps a full batch"
+    );
+    assert!(!cache.contains(&limit));
+    assert_eq!(
+        cache.get(&(limit + 1)),
+        Some(limit + 1),
+        "reads do not sweep expired entries"
+    );
+    assert_eq!(
+        cache.get(&burst),
+        Some(burst),
+        "duplicate leaves the value unchanged"
+    );
+
+    assert!(cache.push(fresh, fresh, 7));
+    assert_eq!(
+        cache.len(),
+        3,
+        "next push sweeps another full batch before inserting"
+    );
+    assert!(!cache.contains(&(2 * limit)));
+    assert_eq!(cache.get(&(2 * limit + 1)), Some(2 * limit + 1));
+
+    assert!(
+        cache.push(burst, 99, 7),
+        "swept key can be reinserted in the same push"
+    );
+    assert_eq!(
+        cache.len(),
+        2,
+        "final push drains the remaining expired entries"
+    );
+    assert!(!cache.contains(&(2 * limit + 1)));
+    assert_eq!(cache.get(&burst), Some(99));
+    assert_eq!(
+        cache.get(&fresh),
+        Some(fresh),
+        "unexpired entries are retained"
+    );
 }
 
 /// Proves an accessor holds mutation ownership across materialization, while
