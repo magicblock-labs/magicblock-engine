@@ -128,22 +128,6 @@ struct SolAccountInfo {
     pub executable: bool,
 }
 
-/// Rust representation of C's SolSignerSeed
-#[derive(Debug)]
-#[repr(C)]
-struct SolSignerSeedC {
-    pub addr: u64,
-    pub len: u64,
-}
-
-/// Rust representation of C's SolSignerSeeds
-#[derive(Debug)]
-#[repr(C)]
-struct SolSignerSeedsC {
-    pub addr: u64,
-    pub len: u64,
-}
-
 /// Maximum number of account info structs that can be used in a single CPI invocation
 const MAX_CPI_ACCOUNT_INFOS: usize = 128;
 /// Maximum number of account info structs that can be used in a single CPI invocation with SIMD-0339 active
@@ -466,12 +450,6 @@ pub trait SyscallInvokeSigned {
         account_infos_len: u64,
         invoke_context: &InvokeContext,
     ) -> Result<Vec<TranslatedAccount<'a>>, Error>;
-    fn translate_signers(
-        program_id: &Pubkey,
-        signers_seeds_addr: u64,
-        signers_seeds_len: u64,
-        invoke_context: &InvokeContext,
-    ) -> Result<Vec<Pubkey>, Error>;
 }
 
 pub fn translate_instruction_rust(
@@ -567,7 +545,8 @@ pub fn translate_accounts_rust<'a>(
     )
 }
 
-pub fn translate_signers_rust(
+/// Translates signer seeds using the shared C and Rust VM slice layout.
+pub fn translate_signers(
     program_id: &Pubkey,
     signers_seeds_addr: u64,
     signers_seeds_len: u64,
@@ -575,42 +554,38 @@ pub fn translate_signers_rust(
 ) -> Result<Vec<Pubkey>, Error> {
     let check_aligned = invoke_context.get_check_aligned();
     let memory_mapping = invoke_context.memory_contexts.memory_mapping()?;
-    let mut signers = Vec::new();
-    if signers_seeds_len > 0 {
-        let signers_seeds = translate_slice::<VmSlice<VmSlice<u8>>>(
-            memory_mapping,
-            signers_seeds_addr,
-            signers_seeds_len,
-            check_aligned,
-        )?;
-        if signers_seeds.len() > MAX_SIGNERS {
-            return Err(Box::new(CpiError::TooManySigners));
-        }
-        for signer_seeds in signers_seeds.iter() {
-            let untranslated_seeds = translate_slice::<VmSlice<u8>>(
-                memory_mapping,
-                signer_seeds.ptr(),
-                signer_seeds.len(),
-                check_aligned,
-            )?;
-            if untranslated_seeds.len() > MAX_SEEDS {
-                return Err(Box::new(InstructionError::MaxSeedLengthExceeded));
-            }
-            let seeds = untranslated_seeds
-                .iter()
-                .map(|untranslated_seed| {
-                    translate_vm_slice(untranslated_seed, memory_mapping, check_aligned)
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-            let signer =
-                Pubkey::create_program_address(&seeds, program_id).map_err(CpiError::BadSeeds)?;
-            signers.push(signer);
-        }
-        Ok(signers)
-    } else {
-        Ok(vec![])
+    if signers_seeds_len == 0 {
+        return Ok(vec![]);
     }
+    let signers_seeds = translate_slice::<VmSlice<VmSlice<u8>>>(
+        memory_mapping,
+        signers_seeds_addr,
+        signers_seeds_len,
+        check_aligned,
+    )?;
+    if signers_seeds.len() > MAX_SIGNERS {
+        return Err(Box::new(CpiError::TooManySigners));
+    }
+    signers_seeds
+        .iter()
+        .map(|signer_seeds| {
+            let seeds = translate_vm_slice(signer_seeds, memory_mapping, check_aligned)?;
+            if seeds.len() > MAX_SEEDS {
+                return Err(Box::new(InstructionError::MaxSeedLengthExceeded) as Error);
+            }
+            let seeds_bytes = seeds
+                .iter()
+                .map(|seed| translate_vm_slice(seed, memory_mapping, check_aligned))
+                .collect::<Result<Vec<_>, Error>>()?;
+            Pubkey::create_program_address(&seeds_bytes, program_id)
+                .map_err(|err| Box::new(CpiError::BadSeeds(err)) as Error)
+        })
+        .collect()
 }
+
+// Both language ABIs use the same seed layout and validation.
+pub use translate_signers as translate_signers_c;
+pub use translate_signers as translate_signers_rust;
 
 pub fn translate_instruction_c(
     addr: u64,
@@ -701,51 +676,6 @@ pub fn translate_accounts_c<'a>(
     )
 }
 
-pub fn translate_signers_c(
-    program_id: &Pubkey,
-    signers_seeds_addr: u64,
-    signers_seeds_len: u64,
-    invoke_context: &InvokeContext,
-) -> Result<Vec<Pubkey>, Error> {
-    let check_aligned = invoke_context.get_check_aligned();
-    let memory_mapping = invoke_context.memory_contexts.memory_mapping()?;
-    if signers_seeds_len > 0 {
-        let signers_seeds = translate_slice::<SolSignerSeedsC>(
-            memory_mapping,
-            signers_seeds_addr,
-            signers_seeds_len,
-            check_aligned,
-        )?;
-        if signers_seeds.len() > MAX_SIGNERS {
-            return Err(Box::new(CpiError::TooManySigners));
-        }
-        Ok(signers_seeds
-            .iter()
-            .map(|signer_seeds| {
-                let seeds = translate_slice::<SolSignerSeedC>(
-                    memory_mapping,
-                    signer_seeds.addr,
-                    signer_seeds.len,
-                    check_aligned,
-                )?;
-                if seeds.len() > MAX_SEEDS {
-                    return Err(Box::new(InstructionError::MaxSeedLengthExceeded) as Error);
-                }
-                let seeds_bytes = seeds
-                    .iter()
-                    .map(|seed| {
-                        translate_slice::<u8>(memory_mapping, seed.addr, seed.len, check_aligned)
-                    })
-                    .collect::<Result<Vec<_>, Error>>()?;
-                Pubkey::create_program_address(&seeds_bytes, program_id)
-                    .map_err(|err| Box::new(CpiError::BadSeeds(err)) as Error)
-            })
-            .collect::<Result<Vec<_>, Error>>()?)
-    } else {
-        Ok(vec![])
-    }
-}
-
 /// Call process instruction, common to both Rust and C
 pub fn cpi_common<S: SyscallInvokeSigned>(
     invoke_context: &mut InvokeContext,
@@ -774,7 +704,7 @@ pub fn cpi_common<S: SyscallInvokeSigned>(
     let transaction_context = &invoke_context.transaction_context;
     let instruction_context = transaction_context.get_current_instruction_context()?;
     let caller_program_id = instruction_context.get_program_key()?;
-    let signers = S::translate_signers(
+    let signers = translate_signers(
         caller_program_id,
         signers_seeds_addr,
         signers_seeds_len,

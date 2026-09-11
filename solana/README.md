@@ -5,6 +5,9 @@ crates execute caller-loaded transactions and return account changes; they do
 not own consensus, fork choice, confirmation, persistence, or validator commit
 policy.
 
+The current upstream baseline is Agave **4.2.2**, with SDK account **4.3.1**.
+See [the upgrade disposition](UPSTREAM-4.2.2.md) for ports and intentional omissions.
+
 The differences below are intentional compatibility constraints for account
 representation, transaction context, serialization, VM mapping, and CPI.
 
@@ -20,6 +23,13 @@ representation, transaction context, serialization, VM mapping, and CPI.
   SBF programs use loader-v4 as their nominal owner and ABI v1. Native programs
   retain native-loader ownership.
 - Rent-state and lamport-balance checks remain part of execution.
+- SIMD-0392 rent-transition relaxation follows the supplied runtime feature set;
+  it does not activate new Engine features. Nonzero ephemeral accounts retain
+  their rent exemption. Ephemeral resizing remains restricted to the builtin.
+- If a requested instruction sysvar cannot represent the transaction,
+  account loading fails with `MaxLoadedAccountsDataSizeExceeded`; it never
+  substitutes an empty instruction sysvar. Private transaction size limits do
+  not enlarge the standard instruction-sysvar encoding.
 
 ## Account representation
 

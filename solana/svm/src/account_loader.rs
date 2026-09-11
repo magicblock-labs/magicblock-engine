@@ -205,7 +205,7 @@ fn load_transaction_accounts<CB: TransactionProcessingCallback>(
 
     // Attempt to load all of the transaction accounts
     for account_key in account_keys.iter() {
-        let loaded_account = load_transaction_account(account_loader, message, account_key);
+        let loaded_account = load_transaction_account(account_loader, message, account_key)?;
         collect_loaded_account(account_key, loaded_account)?;
     }
 
@@ -231,22 +231,22 @@ fn load_transaction_account<CB: TransactionProcessingCallback>(
     account_loader: &CB,
     message: &impl SVMMessage,
     account_key: &Pubkey,
-) -> LoadedTransactionAccount {
+) -> Result<LoadedTransactionAccount> {
     if solana_sdk_ids::sysvar::instructions::check_id(account_key) {
         // Since the instructions sysvar is constructed by the SVM and modified
         // for each transaction instruction, it cannot be loaded.
-        return LoadedTransactionAccount {
+        return Ok(LoadedTransactionAccount {
             loaded_size: 0,
-            account: construct_instructions_account(message),
-        };
+            account: construct_instructions_account(message)?,
+        });
     }
-    account_loader
+    Ok(account_loader
         .get_account_shared_data(account_key)
         .map(|a| LoadedTransactionAccount::new(a.0))
-        .unwrap_or_else(|| LoadedTransactionAccount::new(Default::default()))
+        .unwrap_or_else(|| LoadedTransactionAccount::new(Default::default())))
 }
 
-fn construct_instructions_account(message: &impl SVMMessage) -> AccountSharedData {
+fn construct_instructions_account(message: &impl SVMMessage) -> Result<AccountSharedData> {
     let account_keys = message.account_keys();
     let mut decompiled_instructions = Vec::with_capacity(message.num_instructions());
     for (program_id, instruction) in message.program_instructions_iter() {
@@ -270,11 +270,12 @@ fn construct_instructions_account(message: &impl SVMMessage) -> AccountSharedDat
         });
     }
 
-    AccountSharedData::from(Account {
-        data: construct_instructions_data(&decompiled_instructions).unwrap_or_default(),
+    Ok(AccountSharedData::from(Account {
+        data: construct_instructions_data(&decompiled_instructions)
+            .map_err(|_| TransactionError::MaxLoadedAccountsDataSizeExceeded)?,
         owner: sysvar::id(),
         ..Account::default()
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -645,7 +646,7 @@ mod tests {
             is_writable_account_cache: vec![false],
         };
         let message = SanitizedMessage::V0(loaded_message);
-        let shared_data = construct_instructions_account(&message);
+        let shared_data = construct_instructions_account(&message).unwrap();
         let expected = AccountSharedData::from(Account {
             data: construct_instructions_data(&message.decompile_instructions()).unwrap(),
             owner: sysvar::id(),
@@ -1135,8 +1136,13 @@ mod tests {
         );
 
         assert_eq!(
-            TransactionAccountStateInfo::new(&transaction_context, sanitized_tx.message(), &rent,)
-                .len(),
+            TransactionAccountStateInfo::new(
+                &transaction_context,
+                sanitized_tx.message(),
+                &rent,
+                false
+            )
+            .len(),
             num_accounts,
         );
     }
