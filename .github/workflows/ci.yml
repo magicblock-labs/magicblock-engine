@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 env:
-  AGAVE_VERSION: v4.2.0
+  AGAVE_VERSION: v4.2.2
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

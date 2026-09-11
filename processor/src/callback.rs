@@ -19,8 +19,6 @@ pub(crate) struct LoadCallback<'a, const LOAD_OWNED: bool> {
     pub(crate) loader: AccountLoader<'a>,
 }
 
-impl<const LO: bool> InvokeContextCallback for LoadCallback<'_, LO> {}
-
 impl<const LOAD_OWNED: bool> TransactionProcessingCallback for LoadCallback<'_, LOAD_OWNED> {
     fn get_account_shared_data(&self, pubkey: &Pubkey) -> Option<(AccountSharedData, Slot)> {
         self.loader

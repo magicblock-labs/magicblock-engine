@@ -290,9 +290,11 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
             }
         }
 
+        // A rejected frame must not leave either runtime stack ahead of the transaction.
+        self.transaction_context.push()?;
         self.syscall_context.push(None);
         self.memory_contexts.push_placeholder();
-        self.transaction_context.push()
+        Ok(())
     }
 
     /// Pop a stack frame from the invocation stack

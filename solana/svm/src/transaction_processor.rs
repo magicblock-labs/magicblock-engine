@@ -306,8 +306,14 @@ impl TransactionBatchProcessor {
             tx.num_instructions(),
         );
 
-        let pre_account_state_info =
-            TransactionAccountStateInfo::new(&transaction_context, tx, &environment.rent);
+        let relax_post_exec_min_balance_check =
+            environment.feature_set.relax_post_exec_min_balance_check;
+        let pre_account_state_info = TransactionAccountStateInfo::new(
+            &transaction_context,
+            tx,
+            &environment.rent,
+            relax_post_exec_min_balance_check,
+        );
 
         let log_collector = if config.recording_config.enable_log_recording {
             match config.log_messages_bytes_limit {
@@ -348,8 +354,13 @@ impl TransactionBatchProcessor {
         drop(invoke_context);
 
         let mut status = process_result.and_then(|info| {
-            let post_account_state_info =
-                TransactionAccountStateInfo::new(&transaction_context, tx, &environment.rent);
+            let post_account_state_info = TransactionAccountStateInfo::new_post_exec(
+                &transaction_context,
+                tx,
+                &environment.rent,
+                &pre_account_state_info,
+                relax_post_exec_min_balance_check,
+            );
             TransactionAccountStateInfo::verify_changes(
                 &pre_account_state_info,
                 &post_account_state_info,

@@ -8,6 +8,10 @@ The SVM loads required accounts through the caller's
 `solana-program-runtime`, and returns processing results and mutated accounts.
 It owns no account storage.
 
+Rent-transition relaxation follows the caller's SIMD-0392 feature gate, while
+preserving Engine's ephemeral-account exemption. Instruction-sysvar encoding
+failures propagate as `MaxLoadedAccountsDataSizeExceeded` during account loading.
+
 Persistence, commit decisions, deployment policy, and validator batch behavior
 remain above this crate. Engine-specific runtime differences are documented in
 [`../README.md`](../README.md).

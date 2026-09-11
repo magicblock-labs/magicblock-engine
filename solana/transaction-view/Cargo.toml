@@ -8,7 +8,7 @@ license = { workspace = true }
 name = "agave-transaction-view"
 readme = "README.md"
 repository = { workspace = true }
-version = "4.1.1"
+version = "4.2.2"
 
 [features]
 agave-unstable-api = []

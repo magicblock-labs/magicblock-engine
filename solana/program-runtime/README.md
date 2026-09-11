@@ -1,5 +1,11 @@
 # `solana-program-runtime`
 
+Agave 4.2.2 compatibility removes the obsolete modular-exponentiation execution
+cost fields and the language-specific signer method from `SyscallInvokeSigned`.
+C and Rust signer translation share one `VmSlice` implementation; the previous
+free-function names remain aliases. Mutable CPI slice translation is unsafe:
+callers must uphold reference uniqueness and backing-storage lifetimes.
+
 This Agave fork implements invocation state, CPI translation, SBF VM setup,
 sysvar access, logging, serialization, and program-cache primitives. Workspace
 dependencies that select `solana-program-runtime` use this workspace copy.

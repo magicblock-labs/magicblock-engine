@@ -167,7 +167,7 @@ impl SysvarCache {
 
         if self.slot_hashes.is_none() {
             get_account_data(&SlotHashes::id(), &mut |data: &[u8]| {
-                if let Ok(obj) = bincode::deserialize::<SlotHashes>(data) {
+                if let Ok(obj) = wincode::deserialize::<SlotHashes>(data) {
                     self.slot_hashes = Some(data.to_vec());
                     self.slot_hashes_obj = Some(obj);
                 }
