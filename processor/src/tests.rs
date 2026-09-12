@@ -102,7 +102,14 @@ impl Harness {
     /// Both paths maintain sysvar caches, so block metadata must be delivered to
     /// both before comparing simulated and committed behavior.
     async fn set_block(&self, block: Block) {
-        self.handle.execution.send(SequencerMessage::Block(block)).await.unwrap();
+        self.handle
+            .execution
+            .send(SequencerMessage::Block {
+                block: nucleus::runtime::BlockInput::Production(block),
+                tx: None,
+            })
+            .await
+            .unwrap();
         self.handle.simulation.send(SimulatorMessage::Block(block)).await.unwrap();
     }
 

@@ -3,8 +3,7 @@ use std::{
     time::Duration,
 };
 
-use derive_more::Deref;
-use ledger::schema::SuperblockSeal;
+use ledger::schema::{Signed, SuperblockSeal};
 use nucleus::{ledger::BlockstorePosition, unix_time};
 use solana_keypair::{Keypair, Signer};
 use solana_pubkey::Pubkey;
@@ -59,13 +58,12 @@ pub(crate) enum HandshakeResponse {
 }
 
 /// Describes the accountsdb snapshot a follower must stage before it can stream.
-#[derive(SchemaRead, SchemaWrite, Debug, Clone, Copy, Deref)]
+#[derive(SchemaRead, SchemaWrite, Debug, Clone, Copy)]
 pub(crate) struct SnapshotMetadata {
     /// Length of the snapshot archive in bytes.
     pub(crate) len: u64,
     /// Seal the snapshot restores accountsdb to.
-    #[deref]
-    pub(crate) superblock: SuperblockSeal,
+    pub(crate) superblock: Signed<SuperblockSeal>,
 }
 
 impl<P> Handshake<P>

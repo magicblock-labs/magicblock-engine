@@ -3,6 +3,7 @@
 use std::fs;
 
 use accountsdb::AccountEntry;
+use ledger::schema::Signed;
 use nucleus::testkit::{V42_ID, block, signed_view};
 use solana_account::{AccountBuilder, AccountMode, ReadableAccount};
 use solana_instruction::Instruction;
@@ -137,7 +138,8 @@ async fn restores_blockhash_history_from_ledger_and_snapshot() {
     let mut builder = keeper_builder(&dirs);
     let keeper = TestKeeper::from_builder(dirs, builder.clone()).await;
     for slot in 1..=600 {
-        keeper.blocks().append(block(slot), false).unwrap();
+        let block = Signed::new(block(slot), keeper.signer());
+        keeper.blocks().append(block, false).unwrap();
     }
     let ledger_hash = block(50).hash;
     let snapshot_hash = block(100).hash;
@@ -154,7 +156,7 @@ async fn restores_blockhash_history_from_ledger_and_snapshot() {
     // Match the executor's committed-count update while deliberately omitting
     // execution metadata, so recovery can only find this signature in blockstore.
     keeper.accounts().commit(std::iter::empty::<&AccountEntry>()).unwrap();
-    keeper.blocks().append(block(601), false).unwrap();
+    keeper.blocks().append(Signed::new(block(601), keeper.signer()), false).unwrap();
     let latest_hash = block(601).hash;
     keeper.accounts().dump(None).unwrap();
     let dirs = keeper.close().await;

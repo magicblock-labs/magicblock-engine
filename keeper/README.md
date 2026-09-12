@@ -20,7 +20,7 @@ advancing restored state from the successor of its sealed superblock through the
 ledger tip and must finish with matching transaction counts when replay runs.
 
 `nucleus::config::BlockstoreParams` supplies the expected block time and
-non-zero superblock interval used by pacing and cache TTL calculation. The
+superblock interval (`u64`, zero skips periodic sealing of nonzero slots). The
 shared accountsdb, blockstore, and ledger parameters are defined by nucleus;
 keeper consumes them when opening its durable stores and caches.
 
@@ -58,15 +58,15 @@ rejects a non-empty deployment whose configured authority account is absent.
 
 ## Superblock finalization
 
-`Keeper::finalize_superblock` snapshots accountsdb at the current ledger head,
-computes the persisted-account checksum, queues the corresponding
-`SuperblockSeal`, and archives the snapshot in the successor superblock
-directory. Its completion signal resolves after the appender durably seals the
-files and index and publishes the rotation. Events queued after the seal remain
-ordered into the successor while that work completes.
+`Keeper::finalize_superblock` requires quiesced execution. It snapshots accountsdb
+to refresh the checksum, then signs the reconstructed seal or compares it with
+an authenticated upstream payload and retains its signature. The snapshot is
+archived in the successor directory; completion acknowledges durable sealing
+and rotation, not archive completion. `SuperblockAccessor::sealed` returns the
+unsigned accountsdb state.
 
-Finalization requires exclusive account-store access. Engine obtains that
-exclusivity through the sequencer and simulator barriers before calling it.
+Producers sign resets, followers append the original signed reset, and local
+recovery only applies its payload. All share the same volatile-state mutation.
 
 ## Synchronization
 

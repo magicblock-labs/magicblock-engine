@@ -24,7 +24,7 @@ use ledger::{
 use nucleus::{
     Slot,
     config::Authority,
-    ledger::{ACCOUNTSDB_SNAPSHOT_FILE, SuperblockSeal},
+    ledger::{ACCOUNTSDB_SNAPSHOT_FILE, Reset, Signed, SuperblockSeal},
 };
 use solana_sysvar::rent::Rent;
 
@@ -152,19 +152,29 @@ impl Keeper {
     /// Must run only when no account store can race the snapshot export; the
     /// in-body `SAFETY` note relies on this exclusivity. The returned signal
     /// resolves after the appender durably seals and rotates the ledger.
-    pub fn finalize_superblock(&self) -> Result<oneshot::Receiver<()>> {
+    /// An upstream seal must already be authenticated; its payload must match
+    /// the snapshot state, and its signature is retained unchanged.
+    pub fn finalize_superblock(
+        &self,
+        expected: Option<Signed<SuperblockSeal>>,
+    ) -> Result<oneshot::Receiver<()>> {
         let _timer = metrics::time(Operation::FinalizeSuperblock);
         let head = self.ledger.head();
-        let next = head + 1;
-        // SAFETY: `snapshot` requires exclusive write access to accountsdb,
-        // i.e. no store operation may race the export. `finalize_superblock`
-        // is only run when there're no concurrent mutations taking place
+        // SAFETY: the caller must ensure exclusive account-store
+        // access. Snapshot also publishes the checksum for this superblock id;
+        // read/sign/compare it only after that refresh.
         let snapshot = unsafe { self.accountsdb.snapshot(head) }?;
-        let checksum = self.accountsdb.checksum();
-        let transactions = self.accountsdb.transactions();
-        let seal = SuperblockSeal { id: head, checksum, transactions };
+        let payload = self.superblocks().sealed();
+        let seal = match expected {
+            None => Signed::new(payload, self.signer()),
+            Some(seal) if seal.payload == payload => seal,
+            Some(expected) => {
+                error!(?expected, observed = ?payload, "superblock state mismatch");
+                return Err(error::KeeperError::SealMismatch(expected.payload.id));
+            }
+        };
         let completion = self.superblocks().append(seal)?;
-        let dir = Superblock::init_dir(&self.ledger.directory, next)?;
+        let dir = Superblock::init_dir(&self.ledger.directory, head + 1)?;
         self.archive(snapshot, dir)?;
         info!(head, "queued superblock seal");
         Ok(completion)
@@ -203,7 +213,17 @@ impl Keeper {
     /// Internal system accounts and persisted engine-authoritative state remain
     /// available.
     pub fn reset(&self, slot: Slot) -> Result<()> {
-        self.ledger.appender.send(Event::Reset(slot))?;
+        self.append_reset(Signed::new(Reset(slot), self.signer()))
+    }
+
+    /// Appends an authenticated reset before applying it. Execution must be quiesced.
+    pub fn append_reset(&self, reset: Signed<Reset>) -> Result<()> {
+        self.ledger.appender.send(Event::Reset(reset))?;
+        self.apply_reset(reset.payload)
+    }
+
+    /// Discards volatile state without appending; execution must be quiesced.
+    pub fn apply_reset(&self, reset: Reset) -> Result<()> {
         self.accountsdb.reset();
         let authority = self.authority();
         let account = self.accounts().loader().load(&authority)?;
@@ -211,7 +231,7 @@ impl Keeper {
             let acc = AccountBuilder::from(account).lamports(SPONSOR_INIT_BALANCE);
             self.accounts().store(&[(authority, acc.build())])?;
         }
-        info!(slot, "reset volatile state");
+        info!(slot = *reset, "reset volatile state");
         Ok(())
     }
 

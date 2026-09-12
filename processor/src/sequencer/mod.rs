@@ -7,8 +7,8 @@ use blake3::Hasher;
 use keeper::{Keeper, ResolvedTransaction};
 use nucleus::{
     Slot,
-    ledger::Block,
-    runtime::{BarrierGuard, SequencerHandle},
+    ledger::Signed,
+    runtime::{BarrierGuard, BlockInput, SequencerHandle},
     shutdown::{Service, ShutdownHandle, ShutdownManager, ShutdownReason},
 };
 use solana_hash::Hash;
@@ -164,9 +164,9 @@ impl Sequencer {
     async fn handle_message(&mut self, msg: SequencerMessage) -> Result<()> {
         match msg {
             SequencerMessage::Transaction(txn) => self.schedule(txn).await,
-            SequencerMessage::Block(block) => self.finalize(block).await,
-            SequencerMessage::Checkpoint(block, guard) => {
-                self.finalize(block).await?;
+            SequencerMessage::Block { block, tx } => self.finalize(block, tx).await,
+            SequencerMessage::Checkpoint { block, tx, guard } => {
+                self.finalize(BlockInput::Production(block), tx).await?;
                 self.pause(guard).await;
                 Ok(())
             }
@@ -176,13 +176,11 @@ impl Sequencer {
 
     /// Registers a transaction in input order and dispatches all ready work.
     async fn schedule(&mut self, txn: ResolvedTransaction) -> Result<()> {
-        if !self.replay {
-            if !self.state.transactions().append(&txn).await? {
-                metrics::failed_transaction(FailureKind::SequencerDrop);
-                return Ok(());
-            }
-            self.hasher.update(&txn.signatures()[0]);
+        if !self.replay && !self.state.transactions().append(&txn).await? {
+            metrics::failed_transaction(FailureKind::SequencerDrop);
+            return Ok(());
         }
+        self.hasher.update(&txn.signatures()[0]);
         if self.ordering.register(txn) {
             metrics::ordering_dependency();
             metrics::blocked_transaction();
@@ -262,27 +260,41 @@ impl Sequencer {
 
     /// Finalizes the current block: chains its hash, appends it, and notifies
     /// every executor of the new block boundary.
-    async fn finalize(&mut self, mut block: Block) -> Result<()> {
+    async fn finalize(
+        &mut self,
+        input: BlockInput,
+        submitted: Option<oneshot::Sender<()>>,
+    ) -> Result<()> {
         let _timer = metrics::time(Operation::FinalizeBlock);
-        if self.replay && block.parent != self.hasher.parent {
-            return Err(ProcessorError::Internal(format!(
-                "replayed block {} has parent {:?}, expected {:?}",
-                block.slot, block.parent, self.hasher.parent
-            )));
-        }
-        if !self.replay {
-            block.parent = self.hasher.parent;
-            block.hash = self.hasher.finalize();
-        }
+        let block = match input {
+            BlockInput::Production(mut block) => {
+                block.parent = self.hasher.parent;
+                block.hash = self.hasher.finalize();
+                Signed::new(block, self.state.signer())
+            }
+            BlockInput::Replay(block) => {
+                if block.parent != self.hasher.parent || block.hash != self.hasher.finalize() {
+                    let err = format!(
+                        "replayed block {} doesn't match the local hash chain",
+                        block.slot
+                    );
+                    return Err(ProcessorError::Internal(err));
+                }
+                block
+            }
+        };
 
         // Block boundaries synchronize executors:
         // 1. sysvar writes bypass declared account dependencies and must be ordered
         // 2. replaying should schedule transactions in their original block
         self.drain().await?;
-        self.executors.transition(block)?;
+        self.executors.transition(block.payload)?;
         self.state.blocks().append(block, self.replay)?;
         self.hasher.advance(block.hash);
         self.slot = self.state.blocks().current_slot();
+        if let Some(submitted) = submitted {
+            let _ = submitted.send(());
+        }
         Ok(())
     }
 }

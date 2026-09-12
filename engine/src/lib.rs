@@ -13,7 +13,7 @@ use keeper::{Keeper, builder::KeeperBuilder, error::KeeperError};
 use ledger::schema::OwnedBlockstoreEntry;
 use magic_root_program::entrypoint::MagicRootEntrypoint;
 use nucleus::{
-    runtime::{self, BarrierHandle, SequencerHandle},
+    runtime::{self, BarrierHandle, BlockInput, SequencerHandle},
     shutdown::{Service, ShutdownManager, ShutdownReason},
 };
 use processor::{SequencerMessage, sequencer::Sequencer};
@@ -154,11 +154,16 @@ impl Engine {
     /// Seal and reset entries quiesce execution before touching shared state;
     /// a reconstructed seal whose checksum differs returns
     /// [`ReplayError::StateMismatch`].
-    pub async fn replay(&self, entry: OwnedBlockstoreEntry) -> Result<()> {
+    /// Entries come from trusted local storage and are never appended again.
+    async fn replay(&self, entry: OwnedBlockstoreEntry) -> Result<()> {
         match entry {
-            OwnedBlockstoreEntry::Transaction(txn) => self.transaction(txn)?.schedule().await?,
+            OwnedBlockstoreEntry::Transaction(txn) => {
+                TransactionAccessor::replay(self, txn)?.schedule().await?;
+            }
             OwnedBlockstoreEntry::Block(block) => {
-                self.sequencer.send(SequencerMessage::Block(block)).await?;
+                let block = BlockInput::Replay(block);
+                let msg = SequencerMessage::Block { block, tx: None };
+                self.sequencer.send(msg).await?;
             }
             OwnedBlockstoreEntry::Superblock(expected) => {
                 let _guard = self.barrier().await?;
@@ -166,16 +171,16 @@ impl Engine {
                 self.accounts().set_superblock(expected.id);
                 self.sync(false)?;
                 let observed = self.superblocks().sealed();
-                if observed != expected {
+                if observed != *expected {
                     error!(?observed, ?expected, "state mismatch; aborting replay");
                     self.accounts().set_superblock(previous);
                     self.sync(false)?;
                     Err(ReplayError::StateMismatch)?;
                 }
             }
-            OwnedBlockstoreEntry::Reset(slot) => {
+            OwnedBlockstoreEntry::Reset(reset) => {
                 let _guard = self.barrier().await?;
-                self.reset(slot)?;
+                self.apply_reset(*reset)?;
             }
         };
         Ok(())
@@ -199,12 +204,7 @@ impl Engine {
             terminating: Default::default(),
         };
         while let Some(entry) = replayer.rx.recv().await {
-            match entry {
-                OwnedBlockstoreEntry::Transaction(transaction) => {
-                    TransactionAccessor::replay(&engine, transaction)?.schedule().await?;
-                }
-                entry => engine.replay(entry).await?,
-            }
+            engine.replay(entry).await?;
         }
         replayer
             .response

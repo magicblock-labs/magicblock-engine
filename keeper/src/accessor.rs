@@ -6,7 +6,7 @@ use accountsdb::{AccountEntry, AccountsDB, AccountsDBError};
 use ledger::{
     LedgerRequestError,
     request::*,
-    schema::{Event, SuperblockSeal, TransactionEntry, signature_prefix},
+    schema::{Event, Signed, SuperblockSeal, TransactionEntry, signature_prefix},
 };
 use nucleus::{
     Slot,
@@ -297,14 +297,14 @@ impl<'a> BlocksAccessor<'a> {
     /// Publishes a completed block and advances block-derived account state.
     ///
     /// Replay skips the ledger append because the block is already stored.
-    pub fn append(&self, block: Block, replay: bool) -> Result<()> {
+    pub fn append(&self, block: Signed<Block>, replay: bool) -> Result<()> {
         let event = Event::Block(block);
         if !replay {
             self.keeper.ledger.appender.send(event)?;
             self.keeper.subscriptions.blocks.send(&(), &block);
         }
-        self.keeper.caches.blocks.push(block);
-        self.keeper.accounts().update_sysvars(block)?;
+        self.keeper.caches.blocks.push(*block);
+        self.keeper.accounts().update_sysvars(*block)?;
         self.keeper.accounts().set_slot(block.slot)?;
         Ok(())
     }
@@ -316,7 +316,7 @@ pub struct SuperblockAccessor<'a> {
 }
 
 impl SuperblockAccessor<'_> {
-    /// Id of the superblock accountsdb last sealed.
+    /// Reconstructed accountsdb seal state, without a producer signature.
     pub fn sealed(&self) -> SuperblockSeal {
         SuperblockSeal {
             id: self.keeper.accountsdb.superblock(),
@@ -338,19 +338,12 @@ impl SuperblockAccessor<'_> {
     /// Enqueues a seal onto the append stream and returns its completion signal.
     ///
     /// The signal resolves after the appender durably seals the current
-    /// superblock and rotates to its successor.
-    pub fn append(&self, seal: SuperblockSeal) -> Result<oneshot::Receiver<()>> {
+    /// superblock, adopts the seal's transaction count, and rotates to its successor.
+    pub fn append(&self, seal: Signed<SuperblockSeal>) -> Result<oneshot::Receiver<()>> {
         let (response, completion) = oneshot::channel();
         let event = Event::Superblock { seal, response };
         self.keeper.ledger.appender.send(event)?;
         Ok(completion)
-    }
-
-    /// Installs a snapshot seal and adopts its cumulative transaction count.
-    pub fn bootstrap(&self, seal: SuperblockSeal) -> Result<()> {
-        let event = Event::Bootstrap(seal);
-        self.keeper.ledger.appender.send(event)?;
-        self.sync(false)
     }
 
     /// Blocks until every queued append event has been flushed and made durable.

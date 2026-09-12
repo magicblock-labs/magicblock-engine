@@ -5,6 +5,9 @@ superblock seals, and volatile-state reset markers. History files are partitione
 into superblock directories, while one global Fjall database partitions index
 entries into a matching keyspace per superblock.
 
+Blocks, superblock seals, and resets are stored as `Signed<T>`. Storage preserves
+the producer signature; ingestion owns authentication.
+
 ```text
 ledger.meta
 index/
@@ -32,10 +35,15 @@ and the appender forwards those descriptors and its file spans to one bounded,
 ordered index worker. At each block, the appender publishes data-file cursors
 before enqueueing the block marker; the worker then atomically commits that
 block's transaction, account, and block entries. A seal drains the index worker,
-finalizes the active files, and rotates both services to the next superblock. The
-successor metadata retains the sealed snapshot's checksum and cumulative
-transaction count so it remains self-describing after retention removes the
-preceding blockstore.
+finalizes the active files, adopts the seal's authoritative cumulative transaction
+count, and rotates both services to the next superblock. Snapshot bootstrap
+uses this same operation and waits for its durable completion. The
+successor metadata retains the sealed snapshot's checksum, cumulative
+transaction count, and original signature, initialized before publication and
+immutable thereafter, even after retention removes the preceding blockstore.
+Directory N carries the snapshot and seal of N−1: its starting state, not its
+closing state. `Superblock::seal()` therefore returns seal N−1; seal N is written
+to N's blockstore when it closes and retained in N+1's metadata.
 
 Reader requests run on a worker pool. Each worker owns its decode buffers and
 reads only through published cursors. The ledger-wide Fjall index uses two
@@ -70,9 +78,7 @@ keys retain eight public-key bytes. The account index stores
 `account_tag || pubkey_prefix || execution_span_be` as its key and an empty
 value. Fixed-width big-endian slot and account-span key components make reverse
 Fjall ranges start at the newest entry. Opaque span values remain little-endian.
-Accounts with colliding eight-byte prefixes share history results. This layout
-has no compatibility path or ledger-version bump; deployment requires a fresh
-ledger directory.
+Accounts with colliding eight-byte prefixes share history results.
 LZ4 is disabled because the realistic index fixture reduced closed-directory
 size by only 7.37%.
 

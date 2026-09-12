@@ -3,6 +3,12 @@
 The processor schedules transactions across a fixed pool of SVM executors and
 commits their results through keeper.
 
+Produced blocks are signed after computing their hash chain. Replication and
+local recovery both recompute the chain from ordered transaction signatures and
+validate each block's parent and hash. Neither replaces the original signature;
+local recovery also skips ledger appends.
+The sequencer acknowledges boundaries only after validation and application.
+
 Replay executors commit account state and cache the re-executed terminal status,
 but do not append ledger records or publish live transaction subscriptions.
 

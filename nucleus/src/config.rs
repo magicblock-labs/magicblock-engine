@@ -1,6 +1,6 @@
 //! Shared engine configuration types.
 
-use std::{num::NonZeroU64, path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use solana_keypair::Keypair;
@@ -56,8 +56,9 @@ pub struct AccountsDBParams {
 pub struct BlockstoreParams {
     /// Expected wall-clock interval between produced slots.
     pub blocktime: Duration,
-    /// Number of blocks included into each superblock.
-    pub superblock: NonZeroU64,
+    /// Slots per superblock; zero disables periodic sealing of nonzero slots.
+    /// Replication followers apply upstream seals independently of this interval.
+    pub superblock: u64,
 }
 
 /// Ledger storage parameters.

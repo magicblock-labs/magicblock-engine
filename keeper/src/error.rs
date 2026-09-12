@@ -34,6 +34,9 @@ pub enum KeeperError {
     /// A sysvar required by persisted non-genesis state is missing.
     #[error("missing required sysvar: {0}")]
     MissingSysvar(Pubkey),
+    /// Reconstructed state does not match the authenticated upstream seal.
+    #[error("reconstructed state does not match superblock {0}")]
+    SealMismatch(u64),
 }
 
 impl From<SendError<Event>> for KeeperError {

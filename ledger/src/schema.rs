@@ -11,7 +11,7 @@ use std::sync::Arc;
 use bitcode::{Decode, Encode};
 use derive_more::Deref;
 use nucleus::Slot;
-pub use nucleus::ledger::{Block, SuperblockSeal};
+pub use nucleus::ledger::{Block, Reset, Signed, SuperblockSeal};
 
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
@@ -89,18 +89,16 @@ pub enum Event {
         accounts: AccountIndex,
     },
     /// Block boundary marker and block hash.
-    Block(Block),
-    /// Seal the active superblock and rotate to a fresh directory.
+    Block(Signed<Block>),
+    /// Seal the active superblock, adopt its transaction count, and rotate.
     Superblock {
         /// Identity, checksum, and transaction count for the sealed state.
-        seal: SuperblockSeal,
+        seal: Signed<SuperblockSeal>,
         /// Notified after the durable seal and successor rotation complete.
         response: oneshot::Sender<()>,
     },
-    /// Install a snapshot seal and adopt its cumulative transaction count.
-    Bootstrap(SuperblockSeal),
     /// Volatile accounts were discarded at `Slot` after upstream synchronization was lost.
-    Reset(Slot),
+    Reset(Signed<Reset>),
     /// Flush pending appends and optionally stop the appender after acknowledging.
     Sync {
         /// Receives an acknowledgement after the append state is durable.
@@ -136,13 +134,13 @@ impl AccountIndex {
 #[derive(SchemaRead, SchemaWrite)]
 pub enum BlockstoreEntry<T> {
     /// Delimits the preceding transactions as one block and stores its hash.
-    Block(Block),
+    Block(Signed<Block>),
     /// Serialized transaction bytes.
     Transaction(T),
     /// Superblock seal marker and snapshot checksum.
-    Superblock(SuperblockSeal),
+    Superblock(Signed<SuperblockSeal>),
     /// Marks a volatile-state reset in the durable replay stream.
-    Reset(Slot),
+    Reset(Signed<Reset>),
 }
 
 /// Fixed execution prefix stored before the compressed bitcode payload.

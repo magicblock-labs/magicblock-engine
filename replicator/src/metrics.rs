@@ -24,10 +24,6 @@ const CLIENT_CONNECTION_ATTEMPTS: MetricSpec = MetricSpec {
     name: "replicator_client_connection_attempts",
     help: "Replication client connection attempts.",
 };
-const CLIENT_STATE_MISMATCHES: MetricSpec = MetricSpec {
-    name: "replicator_client_state_mismatches",
-    help: "Superblock seal mismatches detected by the replication client.",
-};
 const SERVER_CURSOR_UPDATES_SKIPPED: MetricSpec = MetricSpec {
     name: "replicator_server_cursor_updates_skipped",
     help: "Replication server cursor updates skipped after receiver lag.",
@@ -76,11 +72,6 @@ pub(crate) fn client_connection() -> ClientConnection {
     ClientConnection
 }
 
-/// Records a superblock seal mismatch.
-pub(crate) fn client_state_mismatch() {
-    metric::with_metrics(&METRICS, |m| m.client_state_mismatches.inc());
-}
-
 /// Counts a server worker until the returned guard drops.
 pub(crate) fn server_connection() -> ServerConnection {
     metric::with_metrics(&METRICS, |m| m.server_connections.inc());
@@ -118,7 +109,6 @@ struct Metrics {
     client_stream_connected: IntGauge,
     server_connections: IntGauge,
     client_connection_attempts: IntCounter,
-    client_state_mismatches: IntCounter,
     server_cursor_updates_skipped: IntCounter,
 }
 
@@ -129,7 +119,6 @@ impl Default for Metrics {
             client_stream_connected: metric::gauge(CLIENT_STREAM_CONNECTED, 0),
             server_connections: metric::gauge(SERVER_CONNECTIONS, 0),
             client_connection_attempts: metric::counter(CLIENT_CONNECTION_ATTEMPTS, 0),
-            client_state_mismatches: metric::counter(CLIENT_STATE_MISMATCHES, 0),
             server_cursor_updates_skipped: metric::counter(SERVER_CURSOR_UPDATES_SKIPPED, 0),
         }
     }

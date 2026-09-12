@@ -21,7 +21,18 @@ config = [
     "dep:solana-signer"
 ]
 default = []
-ledger = ["solana-hash/copy", "solana-hash/wincode", "wincode/derive"]
+ledger = [
+    "dep:bytemuck",
+    "dep:derive_more",
+    "dep:solana-keypair",
+    "dep:solana-pubkey",
+    "solana-hash/bytemuck",
+    "solana-hash/copy",
+    "solana-hash/wincode",
+    "solana-signature/verify",
+    "solana-signature/wincode",
+    "wincode/derive"
+]
 metrics = ["dep:prometheus", "dep:tracing"]
 notifier = ["tokio/sync"]
 runtime = [
@@ -53,6 +64,7 @@ testkit = [
 tls = ["dep:solana-instruction-error", "dep:solana-pubkey", "dep:wincode"]
 
 [dependencies]
+bytemuck = { workspace = true, optional = true, features = ["derive"] }
 derive_more = { workspace = true, optional = true, features = ["deref", "from"] }
 futures = { workspace = true, features = ["alloc"], optional = true }
 oneshot = { workspace = true, features = ["async"], optional = true }

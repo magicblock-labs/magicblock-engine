@@ -17,8 +17,11 @@ zero when the system clock predates the epoch. Its default feature set is empty.
   Dropping the manager cancels every tier without waiting for services to stop.
 - `notifier`: the one-shot, non-resetting `EventNotifier` latch.
 - `ledger`: shared block-boundary metadata, including each block's locally
-  computed hash and parent, plus snapshot checksum/transaction seals and
-  blockstore positions.
+  computed hash and parent, snapshot checksum/transaction seals, signed resets,
+  and blockstore positions. `Signed<T>` signs and verifies domain-separated
+  padding-free payload bytes in a bounded stack buffer, excluding the signature.
+  Signing requires little-endian targets; `NoUninit` derives reject padding.
+  Wincode remains the storage codec, with the same payload layout.
 - `metrics`: Prometheus metric construction, `engine_`-namespaced registration,
   labels, and timers.
 - `service`: the `metrics` and `shutdown` feature bundle.
