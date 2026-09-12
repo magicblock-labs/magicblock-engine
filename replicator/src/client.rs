@@ -411,3 +411,95 @@ impl Ingest {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{io::Write, net::TcpListener, time::Duration};
+
+    use engine::testkit::TestEngine;
+    use solana_keypair::Keypair;
+
+    use super::*;
+
+    /// Proves ingestion preserves valid boundary records and rejects tampered
+    /// payloads and wrong-key signatures for blocks, seals, and resets.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn authenticates_boundary_records() {
+        let engine = TestEngine::new().await;
+        let other = Keypair::new();
+        let timeout = Duration::from_secs(4);
+        for (signer, trusted) in [(engine.signer(), true), (&other, false)] {
+            let records = [
+                OwnedBlockstoreEntry::Block(Signed::new(Block::new(1, 100), signer)),
+                OwnedBlockstoreEntry::Superblock(Signed::new(
+                    SuperblockSeal {
+                        id: 1,
+                        checksum: 2,
+                        transactions: 3,
+                    },
+                    signer,
+                )),
+                OwnedBlockstoreEntry::Reset(Signed::new(Reset(1), signer)),
+            ];
+            for mut record in records {
+                for tampered in [false, true] {
+                    let kind = match &mut record {
+                        OwnedBlockstoreEntry::Block(block) => {
+                            block.payload.slot += u64::from(tampered);
+                            "block"
+                        }
+                        OwnedBlockstoreEntry::Superblock(seal) => {
+                            seal.payload.checksum += u64::from(tampered);
+                            "superblock"
+                        }
+                        OwnedBlockstoreEntry::Reset(reset) => {
+                            reset.payload.0 += u64::from(tampered);
+                            "reset"
+                        }
+                        _ => unreachable!(),
+                    };
+                    let bytes = wincode::serialize(&record).unwrap();
+                    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+                    let mut writer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+                    let (reader, _) = listener.accept().unwrap();
+                    reader.set_read_timeout(Some(timeout)).unwrap();
+                    writer.set_write_timeout(Some(timeout)).unwrap();
+                    let (rx, worker) = Ingest::spawn(
+                        BufReader::new(reader),
+                        engine.verifier(),
+                        engine.authority(),
+                    )
+                    .unwrap();
+                    writer.write_all(&bytes).unwrap();
+                    drop(writer);
+
+                    if trusted && !tampered {
+                        let accepted = match rx.recv_timeout(timeout).unwrap() {
+                            ReplicationMessage::Block(block) => OwnedBlockstoreEntry::Block(block),
+                            ReplicationMessage::Superblock(seal) => {
+                                OwnedBlockstoreEntry::Superblock(seal)
+                            }
+                            ReplicationMessage::Reset(reset) => OwnedBlockstoreEntry::Reset(reset),
+                            _ => panic!("expected a boundary record"),
+                        };
+                        // Compare the whole encoded record, including the original signature.
+                        assert_eq!(wincode::serialize(&accepted).unwrap(), bytes);
+                        assert!(matches!(
+                            worker.join().unwrap(),
+                            Ok(IngestExit::Disconnected(_))
+                        ));
+                    } else {
+                        assert!(matches!(
+                            rx.recv_timeout(timeout),
+                            Err(flume::RecvTimeoutError::Disconnected)
+                        ));
+                        assert!(matches!(worker.join().unwrap(),
+                            Err(ReplicationError::InvalidSignature(actual)) if actual == kind
+                        ));
+                    }
+                }
+            }
+        }
+        engine.close().await;
+    }
+}

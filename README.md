@@ -92,8 +92,10 @@ async fn open_engine(
 The second argument chooses who advances blocks. `None` runs the built-in
 pacer, which produces blocks on its own clock — the standalone case. Passing a
 channel instead makes block boundaries caller-driven, as replication followers
-do when they step in time with a leader. External producers supply the slot and
-timestamp; the sequencer computes and overwrites the block hash and parent.
+do when they step in time with a leader. `BlockInput::Production` supplies the slot
+and timestamp; the sequencer computes the block hash and parent and signs the
+record. `BlockInput::Replay` validates the supplied hash and parent and preserves
+the signed upstream record.
 The `superblock` interval is a `u64`; zero disables periodic sealing of nonzero
 slots. Replication followers apply upstream seals independently of this interval.
 

@@ -66,18 +66,18 @@ pub enum SequencerMessage {
     Transaction(ResolvedTransaction),
     /// Finalize a boundary and acknowledge validation and application.
     Block {
-        /// AI
+        /// Block boundary to finalize.
         block: BlockInput,
-        /// AI
+        /// Optional acknowledgment after validation and application.
         tx: Option<oneshot::Sender<()>>,
     },
     /// Finalize and acknowledge a production boundary, then pause execution.
     Checkpoint {
-        /// AI
+        /// Production block boundary to finalize.
         block: Block,
-        /// AI
+        /// Optional acknowledgment after validation and application.
         tx: Option<oneshot::Sender<()>>,
-        /// AI
+        /// Pauses execution after the boundary until released.
         guard: BarrierGuard,
     },
     /// Quiesce the sequencer and all its executors until released — used to take

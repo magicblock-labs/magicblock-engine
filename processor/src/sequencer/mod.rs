@@ -274,7 +274,10 @@ impl Sequencer {
             }
             BlockInput::Replay(block) => {
                 if block.parent != self.hasher.parent || block.hash != self.hasher.finalize() {
-                    let err = format!("replayed block {} doesn't match the local", block.slot);
+                    let err = format!(
+                        "replayed block {} doesn't match the local hash chain",
+                        block.slot
+                    );
                     return Err(ProcessorError::Internal(err));
                 }
                 block
