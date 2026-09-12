@@ -15,10 +15,31 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
+      - name: Check magicblock-account version
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' solana/account/Cargo.toml)
+          echo "local version: ${version}"
+
+          http=$(curl -sS -o /tmp/crate.json -w "%{http_code}" \
+            -A "magicblock-engine (${{ github.server_url }}/${{ github.repository }})" \
+            "https://crates.io/api/v1/crates/magicblock-account")
+
+          if [ "$http" = "404" ] || { [ "$http" = "200" ] && [ "$version" \> "$(jq -r '.crate.max_version' /tmp/crate.json)" ]; }; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          elif [ "$http" = "200" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "unexpected HTTP ${http} from crates.io" >&2
+            exit 1
+          fi
+
       - name: Install Rust toolchain
+        if: steps.version.outputs.publish == 'true'
         run: rustup toolchain install
 
       - name: Publish magicblock-account
+        if: steps.version.outputs.publish == 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
