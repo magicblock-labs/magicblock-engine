@@ -3,12 +3,6 @@ name: Publish renamed Solana crates
 on:
   release:
     types: [published]
-  workflow_dispatch:
-    inputs:
-      dry_run:
-        description: Package crates without uploading to crates.io
-        type: boolean
-        default: true
 
 permissions:
   contents: read
@@ -34,8 +28,4 @@ jobs:
             -e 's|solana-account = { path = "solana/account" }|solana-account = { path = "solana/account", package = "magicblock-account" }|' \
             solana/account/Cargo.toml Cargo.toml
 
-          extra=()
-          if [ "${{ github.event_name }}" != "release" ] && [ "${{ inputs.dry_run }}" != "false" ]; then
-            extra+=(--dry-run)
-          fi
-          cargo publish --allow-dirty --package magicblock-account "${extra[@]}"
+          cargo publish --allow-dirty --package magicblock-account
