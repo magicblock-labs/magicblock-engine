@@ -28,9 +28,11 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          sed -i 's/^name = "solana-account"/name = "magicblock-account"/' solana/account/Cargo.toml
-          sed -i 's/solana-account = { path = "\."/solana-account = { package = "magicblock-account", path = "."/' solana/account/Cargo.toml
-          sed -i 's|solana-account = { path = "solana/account" }|solana-account = { path = "solana/account", package = "magicblock-account" }|' Cargo.toml
+          sed -i \
+            -e 's/^name = "solana-account"/name = "magicblock-account"/' \
+            -e 's/solana-account = { path = "\."/solana-account = { package = "magicblock-account", path = "."/' \
+            -e 's|solana-account = { path = "solana/account" }|solana-account = { path = "solana/account", package = "magicblock-account" }|' \
+            solana/account/Cargo.toml Cargo.toml
 
           extra=()
           if [ "${{ github.event_name }}" != "release" ] && [ "${{ inputs.dry_run }}" != "false" ]; then
