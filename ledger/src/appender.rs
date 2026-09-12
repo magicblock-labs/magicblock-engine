@@ -24,7 +24,7 @@ use crate::{
     metrics::{self, Operation},
     schema::{
         AccountIndex, Block, BlockstoreEntry, Event, Execution, ExecutionDetails,
-        MAX_EXECUTION_DETAILS_SIZE, SuperblockSeal, TransactionEntry, blockstore,
+        MAX_EXECUTION_DETAILS_SIZE, Reset, Signed, SuperblockSeal, TransactionEntry, blockstore,
     },
     storage::{AppendFile, Durability},
 };
@@ -36,7 +36,7 @@ pub(crate) const EXECUTIONS_DB: &str = "executions.db";
 /// Superblock metadata file name.
 pub(crate) const SUPERBLOCK_META: &str = "superblock.meta";
 /// Frequency of ledger size checks in slots.
-pub(crate) const SIZE_CHECK_FREQUENCY: u64 = 128;
+pub(crate) const SIZE_CHECK_FREQUENCY: u64 = 512;
 
 /// Background service that appends ledger events into the active superblock.
 pub(crate) struct LedgerAppender {
@@ -95,16 +95,10 @@ impl LedgerAppender {
                     appender.write_execution(execution, accounts)
                 }
                 Event::Block(block) => appender.write_block(block),
-                Event::Superblock { seal, response } => {
-                    let result = appender.seal(seal, false);
-                    acknowledge(&result, response);
-                    result
-                }
-                Event::Bootstrap(seal) => appender.seal(seal, true),
-                Event::Reset(slot) => appender.write_reset(slot),
+                Event::Superblock { seal, response } => acknowledge(appender.seal(seal), response),
+                Event::Reset(reset) => appender.write_reset(reset),
                 Event::Sync { response, is_final } => {
-                    let result = appender.sync();
-                    acknowledge(&result, response);
+                    let result = acknowledge(appender.sync(), response);
                     if is_final {
                         break result;
                     }
@@ -120,15 +114,16 @@ impl LedgerAppender {
     }
 
     /// Rotates to the next superblock directory.
-    fn rotate(&mut self, seal: SuperblockSeal) -> Result<()> {
+    fn rotate(&mut self, seal: Signed<SuperblockSeal>) -> Result<()> {
         let _timer = metrics::time(Operation::Rotate);
-        let head = seal.id + 1;
-        let meta = Superblock::open_meta(&self.ledger.directory, head)?;
+        let head = seal.payload.id + 1;
+        let mut meta = Superblock::open_meta(&self.ledger.directory, head)?;
+        // Initialize immutable predecessor metadata before publishing the successor.
+        meta.meta.checksum = seal.checksum;
+        meta.meta.transactions = seal.transactions;
+        meta.meta.signature = *seal.signature.as_array();
+        meta.meta.flush()?;
         let superblock = Superblock::open(meta, &self.ledger.index)?;
-        // Seal N opens N+1, which stores N's snapshot archive and seal metadata.
-        superblock.meta.checksum.store(seal.checksum, Release);
-        superblock.meta.transactions.store(seal.transactions, Release);
-        superblock.meta.flush()?;
         let writer = SuperblockWriter::new(superblock.clone())?;
         let keyspace = superblock.index.clone();
 
@@ -145,16 +140,6 @@ impl LedgerAppender {
         let _ = self.position.send(position);
         info!(head, "opened active superblock");
         Ok(())
-    }
-
-    /// Seals the active superblock, optionally adopting a restored snapshot's
-    /// cumulative transaction count before publishing the successor metadata.
-    fn seal(&mut self, seal: SuperblockSeal, bootstrap: bool) -> Result<()> {
-        self.write_superblock(seal)?;
-        if bootstrap {
-            self.ledger.meta.transactions.store(seal.transactions, Release);
-        }
-        self.rotate(seal)
     }
 
     /// Writes a raw transaction and keeps it pending until execution arrives.
@@ -184,9 +169,9 @@ impl LedgerAppender {
     }
 
     /// Publishes a block's data spans before queuing its atomic index commit.
-    fn write_block(&mut self, block: Block) -> Result<()> {
+    fn write_block(&mut self, block: Signed<Block>) -> Result<()> {
         let span = self.writer.write_blockstore(&BlockstoreEntry::Block(block))?;
-        self.publish(Some(block.slot), Durability::Buffer)?;
+        self.publish(Some(block.payload.slot), Durability::Buffer)?;
         self.indexer.send(IndexMessage::Block { slot: block.slot, span })?;
         if block.slot.is_multiple_of(SIZE_CHECK_FREQUENCY) && self.ledger.size_exceeded()? {
             self.sync()?;
@@ -209,20 +194,22 @@ impl LedgerAppender {
         worker.join().map_err(|_| LedgerError::TruncationPanic)?
     }
 
-    /// Writes a superblock seal and prepares files for read-only access.
-    fn write_superblock(&mut self, seal: SuperblockSeal) -> Result<()> {
+    /// Durably seals the active files and adopts the seal's authoritative count
+    /// before publishing the successor. Snapshot bootstrap uses this same path.
+    fn seal(&mut self, seal: Signed<SuperblockSeal>) -> Result<()> {
         self.writer.write_blockstore(&BlockstoreEntry::Superblock(seal))?;
         self.sync()?;
         self.writer.finalize()?;
-        info!(superblock = seal.id, "sealed superblock");
-        Ok(())
+        info!(superblock = seal.payload.id, "sealed superblock");
+        self.ledger.meta.transactions.store(seal.payload.transactions, Release);
+        self.rotate(seal)
     }
 
     /// Writes and publishes a volatile-state reset marker.
-    fn write_reset(&mut self, slot: Slot) -> Result<()> {
-        self.writer.write_blockstore(&BlockstoreEntry::Reset(slot))?;
+    fn write_reset(&mut self, reset: Signed<Reset>) -> Result<()> {
+        self.writer.write_blockstore(&BlockstoreEntry::Reset(reset))?;
         self.sync()?;
-        info!(slot, "appended volatile state reset");
+        info!(slot = **reset, "appended volatile state reset");
         Ok(())
     }
 
@@ -253,10 +240,11 @@ impl LedgerAppender {
     }
 }
 
-fn acknowledge(result: &Result<()>, response: Response<()>) {
-    if result.is_ok() {
+/// Acknowledge success or drop the sender, preserving the operation's error.
+fn acknowledge(result: Result<()>, response: Response<()>) -> Result<()> {
+    result.inspect(|()| {
         let _ = response.send(());
-    }
+    })
 }
 
 /// Published byte cursors for the active superblock data files.

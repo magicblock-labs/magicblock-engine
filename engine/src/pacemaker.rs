@@ -1,13 +1,13 @@
 //! Block-boundary pacing.
 
-use std::{num::NonZeroU64, time::Duration};
+use std::time::Duration;
 
 use derive_more::Deref;
 use ledger::schema::Block;
 use nucleus::{
     Slot,
     config::BlockstoreParams,
-    runtime,
+    runtime::{self, BlockInput},
     shutdown::{Service, ShutdownHandle, ShutdownManager, ShutdownReason},
     unix_time,
 };
@@ -25,20 +25,20 @@ pub type ExternalPacer = Receiver<ExternalBlock>;
 
 /// Emits block boundaries into engine execution paths.
 #[derive(Deref)]
-pub struct PaceMaker {
+pub(crate) struct PaceMaker {
     /// Engine handle used to submit each boundary.
     #[deref]
     engine: Engine,
     /// Source for the next block boundary.
     pacer: Pacer,
     /// Number of slots sealed into each superblock.
-    superblock: NonZeroU64,
+    superblock: u64,
     /// Completion of the last queued seal, awaited before taking its successor.
     sealed: Option<oneshot::Receiver<()>>,
 }
 
 /// Source of block boundaries.
-pub enum Pacer {
+enum Pacer {
     /// Interval-driven slot production.
     Internal(BlockTicker),
     /// Externally supplied block boundaries.
@@ -46,7 +46,7 @@ pub enum Pacer {
 }
 
 /// State for interval-driven slot production.
-pub struct BlockTicker {
+struct BlockTicker {
     /// Next slot to emit.
     slot: Slot,
     /// Block production interval.
@@ -55,7 +55,7 @@ pub struct BlockTicker {
 
 impl BlockTicker {
     /// Builds an interval ticker starting at the engine's current slot.
-    pub(crate) fn new(engine: &Engine, blocktime: Duration) -> Self {
+    fn new(engine: &Engine, blocktime: Duration) -> Self {
         let slot = engine.blocks().current_slot();
         let mut ticker = time::interval(blocktime);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -64,7 +64,7 @@ impl BlockTicker {
     }
 
     /// Returns the next block boundary and advances the slot cursor.
-    pub(crate) fn block(&mut self) -> Block {
+    fn block(&mut self) -> Block {
         let time = unix_time().as_secs() as i64;
         let block = Block::new(self.slot, time);
         self.slot += 1;
@@ -72,28 +72,19 @@ impl BlockTicker {
     }
 }
 
-/// Block boundary submitted by an external producer.
-///
-/// The caller supplies its slot and timestamp. The sequencer overwrites the
-/// hash and parent with locally computed hash-chain metadata.
+/// Externally supplied production or authenticated replay boundary.
 pub struct ExternalBlock {
     /// Boundary to enqueue.
-    pub block: Block,
-    /// Notified after the pacemaker handles the boundary locally.
-    ///
-    /// On ordinary slots this means the boundary was queued and the keeper slot
-    /// was advanced. On superblock slots it means the snapshot was taken and
-    /// its seal was queued, but the appender may still be sealing it.
+    pub block: BlockInput,
+    /// Notified by the sequencer after validation and application finish.
     pub submitted: oneshot::Sender<()>,
 }
 
 impl ExternalBlock {
-    /// Pairs a boundary with the receiver signalled once the pacemaker has locally
-    /// handled it, letting the submitter await ordered application.
-    pub fn new(block: Block) -> (Self, oneshot::Receiver<()>) {
+    /// Pairs a boundary with its sequencer completion acknowledgment.
+    pub fn new(block: BlockInput) -> (Self, oneshot::Receiver<()>) {
         let (submitted, guard) = oneshot::channel();
-        let block = Self { block, submitted };
-        (block, guard)
+        (Self { block, submitted }, guard)
     }
 }
 
@@ -103,7 +94,7 @@ impl PaceMaker {
     /// Uses an external block source when supplied. Otherwise it records one
     /// reset at the keeper's current slot, clears chain-mirrored volatile state,
     /// and starts emitting slots on the configured block interval.
-    pub fn spawn(
+    pub(crate) fn spawn(
         engine: Engine,
         pacer: Option<ExternalPacer>,
         blockstore: BlockstoreParams,
@@ -145,20 +136,17 @@ impl PaceMaker {
             let Some((block, submission)) = next else {
                 break Ok(());
             };
-            if let Err(error) = self.handle(block).await {
+            if let Err(error) = self.handle(block, submission).await {
                 break Err(error);
             }
-            if let Some(submission) = submission {
-                let _ = submission.send(());
-            }
         };
-        res = if let Pacer::Internal(ref mut t) = self.pacer {
-            // Await every shutdown step even after an earlier failure.
-            let b = t.block();
-            res.and(self.handle(b).await).and(self.shutdown(false).await)
-        } else {
-            res.and(self.shutdown(true).await)
-        };
+        let external = matches!(self.pacer, Pacer::External(_));
+        if let Pacer::Internal(ticker) = &mut self.pacer {
+            let block = ticker.block();
+            res = res.and(self.handle(BlockInput::Production(block), None).await);
+        }
+        // Flush storage even if pacing or the final block failed.
+        res = res.and(self.shutdown(external).await);
         // Release engine storage before the manager can reopen it.
         drop(self);
         if let Err(error) = res {
@@ -170,11 +158,11 @@ impl PaceMaker {
     }
 
     /// Waits for the next block boundary without applying it.
-    async fn next(&mut self) -> Option<(Block, Option<oneshot::Sender<()>>)> {
+    async fn next(&mut self) -> Option<(BlockInput, Option<oneshot::Sender<()>>)> {
         match &mut self.pacer {
             Pacer::Internal(t) => {
                 t.ticker.tick().await;
-                Some((t.block(), None))
+                Some((BlockInput::Production(t.block()), None))
             }
             Pacer::External(rx) => rx.recv().await.map(|msg| (msg.block, Some(msg.submitted))),
         }
@@ -187,20 +175,22 @@ impl PaceMaker {
     /// accountsdb export is only coherent while no store operation can race it.
     /// Once the seal is queued, appender FIFO ordering preserves the boundary
     /// while execution resumes and the durable rotation completes in parallel.
-    async fn handle(&mut self, block: Block) -> Result<()> {
+    async fn handle(&mut self, input: BlockInput, tx: Option<oneshot::Sender<()>>) -> Result<()> {
+        let block = input.payload();
         self.sequencer.simulation.send(SimulatorMessage::Block(block)).await?;
-        if !block.slot.is_multiple_of(self.superblock.get()) {
-            self.sequencer.send(SequencerMessage::Block(block)).await?;
+        if matches!(input, BlockInput::Replay(_)) || !block.slot.is_multiple_of(self.superblock) {
+            self.sequencer.send(SequencerMessage::Block { block: input, tx }).await?;
             return Ok(());
         }
 
         let (controller, guard) = runtime::barrier();
-        self.sequencer.send(SequencerMessage::Checkpoint(block, guard)).await?;
+        let msg = SequencerMessage::Checkpoint { block, tx, guard };
+        self.sequencer.send(msg).await?;
         controller.acknowledged.await?;
         if let Some(sealed) = self.sealed.take() {
             sealed.await?;
         }
-        self.sealed = Some(self.finalize_superblock()?);
+        self.sealed = Some(self.finalize_superblock(None)?);
         Ok(())
     }
 }

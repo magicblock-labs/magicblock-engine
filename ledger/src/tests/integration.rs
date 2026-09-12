@@ -22,7 +22,7 @@ use std::{
 use agave_transaction_view::transaction_view::TransactionView;
 use nucleus::{
     MB, Slot,
-    ledger::{Block, SuperblockSeal},
+    ledger::{Block, Signed, SuperblockSeal},
     shutdown::{Service, ShutdownManager},
     testkit::{TempDir, init_tracing, tempdir, transaction},
 };
@@ -95,7 +95,7 @@ async fn test_process_crash_recovers_buffered_block() {
     if let Some(directory) = env::var_os(CHILD_LEDGER) {
         let ledger = Arc::new(Ledger::new(directory.into(), u64::MAX).unwrap());
         block_of(&ledger, 1, 1);
-        append(&ledger, vec![seal(1)]);
+        append(&ledger, vec![seal(&ledger, 1)]);
         block_of(&ledger, 2, 1);
         std::process::exit(77);
     }
@@ -153,10 +153,17 @@ fn recorded(sig: Signature, payload: Arc<Vec<u8>>, slot: Slot) -> [Event; 2] {
 }
 
 /// Ends superblock `id` and rotates the writer to the next one.
-fn seal(id: u64) -> Event {
+fn seal(ledger: &Ledger, id: u64) -> Event {
     let (response, _) = oneshot::channel();
     Event::Superblock {
-        seal: SuperblockSeal { checksum: 0, id, transactions: 0 },
+        seal: Signed {
+            payload: SuperblockSeal {
+                checksum: 0,
+                id,
+                transactions: ledger.meta.transactions.load(Acquire),
+            },
+            signature: Default::default(),
+        },
         response,
     }
 }
@@ -266,7 +273,10 @@ fn block_touching(ledger: &Arc<Ledger>, slot: Slot, accounts: &[Pubkey]) -> Vec<
         events.extend(recorded(sig, payload, slot));
         signatures.push(sig);
     }
-    events.push(Event::Block(Block::new(slot, slot as i64 * 100)));
+    events.push(Event::Block(Signed {
+        payload: Block::new(slot, slot as i64 * 100),
+        signature: Default::default(),
+    }));
     append(ledger, events);
     signatures
 }
@@ -293,7 +303,10 @@ async fn test_transaction_roundtrip() {
             payload: bytes.clone(),
         }),
         executed(sig, &bytes, 5, Ok(())),
-        Event::Block(Block::new(5, 500)),
+        Event::Block(Signed {
+            payload: Block::new(5, 500),
+            signature: Default::default(),
+        }),
     ];
     append(&ledger, events);
 
@@ -372,7 +385,10 @@ async fn test_large_transaction_roundtrip() {
             signature: sig,
             payload: payload.clone(),
         }),
-        Event::Block(Block::new(1, 0)),
+        Event::Block(Signed {
+            payload: Block::new(1, 0),
+            signature: Default::default(),
+        }),
     ];
     append(&ledger, events);
 
@@ -413,7 +429,10 @@ async fn test_pending_requires_execution() {
             execution: execution(stray, 1, Ok(())),
             accounts: AccountIndex::new(&[]),
         },
-        Event::Block(Block::new(1, 0)),
+        Event::Block(Signed {
+            payload: Block::new(1, 0),
+            signature: Default::default(),
+        }),
     ];
     append(&ledger, events);
 
@@ -472,7 +491,7 @@ async fn test_superblock_rotation_and_retention() {
     let (dir, ledger) = ledger(0);
     let old = block_of(&ledger, 1, 1);
     // Seal superblock 1 and rotate to superblock 2.
-    let events = vec![seal(1)];
+    let events = vec![seal(&ledger, 1)];
     append(&ledger, events);
     assert_eq!(ledger.meta.head(), 2);
 
@@ -507,7 +526,7 @@ async fn test_superblock_rotation_and_retention() {
 async fn test_block_read_across_superblocks() {
     let (_dir, ledger) = ledger(u64::MAX);
     let first = block_of(&ledger, 1, 1);
-    let events = vec![seal(1)];
+    let events = vec![seal(&ledger, 1)];
     append(&ledger, events);
     block_of(&ledger, 2, 1);
 
@@ -529,10 +548,10 @@ async fn test_replay_streams_superblocks_through_active_head() {
     let (_dir, ledger) = ledger(u64::MAX);
     // Two sealed superblocks (slots 1 and 2), then an unsealed head (slot 3).
     block_of(&ledger, 1, 2);
-    let events = vec![seal(1)];
+    let events = vec![seal(&ledger, 1)];
     append(&ledger, events);
     block_of(&ledger, 2, 1);
-    let events = vec![seal(2)];
+    let events = vec![seal(&ledger, 2)];
     append(&ledger, events);
     block_of(&ledger, 3, 1);
 
@@ -595,7 +614,7 @@ async fn test_block_range_spans_superblocks() {
     // Slot 1 lands in superblock 1; the seal rotates slots 2 and 3 into
     // superblock 2, so any range over 1..=2 crosses the segment boundary.
     let first = block_of(&ledger, 1, 1);
-    let events = vec![seal(1)];
+    let events = vec![seal(&ledger, 1)];
     append(&ledger, events);
     let (ok, ok_bytes) = transaction(&[Pubkey::new_unique()]);
     let (failed, failed_bytes) = transaction(&[Pubkey::new_unique()]);
@@ -618,7 +637,10 @@ async fn test_block_range_spans_superblocks() {
                 signature: unindexed,
                 payload: unindexed_bytes,
             }),
-            Event::Block(Block::new(2, 200)),
+            Event::Block(Signed {
+                payload: Block::new(2, 200),
+                signature: Default::default(),
+            }),
         ],
     );
     let third = block_of(&ledger, 3, 1);
@@ -659,7 +681,7 @@ async fn test_account_signatures_history_pagination_and_ordering() {
     // Two transactions touch `account` in superblock 1, plus a third that does
     // not — the unrelated transaction must stay out of the account's history.
     let sb1 = block_touching(&ledger, 1, &[account, account, Pubkey::new_unique()]);
-    let events = vec![seal(1)];
+    let events = vec![seal(&ledger, 1)];
     append(&ledger, events);
     let sb2 = block_touching(&ledger, 2, &[account, account]);
 

@@ -22,6 +22,12 @@ published at least every time block is produced while the engine is running.
 A follower verifies responses against `Engine::authority()`, which must be
 configured with the source authority through `nucleus::config::Authority::remote`.
 
+Ingest also verifies each block, superblock seal, and reset against that authority
+before handing it to Control. Signatures cover the message kind and full payload,
+excluding the signature itself. Invalid signatures terminate replication. Snapshot
+bootstrap verifies the original seal signature before staging any data. Followers
+preserve these signatures in their own ledger instead of signing again.
+
 Every dispatcher must sign with that same canonical authority key. A follower
 whose local signer differs from `Engine::authority()` is therefore a terminal
 leaf and dispatcher startup rejects it before binding a listener. Any number of
@@ -38,7 +44,7 @@ intermediate superblocks.
 
 Before each handshake, the follower quiesces execution, flushes queued ledger
 appends, and reports the resulting cursor. A received snapshot is written to the
-successor superblock directory and its seal is appended synchronously. The
+successor superblock directory; staging waits for ordinary durable seal completion. The
 seal's cumulative transaction count replaces the follower ledger baseline,
 including when a nonempty follower falls behind retention. The client then
 reports `RestartRequired`; keeper restores the staged snapshot on the next
@@ -51,7 +57,8 @@ chain-mirrored volatile state at the same stream position while retaining
 internal system accounts.
 
 On normal follower shutdown, Control keeps consuming ordered transaction batches
-until it validates the next replicated block, then barriers execution and
+until the sequencer acknowledges the next validated and applied block, then
+barriers execution and
 flushes the cursor at that boundary before stopping Ingest. The operational
 block heartbeat supplies that boundary, reconnecting first when necessary.
 Replication failure and snapshot restart paths do not claim this guarantee.
@@ -64,8 +71,8 @@ handshakes, reconnect cursors, execution barriers, snapshot staging, transaction
 scheduling, and block pacing. These roles preserve stream order without a
 reverse control channel.
 
-A shared-key follower may also serve downstream followers. It derives and
-validates superblock seals from replicated block boundaries and archives its own
-snapshots, while downstream clients continue to verify every response against
-the original source authority. A distinct-key follower can consume the same
+A shared-key follower may also serve downstream followers. It waits for each
+upstream seal, validates its state, then persists the original seal and archives
+its own snapshot before consuming further entries. Downstream clients continue
+to verify every response against the original source authority. A distinct-key follower can consume the same
 state but cannot relay it.

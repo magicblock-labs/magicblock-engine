@@ -33,6 +33,9 @@ pub enum ReplicationError {
     /// The leader rejected the client's handshake.
     #[error("replication handshake rejected: {0}")]
     Handshake(String),
+    /// A boundary or reset was not signed by the configured upstream authority.
+    #[error("invalid {0} signature from replication upstream")]
+    InvalidSignature(&'static str),
     /// The follower identity still owns an earlier replication stream.
     #[error("replication stream already active")]
     StreamActive,
@@ -48,9 +51,6 @@ pub enum ReplicationError {
     /// A staged snapshot must be installed by restarting the engine.
     #[error("replication snapshot for superblock {0} is staged; restart required")]
     RestartRequired(u64),
-    /// The local committed-block subscription closed while validating a boundary.
-    #[error("replication block stream closed")]
-    BlockStreamClosed,
     /// The leader's durable-cursor subscription closed unexpectedly.
     #[error("replication cursor stream closed")]
     CursorStreamClosed,

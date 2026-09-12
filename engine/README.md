@@ -40,7 +40,8 @@ snapshots staged by a replication follower. Superblock lag remains recoverable
 independently of the counters.
 
 If accountsdb then trails the ledger tip, `Engine::new` replays retained entries
-from the successor of its sealed snapshot through a temporary sequencer. Replay
+from the successor of its sealed snapshot through a temporary sequencer. The
+private replay dispatcher handles every retained entry without re-appending. Replay
 quiesces at superblock seals and compares the reconstructed checksum with the
 recorded seal. A mismatch returns `ReplayError::StateMismatch`. Current state
 opens without replay when its slot and transaction count are each at least the
@@ -57,9 +58,11 @@ deduplicate replicated input without retaining historical statuses.
 Internal pacing appends one reset marker at the current slot and clears
 chain-mirrored volatile accounts before the pacemaker task starts. Internal
 system accounts remain available. Replicas use external pacing and retain
-restored volatile state. External block producers supply the slot and timestamp;
-the sequencer overwrites hash-chain metadata with its locally computed hash and
-parent.
+restored volatile state. The public pacing interface is `ExternalPacer` carrying
+`ExternalBlock` values with `BlockInput::Production` or `BlockInput::Replay`.
+The sequencer signs produced blocks and validates replayed hash-chain metadata without replacing signatures. Completion acknowledges
+validation and application. Followers apply upstream seals on arrival under an
+execution barrier; local recovery does not append records.
 
 ## Shutdown
 

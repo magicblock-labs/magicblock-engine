@@ -12,7 +12,6 @@ use std::{
     collections::HashMap,
     fs::{self, File},
     future::Future,
-    num::NonZeroU64,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -46,7 +45,7 @@ use crate::{Keeper, ResolvedTransaction, TransactionView, builder::KeeperBuilder
 /// The v42 calculator ELF, built and located by `keeper/build.rs`.
 pub const V42_PROGRAM_ELF: &[u8] = include_bytes!(env!("V42_CALCULATOR_PROGRAM_SO"));
 /// Slots sealed into each superblock by the standard test engine.
-pub const SUPERBLOCK: NonZeroU64 = NonZeroU64::new(4).unwrap();
+pub const SUPERBLOCK: u64 = 4;
 
 /// Throwaway on-disk homes for the accountsdb and ledger stores.
 ///
@@ -247,7 +246,7 @@ pub fn archived_snapshot(keeper: &Keeper) -> Option<PathBuf> {
 pub async fn seal_and_archive(keeper: &Keeper) -> PathBuf {
     seal_and_archive_with(keeper, || async {
         // The shared helper fences the queued seal after archive completion.
-        drop(keeper.finalize_superblock().expect("superblock finalizes"));
+        drop(keeper.finalize_superblock(None).expect("superblock finalizes"));
     })
     .await
 }

@@ -13,7 +13,7 @@ use derive_more::Deref;
 use fjall::Keyspace;
 use nucleus::{
     Slot,
-    ledger::BlockstorePosition,
+    ledger::{BlockstorePosition, Signed, SuperblockSeal},
     shutdown::{Service, ShutdownManager, ShutdownReason},
 };
 use parking_lot::RwLock;
@@ -310,12 +310,24 @@ impl Superblock {
 
     /// Accountsdb snapshot checksum recorded by the seal that opened this superblock.
     pub fn checksum(&self) -> u64 {
-        self.meta.checksum.load(Acquire)
+        self.meta.checksum
     }
 
     /// Transaction count recorded by the seal that opened this superblock.
     pub fn transactions(&self) -> u64 {
-        self.meta.transactions.load(Acquire)
+        self.meta.transactions
+    }
+
+    /// Original predecessor seal carried with this directory's snapshot.
+    pub fn seal(&self) -> Signed<SuperblockSeal> {
+        Signed {
+            payload: SuperblockSeal {
+                id: self.id.saturating_sub(1),
+                checksum: self.checksum(),
+                transactions: self.transactions(),
+            },
+            signature: self.meta.signature.into(),
+        }
     }
 
     /// Maps and validates a superblock's metadata before opening shared storage.

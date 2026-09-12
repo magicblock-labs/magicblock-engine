@@ -147,7 +147,8 @@ impl TestEngine {
     /// Panics if the engine is internally paced.
     pub async fn advance(&mut self, n: u64) {
         for _ in 0..n {
-            let (block, submitted) = ExternalBlock::new(block(self.slot));
+            let (block, submitted) =
+                ExternalBlock::new(nucleus::runtime::BlockInput::Production(block(self.slot)));
             self.pacer().send(block).await.unwrap();
             time::timeout(TIMEOUT, submitted)
                 .await
@@ -159,7 +160,7 @@ impl TestEngine {
 
     /// Seals the next superblock and waits for its archive and durable rotation.
     pub async fn seal_and_archive(&mut self) -> PathBuf {
-        let boundary = self.slot.next_multiple_of(SUPERBLOCK.into());
+        let boundary = self.slot.next_multiple_of(SUPERBLOCK);
         let engine = self.engine.clone();
         seal_and_archive_with(&engine, || async {
             while self.slot <= boundary {

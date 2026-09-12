@@ -6,7 +6,7 @@
 use std::{
     fs::File,
     io::{self, Cursor, Write},
-    ops::{Deref, Range},
+    ops::{Deref, DerefMut, Range},
     os::{
         fd::{AsFd, AsRawFd},
         unix::fs::FileExt,
@@ -241,6 +241,13 @@ impl<T> Deref for MetaMap<T> {
     }
 }
 
+impl<T> DerefMut for MetaMap<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: exclusive access to the mapping prevents concurrent readers.
+        unsafe { self.data.as_mut() }
+    }
+}
+
 // SAFETY: `MetaMap` owns the mapping that backs `data`; moving the wrapper
 // does not invalidate the pointer. Cross-thread access is constrained by `T`.
 unsafe impl<T: Send> Send for MetaMap<T> {}
@@ -302,9 +309,11 @@ pub(crate) struct SuperblockMeta {
     /// Slot range stored in this segment.
     pub(crate) range: BlockRange,
     /// Accountsdb snapshot checksum carried over from the seal that opened this superblock.
-    pub(crate) checksum: AtomicU64,
+    pub(crate) checksum: u64,
     /// Transaction count carried over from the seal that opened this superblock.
-    pub(crate) transactions: AtomicU64,
+    pub(crate) transactions: u64,
+    /// Producer signature of the predecessor seal, retained with its snapshot.
+    pub(crate) signature: [u8; 64],
 }
 
 impl Default for SuperblockMeta {
@@ -313,8 +322,9 @@ impl Default for SuperblockMeta {
             version: VERSION,
             cursors: Default::default(),
             range: Default::default(),
-            checksum: 0.into(),
-            transactions: 0.into(),
+            checksum: 0,
+            transactions: 0,
+            signature: [0; 64],
         }
     }
 }

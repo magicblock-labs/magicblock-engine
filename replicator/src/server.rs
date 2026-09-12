@@ -8,7 +8,6 @@ use std::{
 
 use derive_more::Deref;
 use engine::Engine;
-use ledger::schema::SuperblockSeal;
 use nucleus::{
     ledger::{ACCOUNTSDB_SNAPSHOT_FILE, BlockstorePosition},
     shutdown::{CancellationToken, Service, ShutdownHandle, ShutdownManager, ShutdownReason},
@@ -274,11 +273,7 @@ impl ReplicationServer {
             let meta = SnapshotMetadata {
                 len: archive.metadata()?.len(),
                 // Successor archives carry the predecessor seal metadata.
-                superblock: SuperblockSeal {
-                    id: superblock.id.saturating_sub(1),
-                    checksum: superblock.checksum(),
-                    transactions: superblock.transactions(),
-                },
+                superblock: superblock.seal(),
             };
             return Ok(ReplicationAction::Snapshot { archive, meta });
         }

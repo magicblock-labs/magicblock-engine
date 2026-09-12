@@ -49,7 +49,7 @@ The embedding service must retain both the engine and its `ShutdownManager`.
 The manager coordinates every background service started by `Engine::new`.
 
 ```rust
-use std::{num::NonZeroU64, path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::Duration};
 
 use engine::Engine;
 use keeper::builder::KeeperBuilder;
@@ -76,7 +76,7 @@ async fn open_engine(
         },
         blockstore: BlockstoreParams {
             blocktime: Duration::from_millis(400),
-            superblock: NonZeroU64::new(16).unwrap(),
+            superblock: 16,
         },
         builtins: Default::default(),
         programs: Default::default(),
@@ -94,6 +94,8 @@ pacer, which produces blocks on its own clock — the standalone case. Passing a
 channel instead makes block boundaries caller-driven, as replication followers
 do when they step in time with a leader. External producers supply the slot and
 timestamp; the sequencer computes and overwrites the block hash and parent.
+The `superblock` interval is a `u64`; zero disables periodic sealing of nonzero
+slots. Replication followers apply upstream seals independently of this interval.
 
 The two modes also start differently: the built-in pacer wipes chain-mirrored
 volatile accounts at startup (internal system accounts stay available), so a

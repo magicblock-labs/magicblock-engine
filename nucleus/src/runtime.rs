@@ -17,7 +17,10 @@ use solana_svm::{
 use solana_transaction_error::TransactionResult;
 use tokio::sync::mpsc::Sender;
 
-use crate::{Slot, ledger::Block};
+use crate::{
+    Slot,
+    ledger::{Block, Signed},
+};
 
 /// Sanitized transaction view backed by a shared, immutable payload buffer.
 pub type TransactionView = SanitizedTransactionView<Arc<Vec<u8>>>;
@@ -37,15 +40,46 @@ pub struct SequencerHandle {
     pub simulation: Sender<SimulatorMessage>,
 }
 
+/// Source of a block boundary, shared by pacing and sequencing.
+#[derive(Clone, Copy)]
+pub enum BlockInput {
+    /// Locally produced slot and timestamp; sequencing supplies the hash chain.
+    Production(Block),
+    /// Authenticated record whose payload must match the local hash chain.
+    Replay(Signed<Block>),
+}
+
+impl BlockInput {
+    /// Unsigned boundary used to advance execution and simulation.
+    pub fn payload(&self) -> Block {
+        match self {
+            Self::Production(block) => *block,
+            Self::Replay(block) => **block,
+        }
+    }
+}
+
 /// Work item handed to the transaction sequencer.
 #[derive(From)]
 pub enum SequencerMessage {
     /// A transaction with resolved account keys to schedule and execute.
     Transaction(ResolvedTransaction),
-    /// A block boundary to seal before scheduling further transactions.
-    Block(Block),
-    /// Finalize a block boundary, then pause before accepting subsequent work.
-    Checkpoint(Block, BarrierGuard),
+    /// Finalize a boundary and acknowledge validation and application.
+    Block {
+        /// AI
+        block: BlockInput,
+        /// AI
+        tx: Option<oneshot::Sender<()>>,
+    },
+    /// Finalize and acknowledge a production boundary, then pause execution.
+    Checkpoint {
+        /// AI
+        block: Block,
+        /// AI
+        tx: Option<oneshot::Sender<()>>,
+        /// AI
+        guard: BarrierGuard,
+    },
     /// Quiesce the sequencer and all its executors until released — used to take
     /// a consistent snapshot at superblock boundaries (see ledger replay and
     /// `finalize_superblock`).

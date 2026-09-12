@@ -266,9 +266,8 @@ impl LedgerReader {
                         }
                         if range.contains(&block.slot) {
                             let signatures = std::mem::take(&mut signatures);
-                            return Ok(tx
-                                .blocking_send(BlockHistoryEntry { block, signatures })
-                                .is_ok());
+                            let entry = BlockHistoryEntry { block: *block, signatures };
+                            return Ok(tx.blocking_send(entry).is_ok());
                         }
                         signatures.clear();
                     }
@@ -396,7 +395,7 @@ impl LedgerReader {
                 "index points to invalid block entry",
             ));
         };
-        Ok(block)
+        Ok(block.payload)
     }
 
     /// Decodes the indexed transactions preceding a block boundary.
@@ -461,7 +460,7 @@ impl LedgerReader {
         let BlockstoreEntry::Block(block) = entry else {
             return Ok(0);
         };
-        Ok(block.time)
+        Ok(block.payload.time)
     }
 
     /// Reads only the fixed execution header.

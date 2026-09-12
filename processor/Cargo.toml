@@ -16,6 +16,7 @@ name = "processor"
 accountsdb = { workspace = true }
 keeper = { workspace = true }
 nucleus = { workspace = true, features = ["runtime"] }
+oneshot = { workspace = true }
 
 ahash = { workspace = true }
 blake3 = { workspace = true }
@@ -45,7 +46,6 @@ solana-transaction-error = { workspace = true }
 keeper = { workspace = true, features = ["testkit"] }
 v42-calculator-interface = { workspace = true, features = ["builder"] }
 
-oneshot = { workspace = true }
 solana-instruction = { workspace = true }
 solana-keypair = { workspace = true }
 solana-sdk-ids = { workspace = true }
