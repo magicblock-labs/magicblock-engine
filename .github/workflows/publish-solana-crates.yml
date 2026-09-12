@@ -28,8 +28,6 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          trap 'git checkout -- Cargo.toml solana/account/Cargo.toml Cargo.lock' EXIT
-
           sed -i 's/^name = "solana-account"/name = "magicblock-account"/' solana/account/Cargo.toml
           sed -i 's/solana-account = { path = "\."/solana-account = { package = "magicblock-account", path = "."/' solana/account/Cargo.toml
           sed -i 's|solana-account = { path = "solana/account" }|solana-account = { path = "solana/account", package = "magicblock-account" }|' Cargo.toml
