@@ -3,7 +3,7 @@
 language: "en-US"
 
 reviews:
-  profile: "chill"
+  profile: "assertive"
   high_level_summary: false
   review_status: false
   review_details: false
@@ -12,6 +12,7 @@ reviews:
   changed_files_summary: false
   sequence_diagrams: false
   estimate_code_review_effort: false
+  auto_approve: false
 
   
   
