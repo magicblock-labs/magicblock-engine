@@ -1,0 +1,53 @@
+name: Publish renamed Solana crates
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish solana-account
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Check magicblock-account version
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' solana/account/Cargo.toml)
+          echo "local version: ${version}"
+
+          http=$(curl -sS -o /tmp/crate.json -w "%{http_code}" \
+            -A "magicblock-engine (${{ github.server_url }}/${{ github.repository }})" \
+            "https://crates.io/api/v1/crates/magicblock-account")
+
+          published_version=$(jq -r '.crate.max_version' /tmp/crate.json)
+          if [ "$http" = "404" ] || { [ "$http" = "200" ] && [ "$version" != "$published_version" ] && [ "$(printf '%s\n%s\n' "$published_version" "$version" | sort -V | tail -n1)" = "$version" ]; }; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          elif [ "$http" = "200" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "unexpected HTTP ${http} from crates.io" >&2
+            exit 1
+          fi
+
+      - name: Install Rust toolchain
+        if: steps.version.outputs.publish == 'true'
+        run: rustup toolchain install
+
+      - name: Publish magicblock-account
+        if: steps.version.outputs.publish == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          sed -i \
+            -e 's/^name = "solana-account"/name = "magicblock-account"/' \
+            -e 's/solana-account = { path = "\."/solana-account = { package = "magicblock-account", path = "."/' \
+            -e 's|solana-account = { path = "solana/account" }|solana-account = { path = "solana/account", package = "magicblock-account" }|' \
+            solana/account/Cargo.toml Cargo.toml
+
+          cargo publish --allow-dirty --package magicblock-account
