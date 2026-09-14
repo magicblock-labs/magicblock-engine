@@ -25,7 +25,8 @@ jobs:
             -A "magicblock-engine (${{ github.server_url }}/${{ github.repository }})" \
             "https://crates.io/api/v1/crates/magicblock-account")
 
-          if [ "$http" = "404" ] || { [ "$http" = "200" ] && [ "$version" \> "$(jq -r '.crate.max_version' /tmp/crate.json)" ]; }; then
+          published_version=$(jq -r '.crate.max_version' /tmp/crate.json)
+          if [ "$http" = "404" ] || { [ "$http" = "200" ] && [ "$version" != "$published_version" ] && [ "$(printf '%s\n%s\n' "$published_version" "$version" | sort -V | tail -n1)" = "$version" ]; }; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
           elif [ "$http" = "200" ]; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
