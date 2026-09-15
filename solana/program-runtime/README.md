@@ -18,5 +18,14 @@ Changes to `serialization`, CPI account-region replacement, or `vm` error
 mapping must remain synchronized with the transaction-context access-violation
 handler.
 
+`InvokeContext::native_invoke_magic_root` explicitly authorizes only its exact
+child instruction to enter MagicRoot. Builtins must construct or validate the
+privileged operation; this method is not for forwarding untrusted instructions.
+It reuses normal CPI preparation and execution without granting additional
+signers. A private instruction-trace index scopes authorization and is restored
+on success or error. Nested CPI, later siblings, and `PostFinalize` actions do
+not inherit it. Ordinary native calls, including provenance-attributed calls,
+do not grant MagicRoot authorization.
+
 The `frozen-abi` feature is retained as a no-op compatibility stub; this fork
 does not derive or consume frozen ABI metadata.

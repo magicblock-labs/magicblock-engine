@@ -6,10 +6,15 @@ and closing accounts. Its wire schema and program id are defined by
 
 Every invocation must use the engine `AUTHORITY` as transaction payer/signer.
 Direct transaction instructions are accepted. CPI is accepted only when the
-immediate caller is registered in the transaction program cache as a builtin;
-MagicRoot itself cannot be the caller. Native-loader account metadata alone does
-not grant access. Caller authorization and decoding complete before target-state
-authorization. The SVM's separate top-level-only privilege rule is unchanged.
+immediate caller is registered in the transaction program cache as a builtin
+and invokes through `InvokeContext::native_invoke_magic_root`; MagicRoot itself
+cannot be the caller. The authorization is private to that exact child invocation,
+not inherited by nested CPI or `PostFinalize` actions. Builtins must construct or
+validate privileged operations rather than forward arbitrary user payloads.
+Ordinary native invocation, authority sponsorship, and native-loader account
+metadata do not grant CPI access. Caller authorization and decoding complete
+before target-state authorization. The SVM's separate top-level-only privilege
+rule is unchanged.
 
 ## Instructions
 

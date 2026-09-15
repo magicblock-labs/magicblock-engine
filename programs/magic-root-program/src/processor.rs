@@ -17,12 +17,12 @@ pub(crate) fn process(ctx: &mut InvokeContext<'_, '_>) -> Result<(), Instruction
     dispatch(ctx, instruction)
 }
 
-/// Rejects recursive or non-builtin CPI callers and callers other than [`AUTHORITY`].
+/// Rejects unauthorized CPI, recursive or non-builtin callers, and non-authority payers.
 ///
 /// MagicRoot is engine-internal: it must run either at the transaction level or
-/// directly below a builtin program. The transaction must be signed by the
-/// authority in either case. Both conditions are checked before any account is
-/// touched.
+/// directly below a builtin using the explicit native MagicRoot entrypoint. The
+/// transaction must be signed by the authority in either case. These conditions
+/// are checked before any account is touched.
 ///
 /// Authorizing on account 0's key alone is sound because the engine verifies the
 /// fee-payer signature at its transaction ingress (`engine::transaction`), so a
@@ -47,6 +47,10 @@ pub(crate) fn authorize(ctx: &InvokeContext<'_, '_>) -> Result<(), InstructionEr
         if !is_builtin {
             ic_msg!(ctx, "MagicRoot: non-builtin caller {}", caller_id);
             return Err(InstructionError::CallDepth);
+        }
+        if !ctx.is_magic_root_authorized() {
+            ic_msg!(ctx, "MagicRoot: unauthorized CPI");
+            return Err(InstructionError::MissingRequiredSignature);
         }
     }
     let signer = *ctx.transaction_context.get_key_of_account_at_index(0)?;
