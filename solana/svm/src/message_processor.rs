@@ -57,6 +57,7 @@ mod tests {
         super::*,
         solana_account::{
             Account, AccountSharedData, DUMMY_INHERITABLE_ACCOUNT_FIELDS, ReadableAccount,
+            testkit::delegated_account,
         },
         solana_ed25519_program::new_ed25519_instruction_with_signature,
         solana_hash::Hash,
@@ -153,11 +154,11 @@ mod tests {
         let accounts = vec![
             (
                 writable_pubkey,
-                AccountSharedData::new(100, 1, &mock_system_program_id),
+                delegated_account(100, vec![0], mock_system_program_id).build(),
             ),
             (
                 readonly_pubkey,
-                AccountSharedData::new(0, 1, &mock_system_program_id),
+                delegated_account(0, vec![0], mock_system_program_id).build(),
             ),
             (
                 mock_system_program_id,
@@ -367,11 +368,11 @@ mod tests {
         let accounts = vec![
             (
                 solana_pubkey::new_rand(),
-                AccountSharedData::new(100, 1, &mock_program_id),
+                delegated_account(100, vec![0], mock_program_id).build(),
             ),
             (
                 solana_pubkey::new_rand(),
-                AccountSharedData::new(0, 1, &mock_program_id),
+                delegated_account(0, vec![0], mock_program_id).build(),
             ),
             (
                 mock_program_id,

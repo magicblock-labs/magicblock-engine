@@ -57,6 +57,7 @@ solana-transaction-error = { workspace = true }
 keeper = { workspace = true, features = ["testkit"] }
 nucleus = { workspace = true, features = ["testkit"] }
 
+solana-account = { workspace = true, features = ["testkit"] }
 solana-instruction = { workspace = true }
 solana-keypair = { workspace = true }
 solana-signer = { workspace = true }

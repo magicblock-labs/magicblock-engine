@@ -38,6 +38,7 @@ solana-pubkey = { workspace = true, features = ["bytemuck"] }
 accountsdb = { workspace = true, features = ["testkit"] }
 assert_matches = { workspace = true }
 nucleus = { workspace = true, features = ["testkit"] }
+solana-account = { workspace = true, features = ["testkit"] }
 
 [lints]
 workspace = true

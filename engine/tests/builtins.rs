@@ -2,7 +2,7 @@
 #![cfg(test)]
 
 use engine::testkit::TestEngine;
-use solana_account::{AccountBuilder, AccountMode, AccountSharedData, ReadableAccount};
+use solana_account::{AccountSharedData, ReadableAccount, testkit::delegated_account};
 use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
 use solana_signer::Signer;
@@ -26,10 +26,8 @@ async fn system_program_executes_transfer_allocate_and_assign() {
 
     let destination = Keypair::new();
     let destination_before = Rent::default().minimum_balance(SPACE);
-    let account: AccountSharedData = AccountBuilder::default()
-        .lamports(destination_before)
-        .mode(AccountMode::Delegated)
-        .build();
+    let account: AccountSharedData =
+        delegated_account(destination_before, vec![], program::ID).build();
     assert_eq!(account.owner(), &program::ID);
     te.accounts().store(&[(destination.pubkey(), account)]).unwrap();
 

@@ -11,6 +11,7 @@ use assert_matches::assert_matches;
 use nucleus::testkit::{TempDir, init_tracing, tempdir};
 use solana_account::{
     AccountBuilder, AccountMode, AccountSharedData, ReadableAccount, WritableAccount,
+    testkit::delegated_account,
 };
 use solana_pubkey::Pubkey;
 
@@ -25,24 +26,13 @@ fn db() -> (TempDir, AccountsDB) {
     (dir, db)
 }
 
-/// Owned mutable (persisted) account carrying `data`; its size follows the data.
-fn mutable_data(lamports: u64, data: Vec<u8>, owner: &Pubkey) -> AccountSharedData {
-    let mut a = AccountSharedData::new(lamports, data.len(), owner);
-    a.set_data_from_slice(&data);
-    transition(&mut a, AccountMode::Delegated);
-    a
-}
-
 fn transition(account: &mut AccountSharedData, mode: AccountMode) {
     account.set_lifecycle(mode, account.slot()).unwrap();
 }
 
 /// Empty mutable (persisted) account; `owner` defaults to the system program.
 fn delegated(lamports: u64) -> AccountSharedData {
-    AccountBuilder::default()
-        .lamports(lamports)
-        .mode(AccountMode::Delegated)
-        .build()
+    delegated_account(lamports, vec![], Pubkey::default()).build()
 }
 
 /// Stores one account, the shape every single-account write below takes.
@@ -132,7 +122,7 @@ fn mutable_units(lamports: u64, units: u64, owner: &Pubkey) -> AccountSharedData
 /// Builds the smallest mutable account spanning at least `units` storage units.
 fn mutable_at_least(lamports: u64, units: u64, owner: &Pubkey) -> AccountSharedData {
     (0..=units as usize * solana_account::STORAGE_UNIT)
-        .map(|len| mutable_data(lamports, vec![0; len], owner))
+        .map(|len| delegated_account(lamports, vec![0; len], *owner).build::<AccountSharedData>())
         .find(|account| u64::from(account.owned().units()) >= units)
         .unwrap()
 }
@@ -146,7 +136,7 @@ fn test_routing_and_persistence_flips() {
     let (p, q) = (Pubkey::new_unique(), Pubkey::new_unique());
     let (a, b) = (Pubkey::new_unique(), Pubkey::new_unique());
 
-    let aacc = AccountBuilder::default().lamports(10).owner(p).mode(AccountMode::Delegated);
+    let aacc = delegated_account(10, vec![], p);
     let bacc = AccountBuilder::default().lamports(20).owner(p);
     // `a` is authoritative, `b` is non-authoritative; both are owned by `p`.
     db.store(&[(a, aacc.build()), (b, bacc.build())]).unwrap();
@@ -202,7 +192,7 @@ fn test_routing_and_persistence_flips() {
 
     // reset() drops volatile mirror only; persisted state is authoritative.
     let c = Pubkey::new_unique();
-    store(&db, c, mutable_data(50, vec![], &p));
+    store(&db, c, delegated_account(50, vec![], p).build());
     db.reset();
     assert!(!in_volatile(&db, &b));
     assert!(in_persisted(&db, &c));
@@ -232,7 +222,11 @@ fn test_store_kind_migration_invariants() {
 
     {
         let db = AccountsDB::new(dir.path()).unwrap();
-        store(&db, key, mutable_data(10, data.clone(), &persisted_owner));
+        store(
+            &db,
+            key,
+            delegated_account(10, data.clone(), persisted_owner).build(),
+        );
         let base = cursor(&db);
 
         let mut account = reload(&db, &key);
@@ -247,7 +241,11 @@ fn test_store_kind_migration_invariants() {
 
         // A same-sized persisted account must reuse the span released by the
         // migration instead of extending the mmap.
-        store(&db, reuse, mutable_data(30, data.clone(), &reuse_owner));
+        store(
+            &db,
+            reuse,
+            delegated_account(30, data.clone(), reuse_owner).build(),
+        );
         assert_eq!(cursor(&db), base);
 
         db.dump(None).unwrap();
@@ -375,7 +373,11 @@ fn test_defragment_preserves_live_accounts() {
     let owner = Pubkey::new_unique();
     let keys: Vec<Pubkey> = (0..16).map(|_| Pubkey::new_unique()).collect();
     for (i, k) in keys.iter().enumerate() {
-        store(&db, *k, mutable_data(100 + i as u64, vec![], &owner));
+        store(
+            &db,
+            *k,
+            delegated_account(100 + i as u64, vec![], owner).build(),
+        );
     }
 
     // Punch alternating holes; keep the survivors for later comparison.
@@ -564,7 +566,7 @@ fn test_snapshot_export_and_volatile_restore() {
 
     let snapshot = {
         let db = AccountsDB::new(src.path()).unwrap();
-        let aacc = AccountBuilder::default().lamports(10).mode(AccountMode::Delegated);
+        let aacc = delegated_account(10, vec![], Pubkey::default());
         let bacc = AccountBuilder::default().lamports(20).mode(AccountMode::ReadOnly);
         db.store(&[(a, aacc.build()), (b, bacc.build())]).unwrap();
         // SAFETY: the test holds exclusive access to the store.
@@ -671,11 +673,11 @@ fn test_variable_sizes_and_exact_freelist() {
     // A freed large span cannot satisfy a smaller allocation: sizes differ, so
     // the small insert allocates fresh rather than reusing the hole.
     let big = Pubkey::new_unique();
-    store(&db, big, mutable_data(1, vec![0; 4096], &owner));
+    store(&db, big, delegated_account(1, vec![0; 4096], owner).build());
     close(&db, &big);
     let before = reallocs();
     let small = Pubkey::new_unique();
-    store(&db, small, mutable_data(2, vec![0; 64], &owner));
+    store(&db, small, delegated_account(2, vec![0; 64], owner).build());
     assert_eq!(reallocs(), before); // size mismatch -> no reuse
 
     // Store a spread of sizes with distinct data, punch an interior hole, then
@@ -685,7 +687,11 @@ fn test_variable_sizes_and_exact_freelist() {
     for (i, &space) in sizes.iter().enumerate() {
         let k = Pubkey::new_unique();
         let data: Vec<u8> = (0..space).map(|b| (b as u8).wrapping_add(i as u8)).collect();
-        store(&db, k, mutable_data(i as u64, data.clone(), &owner));
+        store(
+            &db,
+            k,
+            delegated_account(i as u64, data.clone(), owner).build(),
+        );
         live.push((k, data));
     }
     close(&db, &small);
@@ -736,7 +742,11 @@ fn test_large_accounts_growth_and_defrag() {
     // the expected bytes.
     let keys: Vec<Pubkey> = (0..COUNT).map(|_| Pubkey::new_unique()).collect();
     for (i, k) in keys.iter().enumerate() {
-        store(&db, *k, mutable_data(i as u64, vec![i as u8; SIZE], &owner));
+        store(
+            &db,
+            *k,
+            delegated_account(i as u64, vec![i as u8; SIZE], owner).build(),
+        );
     }
     // Crossing the initial block must have grown the file.
     assert!(resizes() > baseline);

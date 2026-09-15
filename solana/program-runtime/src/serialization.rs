@@ -551,8 +551,11 @@ mod tests {
         super::*,
         crate::with_mock_invoke_context,
         solana_account::{
-            Account, AccountSharedData, CoWAccount, ReadableAccount,
-            testkit::{active_borrowed_data, borrowed_account_buffer, borrowed_shared_data},
+            Account, AccountBuilder, AccountMode, AccountSharedData, CoWAccount, ReadableAccount,
+            testkit::{
+                active_borrowed_data, borrowed_shared_data, delegated_account,
+                serialize_account_buffer,
+            },
         },
         solana_account_info::AccountInfo,
         solana_program_entrypoint::deserialize,
@@ -1285,13 +1288,7 @@ mod tests {
             ),
             (
                 Pubkey::new_unique(),
-                AccountSharedData::from(Account {
-                    lamports: 1,
-                    data: account_data.clone(),
-                    owner: program_id,
-                    executable: false,
-                    rent_epoch: 0,
-                }),
+                delegated_account(1, account_data.clone(), program_id).build(),
             ),
         ];
         with_mock_invoke_context!(invoke_context, transaction_context, transaction_accounts);
@@ -1328,6 +1325,61 @@ mod tests {
         assert_eq!(mapped_data, account_data);
     }
 
+    /// Proves both ABIs reject serialized lamport writes after a lifecycle
+    /// transition while accepting unchanged balances and preserving writeback.
+    #[test]
+    fn deserialize_rejects_post_transition_credits() {
+        for loader in [bpf_loader::id(), bpf_loader_deprecated::id()] {
+            for (from, to) in [
+                (AccountMode::Delegated, AccountMode::Transient),
+                (AccountMode::Ephemeral, AccountMode::Closed),
+            ] {
+                let program = Pubkey::new_unique();
+                let accounts = vec![
+                    (program, AccountBuilder::default().owner(loader).build()),
+                    (
+                        Pubkey::new_unique(),
+                        AccountBuilder::default().owner(program).lamports(10).mode(from).build(),
+                    ),
+                ];
+                let mut context = TransactionContext::new(accounts, Rent::default(), 1, 1, 1);
+                context
+                    .configure_top_level_instruction_for_tests(
+                        0,
+                        vec![InstructionAccount::new(1, false, true)],
+                        vec![],
+                    )
+                    .unwrap();
+                context.push().unwrap();
+                let instruction = context.get_current_instruction_context().unwrap();
+                let (mut serialized, _regions, metadata, _) =
+                    serialize_parameters(&instruction, false).unwrap();
+                // Model a callee locking the canonical account before the caller
+                // returns. Its VM balance remains writable serialized metadata.
+                let markers = {
+                    let mut raw = context.accounts().try_borrow_mut(1).unwrap();
+                    raw.set_lifecycle(to, 0).unwrap();
+                    *raw.markers()
+                };
+                assert_eq!(
+                    deserialize_parameters(&instruction, serialized.as_slice(), &metadata),
+                    Ok(())
+                );
+                let offset = (metadata[0].vm_lamports_addr - MM_INPUT_START) as usize;
+                serialized.as_slice_mut()[offset..offset + 8]
+                    .copy_from_slice(&11_u64.to_le_bytes());
+                assert_eq!(
+                    deserialize_parameters(&instruction, serialized.as_slice(), &metadata),
+                    Err(InstructionError::Immutable)
+                );
+                let account = context.accounts().try_borrow(1).unwrap();
+                assert_eq!(account.lamports(), 10);
+                assert_eq!(*account.markers(), markers);
+                assert!(account.mutable());
+            }
+        }
+    }
+
     #[test_case(4, 8, Ok(4); "unchanged vm length restores original after transient growth")]
     #[test_case(7, 8, Ok(7); "vm length grow wins over larger transient backing")]
     #[test_case(2, 4, Ok(2); "vm length shrink truncates")]
@@ -1356,13 +1408,7 @@ mod tests {
             ),
             (
                 Pubkey::new_unique(),
-                AccountSharedData::from(Account {
-                    lamports: 1,
-                    data: vec![1, 2, 3, 4],
-                    owner: program_id,
-                    executable: false,
-                    rent_epoch: 0,
-                }),
+                delegated_account(1, vec![1, 2, 3, 4], program_id).build(),
             ),
         ];
         with_mock_invoke_context!(invoke_context, transaction_context, transaction_accounts);
@@ -1398,11 +1444,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_vas_borrowed_writable_account_store_uses_shadow_image() {
+    /// Proves VM stores use the borrowed shadow image and publish it only on commit.
+    #[test_case(false; "uncommitted stores keep the active image")]
+    #[test_case(true; "committed stores publish the shadow image")]
+    fn borrowed_vm_stores_require_commit(commit: bool) {
         let program_id = Pubkey::new_unique();
         let initial_data = vec![1, 2, 3];
-        let mut borrowed_buf = borrowed_account_buffer(initial_data.clone(), program_id);
+        let owned = delegated_account(1, initial_data.clone(), program_id).build();
+        let mut borrowed_buf = serialize_account_buffer(&owned, &Pubkey::new_unique());
         let borrowed_account = borrowed_shared_data(&mut borrowed_buf);
         let mut transaction_context = TransactionContext::new(
             vec![
@@ -1458,106 +1507,38 @@ mod tests {
         );
         assert_eq!(active_borrowed_data(&mut borrowed_buf), initial_data);
 
-        {
+        if commit {
             let account = transaction_context.accounts().try_borrow(0).unwrap();
             match account.cow() {
                 CoWAccount::Borrowed(account) => account.commit(),
                 CoWAccount::Owned(_) => panic!("borrowed account should stay borrowed"),
             }
         }
-        assert_eq!(active_borrowed_data(&mut borrowed_buf), vec![9, 2, 3]);
-    }
-
-    #[test]
-    fn test_vas_borrowed_writable_account_store_without_commit_keeps_active_image() {
-        let program_id = Pubkey::new_unique();
-        let initial_data = vec![4, 5, 6];
-        let mut borrowed_buf = borrowed_account_buffer(initial_data.clone(), program_id);
-        let borrowed_account = borrowed_shared_data(&mut borrowed_buf);
-        let mut transaction_context = TransactionContext::new(
-            vec![
-                (Pubkey::new_unique(), borrowed_account),
-                (program_id, AccountSharedData::default()),
-            ],
-            Rent::default(),
-            /* max_instruction_stack_depth */ 1,
-            /* max_instruction_trace_length */ 1,
-            /* number_of_top_level_instructions */ 1,
-        );
-        transaction_context
-            .configure_top_level_instruction_for_tests(
-                1,
-                vec![InstructionAccount::new(0, false, true)],
-                vec![],
-            )
-            .unwrap();
-        transaction_context.push().unwrap();
-        let instruction_context = transaction_context.get_current_instruction_context().unwrap();
-        let account_start_offset = MM_INPUT_START;
-        let region = create_memory_region_of_account(
-            &mut instruction_context.try_borrow_instruction_account(0).unwrap(),
-            account_start_offset,
-        )
-        .unwrap();
-        let config = Config {
-            aligned_memory_mapping: false,
-            ..Config::default()
-        };
-        let mut memory_mapping = unsafe {
-            MemoryMapping::new_with_access_violation_handler(
-                vec![region],
-                &config,
-                SBPFVersion::V3,
-                transaction_context.access_violation_handler(),
-            )
-        }
-        .unwrap();
-
-        memory_mapping.store::<u8>(7, account_start_offset).unwrap();
-
-        assert_eq!(
-            transaction_context.accounts().try_borrow(0).unwrap().data(),
-            &[7, 5, 6],
-        );
-        assert_eq!(active_borrowed_data(&mut borrowed_buf), initial_data);
+        let expected = if commit { vec![9, 2, 3] } else { initial_data };
+        assert_eq!(active_borrowed_data(&mut borrowed_buf), expected);
     }
 
     #[test]
     fn test_access_violation_handler() {
         let program_id = Pubkey::new_unique();
-        let shared_account = AccountSharedData::new(0, 4, &program_id);
+        let account =
+            |len| delegated_account(0, vec![0; len], program_id).build::<AccountSharedData>();
+        // Keep a second owner of this buffer to exercise first-write CoW.
+        let shared_account = account(4);
         let mut transaction_context = TransactionContext::new(
             vec![
+                (Pubkey::new_unique(), account(4)), // readonly instruction meta
+                (Pubkey::new_unique(), shared_account.clone()),
+                (Pubkey::new_unique(), account(0)),
                 (
                     Pubkey::new_unique(),
-                    AccountSharedData::new(0, 4, &program_id),
-                ), // readonly
-                (Pubkey::new_unique(), shared_account.clone()), // writable shared
-                (
-                    Pubkey::new_unique(),
-                    AccountSharedData::new(0, 0, &program_id),
-                ), // another writable account
-                (
-                    Pubkey::new_unique(),
-                    AccountSharedData::new(
-                        0,
-                        MAX_PERMITTED_DATA_LENGTH as usize - 0x100,
-                        &program_id,
-                    ),
-                ), // almost max sized writable account
-                (
-                    Pubkey::new_unique(),
-                    AccountSharedData::new(0, 0, &program_id),
-                ), // writable dummy to burn accounts_resize_delta
-                (
-                    Pubkey::new_unique(),
-                    AccountSharedData::new(0, 0x3000, &program_id),
-                ), // writable dummy to burn accounts_resize_delta
-                (
-                    Pubkey::new_unique(),
-                    AccountSharedData::new(0, 0, &program_id),
-                ), // writable dummy to burn accounts_resize_delta
-                (program_id, AccountSharedData::default()),     // program
+                    account(MAX_PERMITTED_DATA_LENGTH as usize - 0x100),
+                ),
+                // Writable accounts used to exhaust the transaction resize budget.
+                (Pubkey::new_unique(), account(0)),
+                (Pubkey::new_unique(), account(0x3000)),
+                (Pubkey::new_unique(), account(0)),
+                (program_id, AccountSharedData::default()),
             ],
             Rent::default(),
             /* max_instruction_stack_depth */ 1,

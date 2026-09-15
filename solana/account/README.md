@@ -8,22 +8,35 @@ field-level dirty markers.
 Equality compares core state and data bytes, ignoring storage form and dirty
 markers.
 
-`AccountMode::mutable()` identifies modes intrinsically writable by user
-programs. `AccountSharedData::mutable()` also accepts transient and closed
-accounts when its mode dirty marker records the lifecycle transition in the
-current transaction.
+The `testkit` feature exposes borrowed-buffer fixtures and
+`testkit::delegated_account(lamports, data, owner)`, which returns a customizable
+builder for an explicitly user-mutable test account.
+
+`AccountMode::mutable()` permits user mutation only in delegated and ephemeral
+modes. `AccountSharedData::mutable()` is a transaction-final acceptance check:
+it also permits transient and closed accounts whose mode changed in the current
+transaction. This allows lifecycle writeback, never another program write.
 `AccountMode::authoritative()` separately identifies delegated, ephemeral, and
 transient state that the engine owns and higher layers retain in persistent
 storage.
-`AccountSharedData::set_mode()` is the authoritative lifecycle transition
-check: read-only and placeholder accounts may enter any mode except transient,
-delegated accounts may enter transient, and transient accounts may resolve to
-read-only. Ephemeral accounts may close. Reapplying the current mode is a clean
-no-op; invalid mode and slot transitions return `AccountPatchError` with their
-source and target context without changing the account.
 
-Slot patches must advance the stored slot. An equal slot is accepted only after
-the mode genuinely changed in the same transaction.
+`AccountSharedData::set_lifecycle()` and `AccountMode::allows_transition()` share
+one mode-and-slot rule:
+
+| From | Same or newer slot | Strictly newer slot |
+| --- | --- | --- |
+| Placeholder | ReadOnly, System, Delegated, Ephemeral, Closed | Placeholder |
+| ReadOnly | Delegated, Ephemeral, Closed | ReadOnly, Placeholder |
+| System | — | System |
+| Delegated | Transient | — |
+| Ephemeral | Closed | — |
+| Transient | ReadOnly, Placeholder | Delegated |
+| Closed | — | — |
+
+Unlisted pairs and slot regressions are rejected. Authoritative accounts cannot
+be rematerialized in the same mode, even at a newer slot; ordinary transaction
+mutations are unaffected. Errors leave account state and dirty markers unchanged
+and identify the invalid mode or slot pair through `AccountPatchError`.
 
 Full-account patch sequences cover non-flag fields, establish the exact data
 length, and then write data in bounded chunks. MagicRoot finalization installs

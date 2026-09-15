@@ -53,15 +53,16 @@ through `Arc::make_mut` before mutation.
 
 `AccountMode` contains `ReadOnly`, `Placeholder`, `System`, `Delegated`,
 `Ephemeral`, `Transient`, and `Closed`. Only delegated and ephemeral accounts are
-mutable by user programs. Transient accounts remain persistent but immutable
-after the transaction that legally transitions them from delegated. The
-transaction access guard recognizes that transition through the mode dirty
-marker; a freshly loaded transient account has a clean marker and remains
-immutable. The same transaction-local exception lets a legal mode transition
-close an account. Ephemeral accounts remain persistent until then. `StateFlags`
-contains `EXECUTABLE`. Complete-account patch sequences cover non-flag fields;
-MagicRoot finalization installs the caller's complete flag value without
-changing lamports. Replacement freshness remains the caller's responsibility.
+mutable by user programs. Entering transient or closed revokes that permission
+immediately, including across CPI. Instruction setters and data mappings enforce
+the current mode. The transaction-final access guard separately accepts dirty
+mode transitions into transient or closed, allowing legitimate writeback without
+authorizing further writes. Transient state remains authoritative and persistent;
+closed state is removed by the caller's storage layer.
+
+`StateFlags` contains `EXECUTABLE`. Complete-account patch sequences cover
+non-flag fields; MagicRoot finalization installs the caller's complete flag value
+without changing lamports. Replacement freshness remains the caller's responsibility.
 `AccountSharedData` does not store `rent_epoch`; compatibility APIs return or
 ignore the masked value required by their interface.
 
