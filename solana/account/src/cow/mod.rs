@@ -143,6 +143,8 @@ impl AccountSharedData {
     ///
     /// Mutable modes are always accepted. `Transient` and `Closed` are accepted
     /// only when this transaction performed the corresponding mode transition.
+    /// This is a transaction-final writeback predicate, not permission for a new
+    /// program mutation; instruction checks must use [`AccountMode::mutable`].
     pub fn mutable(&self) -> bool {
         self.mode.mutable()
             || matches!(self.mode, AccountMode::Transient | AccountMode::Closed)
@@ -217,24 +219,18 @@ impl AccountSharedData {
 
     /// Applies mode and slot as one validated lifecycle transition.
     ///
-    /// Equal slots require a genuine mode transition. Validation precedes
-    /// translation, so an error leaves the account and dirty markers unchanged.
+    /// Mode pairs determine whether slots may stay equal or must advance.
+    /// Authoritative modes cannot be reapplied, even at a newer slot.
+    /// Validation precedes translation, so an error leaves account state and
+    /// dirty markers unchanged.
     pub fn set_lifecycle(
         &mut self,
         mode: AccountMode,
         slot: Slot,
     ) -> Result<(), AccountPatchError> {
-        let from_mode = self.mode;
-        let mode_changed = from_mode != mode;
-        if mode_changed && !from_mode.allows_transition(mode, self.slot, slot) {
-            return Err(AccountPatchError::InvalidModeTransition { from: from_mode, to: mode });
-        }
-        let from_slot = self.slot;
-        if slot < from_slot || (slot == from_slot && !mode_changed) {
-            return Err(AccountPatchError::InvalidSlotTransition { from: from_slot, to: slot });
-        }
+        self.mode.validate_transition(mode, self.slot, slot)?;
         self.translate();
-        if mode_changed {
+        if self.mode != mode {
             self.dirty.insert(DirtyMarkers::MODE);
             self.mode = mode;
         }
@@ -596,20 +592,39 @@ pub enum AccountMode {
 }
 
 impl AccountMode {
-    /// Returns whether a privileged lifecycle operation may transition from
-    /// this mode to `to`. Reapplying the same mode is not a transition.
+    /// Returns whether a privileged lifecycle operation may apply `to` at
+    /// `to_slot`, including same-mode refreshes and slot ordering.
+    ///
+    /// Only placeholder, read-only, and system accounts permit same-mode
+    /// refreshes, and those require a newer slot. Slots may never regress.
     pub fn allows_transition(self, to: Self, from_slot: Slot, to_slot: Slot) -> bool {
+        self.validate_transition(to, from_slot, to_slot).is_ok()
+    }
+
+    fn validate_transition(
+        self,
+        to: Self,
+        from_slot: Slot,
+        to_slot: Slot,
+    ) -> Result<(), AccountPatchError> {
         use AccountMode::*;
-        match (self, to) {
-            (from, to) if from == to => false,
-            (ReadOnly | Placeholder, to) => to != Transient,
-            (Transient, Delegated) => to_slot > from_slot,
-            (Delegated, Transient)
-            | (Transient, ReadOnly)
-            | (Transient, Placeholder)
-            | (Ephemeral, Closed) => true,
-            _ => false,
+        let valid_slot = match (self, to) {
+            (Placeholder, ReadOnly | System | Delegated | Ephemeral | Closed)
+            | (ReadOnly, Delegated | Ephemeral | Closed)
+            | (Delegated, Transient)
+            | (Transient, ReadOnly | Placeholder)
+            | (Ephemeral, Closed) => to_slot >= from_slot,
+            // Refreshes, observed disappearance, and redelegation need newer evidence.
+            (Placeholder, Placeholder)
+            | (ReadOnly, ReadOnly | Placeholder)
+            | (System, System)
+            | (Transient, Delegated) => to_slot > from_slot,
+            _ => return Err(AccountPatchError::InvalidModeTransition { from: self, to }),
+        };
+        if !valid_slot {
+            return Err(AccountPatchError::InvalidSlotTransition { from: from_slot, to: to_slot });
         }
+        Ok(())
     }
 
     /// Returns `true` for modes that may be mutated by user programs.

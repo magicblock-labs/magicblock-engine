@@ -1079,7 +1079,9 @@ mod tests {
             with_mock_invoke_context_with_feature_set,
         },
         assert_matches::assert_matches,
-        solana_account::{Account, AccountSharedData},
+        solana_account::{
+            Account, AccountBuilder, AccountMode, AccountSharedData, testkit::delegated_account,
+        },
         solana_program_entrypoint::MAX_PERMITTED_DATA_INCREASE,
         solana_sbpf::{
             ebpf::MM_INPUT_START, memory_region::MemoryRegion, program::SBPFVersion, vm::Config,
@@ -1238,17 +1240,9 @@ mod tests {
 
     type TestTransactionAccount = (Pubkey, AccountSharedData, bool);
 
-    fn transaction_with_one_writable_instruction_account(
-        data: Vec<u8>,
-    ) -> Vec<TestTransactionAccount> {
+    fn transaction_with_owned_account(data: Vec<u8>) -> Vec<TestTransactionAccount> {
         let program_id = Pubkey::new_unique();
-        let account = AccountSharedData::from(Account {
-            lamports: 1,
-            data,
-            owner: program_id,
-            executable: false,
-            rent_epoch: 100,
-        });
+        let account = delegated_account(1, data, program_id).build();
         vec![
             (
                 program_id,
@@ -1265,32 +1259,16 @@ mod tests {
         ]
     }
 
-    fn transaction_with_one_readonly_instruction_account(
-        data: Vec<u8>,
-    ) -> Vec<TestTransactionAccount> {
-        let program_id = Pubkey::new_unique();
-        let account_owner = Pubkey::new_unique();
-        let account = AccountSharedData::from(Account {
-            lamports: 1,
-            data,
-            owner: account_owner,
-            executable: false,
-            rent_epoch: 100,
-        });
-        vec![
-            (
-                program_id,
-                AccountSharedData::from(Account {
-                    lamports: 0,
-                    data: vec![],
-                    owner: bpf_loader::id(),
-                    executable: true,
-                    rent_epoch: 0,
-                }),
-                false,
-            ),
-            (Pubkey::new_unique(), account, true),
-        ]
+    /// Uses the same writable instruction meta but removes owner and mode permission.
+    fn transaction_with_foreign_account(data: Vec<u8>) -> Vec<TestTransactionAccount> {
+        let mut accounts = transaction_with_owned_account(data);
+        let (key, account, writable) = accounts.pop().unwrap();
+        let account = AccountBuilder::from(account)
+            .owner(Pubkey::new_unique())
+            .mode(AccountMode::Placeholder)
+            .build();
+        accounts.push((key, account, writable));
+        accounts
     }
 
     fn mock_signers(signers: &[&[u8]], vm_addr: u64) -> (Vec<u8>, MemoryRegion) {
@@ -1349,8 +1327,7 @@ mod tests {
 
     #[test]
     fn test_translate_instruction() {
-        let transaction_accounts =
-            transaction_with_one_writable_instruction_account(b"foo".to_vec());
+        let transaction_accounts = transaction_with_owned_account(b"foo".to_vec());
         mock_invoke_context!(
             invoke_context,
             transaction_context,
@@ -1398,8 +1375,7 @@ mod tests {
 
     #[test]
     fn test_translate_signers() {
-        let transaction_accounts =
-            transaction_with_one_writable_instruction_account(b"foo".to_vec());
+        let transaction_accounts = transaction_with_owned_account(b"foo".to_vec());
         mock_invoke_context!(
             invoke_context,
             transaction_context,
@@ -1436,8 +1412,7 @@ mod tests {
 
     #[test]
     fn test_get_serialized_data() {
-        let transaction_accounts =
-            transaction_with_one_writable_instruction_account(b"foo".to_vec());
+        let transaction_accounts = transaction_with_owned_account(b"foo".to_vec());
         let account = transaction_accounts[1].1.clone();
         mock_invoke_context!(
             invoke_context,
@@ -1460,7 +1435,7 @@ mod tests {
 
     #[test]
     fn test_update_caller_account_lamports_owner() {
-        let transaction_accounts = transaction_with_one_writable_instruction_account(vec![]);
+        let transaction_accounts = transaction_with_owned_account(vec![]);
         let account = transaction_accounts[1].1.clone();
         mock_invoke_context!(
             invoke_context,
@@ -1507,10 +1482,78 @@ mod tests {
         assert_eq!(caller_account.owner, callee_account.get_owner());
     }
 
+    /// Proves CPI synchronization accepts unchanged locked accounts but rejects
+    /// caller credits, and remapping revokes data writes after a mode transition.
+    #[test]
+    fn lifecycle_transition_revokes_caller_writes() {
+        for mode in [AccountMode::Transient, AccountMode::Closed] {
+            let mut transaction_accounts = transaction_with_owned_account(vec![0]);
+            if mode == AccountMode::Closed {
+                transaction_accounts[1].1 = AccountBuilder::from(transaction_accounts[1].1.clone())
+                    .mode(AccountMode::Ephemeral)
+                    .build();
+            }
+            let account = transaction_accounts[1].1.clone();
+            mock_invoke_context!(
+                invoke_context,
+                transaction_context,
+                b"",
+                transaction_accounts,
+                0,
+                &[1]
+            );
+            let mut mock =
+                MockCallerAccount::new(account.lamports(), *account.owner(), account.data());
+            let config = Config {
+                aligned_memory_mapping: false,
+                ..Config::default()
+            };
+            let mut mapping = unsafe {
+                MemoryMapping::new(mem::take(&mut mock.regions), &config, SBPFVersion::V3)
+            }
+            .unwrap();
+            let caller = mock.caller_account();
+            let instruction =
+                invoke_context.transaction_context.get_current_instruction_context().unwrap();
+
+            {
+                let mut raw =
+                    invoke_context.transaction_context.accounts().try_borrow_mut(1).unwrap();
+                let slot = raw.slot();
+                raw.set_lifecycle(mode, slot).unwrap();
+                assert!(
+                    raw.mutable(),
+                    "legal transition remains eligible for writeback"
+                );
+            }
+            assert!(
+                !update_callee_account(
+                    &caller,
+                    instruction.try_borrow_instruction_account(0).unwrap()
+                )
+                .unwrap()
+            );
+            *caller.lamports += 1;
+            let error = update_callee_account(
+                &caller,
+                instruction.try_borrow_instruction_account(0).unwrap(),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<InstructionError>(),
+                Some(&InstructionError::Immutable)
+            );
+            let mut borrowed = instruction.try_borrow_instruction_account(0).unwrap();
+            assert_eq!(borrowed.get_lamports(), account.lamports());
+            update_caller_account_region(&mut mapping, true, &caller, &mut borrowed).unwrap();
+            assert!(mapping.store::<u8>(1, caller.vm_data_addr).is_err());
+            assert_eq!(borrowed.get_data(), account.data());
+        }
+    }
+
     #[test]
     fn test_update_caller_account_data() {
-        let transaction_accounts =
-            transaction_with_one_writable_instruction_account(b"foobar".to_vec());
+        let transaction_accounts = transaction_with_owned_account(b"foobar".to_vec());
         let account = transaction_accounts[1].1.clone();
         let original_data_len = account.data().len();
 
@@ -1610,7 +1653,7 @@ mod tests {
 
     #[test]
     fn test_update_callee_account_lamports_owner() {
-        let transaction_accounts = transaction_with_one_writable_instruction_account(vec![]);
+        let transaction_accounts = transaction_with_owned_account(vec![]);
         let account = transaction_accounts[1].1.clone();
 
         mock_invoke_context!(
@@ -1640,8 +1683,7 @@ mod tests {
 
     #[test]
     fn test_update_callee_account_data_writable() {
-        let transaction_accounts =
-            transaction_with_one_writable_instruction_account(b"foobar".to_vec());
+        let transaction_accounts = transaction_with_owned_account(b"foobar".to_vec());
         let account = transaction_accounts[1].1.clone();
 
         mock_invoke_context!(
@@ -1689,8 +1731,7 @@ mod tests {
 
     #[test]
     fn test_update_callee_account_data_readonly() {
-        let transaction_accounts =
-            transaction_with_one_readonly_instruction_account(b"foobar".to_vec());
+        let transaction_accounts = transaction_with_foreign_account(b"foobar".to_vec());
         let account = transaction_accounts[1].1.clone();
 
         mock_invoke_context!(
@@ -1703,7 +1744,7 @@ mod tests {
         );
 
         let mut mock_caller_account =
-            MockCallerAccount::new(1234, *account.owner(), account.data());
+            MockCallerAccount::new(account.lamports(), *account.owner(), account.data());
         let caller_account = mock_caller_account.caller_account();
 
         // growing resize

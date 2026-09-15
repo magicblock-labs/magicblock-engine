@@ -2,7 +2,7 @@ use crate::{
     Account, AccountBuilder, AccountFieldPatch, AccountMode, AccountPatchError, AccountSeqLock,
     AccountSharedData, BorrowedAccount, CoWAccount, DirtyMarkers, OwnedAccount, ReadableAccount,
     StorageUnit, WritableAccount, accounts_equal,
-    testkit::{init_borrowed_account, serialize_account_buffer},
+    testkit::{delegated_account, init_borrowed_account, serialize_account_buffer},
 };
 use bincode::ErrorKind;
 use solana_clock::Epoch;
@@ -140,8 +140,7 @@ fn test_account_field_patch_data_at() {
 
 #[test]
 fn test_account_patch_transition_errors() {
-    let mut account = AccountBuilder::default()
-        .mode(AccountMode::Delegated)
+    let mut account = delegated_account(0, vec![], Pubkey::default())
         .slot(10)
         .build::<AccountSharedData>();
 
@@ -161,7 +160,10 @@ fn test_account_patch_transition_errors() {
             slot: 10,
         }
         .apply(&mut account),
-        Err(AccountPatchError::InvalidSlotTransition { from: 10, to: 10 })
+        Err(AccountPatchError::InvalidModeTransition {
+            from: AccountMode::Delegated,
+            to: AccountMode::Delegated,
+        })
     );
     assert_eq!(account.slot(), 10);
     assert!(account.markers().is_empty());
@@ -192,6 +194,73 @@ fn test_account_patch_transition_errors() {
         .build::<AccountSharedData>();
     ephemeral.set_lifecycle(AccountMode::Closed, 0).unwrap();
     assert!(ephemeral.is(AccountMode::Closed));
+}
+
+/// Proves every lifecycle pair enforces slot ordering identically for owned and
+/// borrowed accounts, preserving rejected state and marking only accepted changes.
+#[test]
+fn test_lifecycle_matrix() {
+    use AccountMode::*;
+
+    let modes = [Placeholder, ReadOnly, System, Delegated, Ephemeral, Transient, Closed];
+    // Columns are destinations in `modes` order.
+    // 0 forbids the pair, 1 permits equal/newer slots, 2 requires a newer slot.
+    let rules = [
+        (Placeholder, [2, 1, 1, 1, 1, 0, 1]),
+        (ReadOnly, [2, 2, 0, 1, 1, 0, 1]),
+        (System, [0, 0, 2, 0, 0, 0, 0]),
+        (Delegated, [0, 0, 0, 0, 0, 1, 0]),
+        (Ephemeral, [0, 0, 0, 0, 0, 0, 1]),
+        (Transient, [1, 1, 0, 2, 0, 0, 0]),
+        (Closed, [0, 0, 0, 0, 0, 0, 0]),
+    ];
+    let owner = Pubkey::new_unique();
+    let key = Pubkey::new_unique();
+    for (from, row) in rules {
+        for (to, rule) in modes.into_iter().zip(row) {
+            for (from_slot, to_slot) in [(10, 9), (10, 10), (10, 11), (0, 0), (0, 1)] {
+                let expected = if rule == 0 {
+                    Err(AccountPatchError::InvalidModeTransition { from, to })
+                } else if to_slot < from_slot || (rule == 2 && to_slot == from_slot) {
+                    Err(AccountPatchError::InvalidSlotTransition { from: from_slot, to: to_slot })
+                } else {
+                    Ok(())
+                };
+                assert_eq!(
+                    from.allows_transition(to, from_slot, to_slot),
+                    expected.is_ok()
+                );
+
+                let original = AccountBuilder::default()
+                    .mode(from)
+                    .slot(from_slot)
+                    .owner(owner)
+                    .lamports(5)
+                    .data(vec![1, 2, 3])
+                    .build::<OwnedAccount>();
+                let mut buffer = serialize_account_buffer(&original, &key);
+                let borrowed = AccountSharedData::from(init_borrowed_account(&mut buffer));
+                let mut state = original.clone();
+                let mut markers = DirtyMarkers::empty();
+                if expected.is_ok() {
+                    state.core.mode = to;
+                    state.core.slot = to_slot;
+                    markers.insert(DirtyMarkers::SLOT);
+                    markers.set(DirtyMarkers::MODE, from != to);
+                }
+                for mut account in [AccountSharedData::from(original), borrowed] {
+                    assert_eq!(
+                        account.set_lifecycle(to, to_slot),
+                        expected,
+                        "{from:?}@{from_slot} -> {to:?}@{to_slot}"
+                    );
+                    assert_eq!(*account.markers(), markers);
+                    // Equality covers the complete core and data, independently of storage.
+                    assert!(account == state, "{from:?}@{from_slot} -> {to:?}@{to_slot}");
+                }
+            }
+        }
+    }
 }
 
 #[test]

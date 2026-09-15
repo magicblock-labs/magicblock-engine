@@ -11,7 +11,7 @@ use keeper::testkit::{
     V42_ID, load_v42_data, load_v42_lamports, patterned_bytes, store_v42, v42_builder,
 };
 use magic_root_interface::MagicRootInstruction;
-use solana_account::{AccountBuilder, AccountMode, OwnedAccount, ReadableAccount};
+use solana_account::{AccountBuilder, AccountMode, ReadableAccount, testkit::delegated_account};
 use solana_instruction_error::InstructionError;
 use solana_pubkey::Pubkey;
 use solana_system_interface::MAX_PERMITTED_DATA_LENGTH;
@@ -25,18 +25,17 @@ const LAMPORTS: u64 = 2_000_000;
 const SLOT: u64 = 42;
 
 /// Account with explicit lifecycle state, funded at the shared rent-exempt balance.
-fn account(owner: Pubkey, data: Vec<u8>, mode: AccountMode, slot: u64) -> OwnedAccount {
+fn account(owner: Pubkey, data: Vec<u8>, mode: AccountMode, slot: u64) -> AccountBuilder {
     AccountBuilder::default()
         .lamports(LAMPORTS)
         .owner(owner)
         .mode(mode)
         .slot(slot)
         .data(data)
-        .build()
 }
 
 /// Delegated account with `data` at `slot`.
-fn delegated(owner: Pubkey, data: Vec<u8>, slot: u64) -> OwnedAccount {
+fn delegated(owner: Pubkey, data: Vec<u8>, slot: u64) -> AccountBuilder {
     account(owner, data, AccountMode::Delegated, slot)
 }
 
@@ -193,12 +192,12 @@ async fn account_materialization_accepts_max_data_with_post_finalize() {
     let source = store_v42(&te, 7, AccountMode::Delegated);
     let output = store_v42(&te, 0, AccountMode::Ephemeral);
     let data = patterned_bytes(MAX_PERMITTED_DATA_LENGTH as usize, 42);
-    let account = AccountBuilder::default()
-        .lamports(Rent::default().minimum_balance(data.len()))
-        .owner(Pubkey::new_unique())
-        .mode(AccountMode::Delegated)
-        .slot(SLOT)
-        .data(data.clone());
+    let account = delegated_account(
+        Rent::default().minimum_balance(data.len()),
+        data.clone(),
+        Pubkey::new_unique(),
+    )
+    .slot(SLOT);
     let action = transfer(source, output, 1);
 
     let post = PostFinalize {
@@ -218,12 +217,12 @@ async fn account_materialization_accepts_max_data_with_post_finalize() {
     assert_eq!(load_v42_data(&te, output), Some(1));
 
     let failed_key = Pubkey::new_unique();
-    let failed_account = AccountBuilder::default()
-        .lamports(Rent::default().minimum_balance(data.len()))
-        .owner(Pubkey::new_unique())
-        .mode(AccountMode::Delegated)
-        .slot(SLOT)
-        .data(data);
+    let failed_account = delegated_account(
+        Rent::default().minimum_balance(data.len()),
+        data,
+        Pubkey::new_unique(),
+    )
+    .slot(SLOT);
     let excessive_cpis = (1..CPI_CALLS)
         .fold(E::lit(1).cpi(), |expr, _| expr + E::lit(1).cpi())
         .compose(output, &[]);
@@ -330,9 +329,8 @@ async fn account_program_cache_tracks_v42_lifecycle() {
     te.close().await;
 }
 
-// Complete replacements are monotonic by slot. An equal-slot replacement is
-// meaningful only when it performs a real lifecycle transition; mode is patched
-// before slot, and no-op mode writes deliberately leave the mode marker clean.
+// Complete replacements obey the lifecycle pair's slot rule; authoritative
+// state cannot be replaced in the same mode even with a newer slot.
 #[tokio::test(flavor = "multi_thread")]
 async fn account_replacement_slot_ordering() {
     let te = TestEngine::new().await;
@@ -356,21 +354,27 @@ async fn account_replacement_slot_ordering() {
         assert_eq!(updated.data(), &[2]);
     }
 
-    for (from, to) in [
-        (AccountMode::Placeholder, AccountMode::Transient),
-        (AccountMode::Ephemeral, AccountMode::Delegated),
-        (AccountMode::System, AccountMode::ReadOnly),
+    for (from, to, slot) in [
+        (AccountMode::Placeholder, AccountMode::Transient, SLOT),
+        (AccountMode::Ephemeral, AccountMode::Delegated, SLOT),
+        (AccountMode::System, AccountMode::ReadOnly, SLOT),
+        (AccountMode::Delegated, AccountMode::Delegated, SLOT + 1),
+        (AccountMode::Ephemeral, AccountMode::Ephemeral, SLOT + 1),
+        (AccountMode::Transient, AccountMode::Transient, SLOT + 1),
     ] {
         let key = Pubkey::new_unique();
         // Seed the source directly so only the mode-transition invariant is
         // under test.
         te.accounts()
-            .store(&[(key, account(owner, vec![1], from, SLOT).into())])
+            .store(&[(key, account(owner, vec![1], from, SLOT).build())])
             .unwrap();
         let error = te
             .account(key)
             .await
-            .materialize(account(owner, vec![2], to, SLOT), None)
+            .materialize(
+                account(owner, vec![2], to, slot).lamports(LAMPORTS + 1),
+                None,
+            )
             .await
             .expect_err("invalid mode transition is rejected");
         assert_invalid_lifecycle(error);
@@ -379,6 +383,8 @@ async fn account_replacement_slot_ordering() {
         assert!(unchanged.is(from), "{from:?} does not transition to {to:?}");
         assert_eq!(unchanged.slot(), SLOT);
         assert_eq!(unchanged.data(), &[1]);
+        // The lamport patch precedes lifecycle validation; failure must roll it back.
+        assert_eq!(unchanged.lamports(), LAMPORTS);
     }
 
     let key = Pubkey::new_unique();

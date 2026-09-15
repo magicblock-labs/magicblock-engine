@@ -145,7 +145,10 @@ fn with_cpi(writable: bool, run: impl FnOnce(&mut InvokeContext<'_, '_>, Pubkey)
     let mut accounts = vec![
         (
             authority,
-            AccountSharedData::new(10_000_000, 0, &Pubkey::default()),
+            AccountBuilder::default()
+                .lamports(10_000_000)
+                .mode(AccountMode::Ephemeral)
+                .build(),
         ),
         (target, AccountSharedData::default()),
     ];

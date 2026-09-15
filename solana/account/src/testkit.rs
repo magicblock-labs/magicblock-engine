@@ -2,12 +2,24 @@
 
 use {
     crate::{
-        AccountBuilder, AccountSharedData, BorrowedAccount, OwnedAccount, ReadableAccount,
-        StorageUnit,
+        AccountBuilder, AccountMode, AccountSharedData, BorrowedAccount, OwnedAccount,
+        ReadableAccount, StorageUnit,
     },
     solana_pubkey::Pubkey,
     std::ptr::NonNull,
 };
+
+/// Starts a user-mutable test account with explicit balance, data, and owner.
+///
+/// The mode is delegated; all other fields retain builder defaults. Callers can
+/// customize the returned builder and build either owned or shared account data.
+pub fn delegated_account(lamports: u64, data: Vec<u8>, owner: Pubkey) -> AccountBuilder {
+    AccountBuilder::default()
+        .lamports(lamports)
+        .data(data)
+        .owner(owner)
+        .mode(AccountMode::Delegated)
+}
 
 /// Builds a borrowed account image backed by serialized owned state.
 pub fn borrowed_account_buffer(data: Vec<u8>, owner: Pubkey) -> Vec<StorageUnit> {

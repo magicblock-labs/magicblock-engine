@@ -5,7 +5,7 @@ use std::fs;
 use accountsdb::AccountEntry;
 use ledger::schema::Signed;
 use nucleus::testkit::{V42_ID, block, signed_view};
-use solana_account::{AccountBuilder, AccountMode, ReadableAccount};
+use solana_account::{ReadableAccount, testkit::delegated_account};
 use solana_instruction::Instruction;
 use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
@@ -215,6 +215,6 @@ async fn restores_blockhash_history_from_ledger_and_snapshot() {
 /// Stores the recovery marker account at `lamports`, the value each snapshot
 /// captures and recovery must bring back.
 fn store_marker(keeper: &TestKeeper, marker: Pubkey, lamports: u64) {
-    let account = AccountBuilder::default().lamports(lamports).mode(AccountMode::Delegated);
+    let account = delegated_account(lamports, vec![], Pubkey::default());
     keeper.accounts().store(&[(marker, account.build())]).unwrap();
 }

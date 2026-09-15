@@ -1111,7 +1111,7 @@ mod tests {
         super::*,
         crate::execution_budget::DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT,
         serde::{Deserialize, Serialize},
-        solana_account::WritableAccount,
+        solana_account::{WritableAccount, testkit::delegated_account},
         solana_instruction::Instruction,
         solana_keypair::Keypair,
         solana_rent::Rent,
@@ -1384,8 +1384,8 @@ mod tests {
         expected_result: Result<(), InstructionError>,
     ) {
         let callee_program_id = solana_pubkey::new_rand();
-        let owned_account = AccountSharedData::new(42, 1, &callee_program_id);
-        let not_owned_account = AccountSharedData::new(84, 1, &solana_pubkey::new_rand());
+        let owned_account = delegated_account(42, vec![0], callee_program_id).build();
+        let not_owned_account = delegated_account(84, vec![0], solana_pubkey::new_rand()).build();
         let readonly_account = AccountSharedData::new(168, 1, &solana_pubkey::new_rand());
         let loader_account = AccountSharedData::new(0, 1, &native_loader::id());
         let mut program_account = AccountSharedData::new(1, 1, &native_loader::id());
@@ -1540,7 +1540,7 @@ mod tests {
         let program_key = Pubkey::new_unique();
         let user_account_data_len = 123u64;
         let user_account =
-            AccountSharedData::new(100, user_account_data_len as usize, &program_key);
+            delegated_account(100, vec![0; user_account_data_len as usize], program_key).build();
         let dummy_account = AccountSharedData::new(10, 0, &program_key);
         let mut program_account = AccountSharedData::new(500, 500, &native_loader::id());
         program_account.set_executable(true);

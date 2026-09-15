@@ -55,7 +55,12 @@ impl InstructionAccount {
     }
 }
 
-/// Shared account borrowed from the TransactionContext and an InstructionContext.
+/// Account borrowed for the current instruction, with program mutation checks.
+///
+/// Changes require instruction writability, the relevant ownership permissions,
+/// and a currently mutable account mode. Lifecycle dirty markers allow later
+/// writeback, not additional program writes. Scalar setters preserve no-op values
+/// after their Solana checks pass, without touching the account or its accounting.
 #[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
 #[derive(Debug)]
 pub struct BorrowedInstructionAccount<'a, 'ix_data> {
@@ -87,17 +92,14 @@ impl BorrowedInstructionAccount<'_, '_> {
         self.account.owner()
     }
 
-    /// Assignes the owner of this account (transaction wide)
+    /// Assigns a new owner to a writable, mutable account owned by this program.
+    ///
+    /// Data must be empty or zeroed. An unchanged owner skips the mode check only
+    /// after ownership, instruction writability, and data checks have passed.
     pub fn set_owner(&mut self, pubkey: &[u8]) -> Result<(), InstructionError> {
-        // Only the owner can assign a new owner
-        if !self.is_owned_by_current_program() {
+        if !self.is_owned_by_current_program() || !self.is_writable() {
             return Err(InstructionError::ModifiedProgramId);
         }
-        // and only if the account is writable
-        if !self.is_writable() {
-            return Err(InstructionError::ModifiedProgramId);
-        }
-        // and only if the data is zero-initialized or empty
         if !is_zeroed(self.get_data()) {
             return Err(InstructionError::ModifiedProgramId);
         }
@@ -105,6 +107,7 @@ impl BorrowedInstructionAccount<'_, '_> {
         if self.get_owner().to_bytes() == pubkey {
             return Ok(());
         }
+        self.check_mutable()?;
         self.touch()?;
         self.account.copy_into_owner_from_slice(pubkey);
         Ok(())
@@ -116,10 +119,15 @@ impl BorrowedInstructionAccount<'_, '_> {
         self.account.lamports()
     }
 
-    /// Overwrites the number of lamports of this account (transaction wide)
+    /// Replaces the balance and records its delta for instruction balance checks.
+    ///
+    /// Debits require ownership; any change requires instruction writability and
+    /// a mutable mode. An unchanged balance skips the mode check and accounting,
+    /// so CPI synchronization can preserve a legally locked account.
     pub fn set_lamports(&mut self, lamports: u64) -> Result<(), InstructionError> {
+        let old_lamports = self.get_lamports();
         // An account not owned by the program cannot have its balance decrease
-        if !self.is_owned_by_current_program() && lamports < self.get_lamports() {
+        if !self.is_owned_by_current_program() && lamports < old_lamports {
             return Err(InstructionError::ExternalAccountLamportSpend);
         }
         // The balance of read-only may not change
@@ -127,13 +135,14 @@ impl BorrowedInstructionAccount<'_, '_> {
             return Err(InstructionError::ReadonlyLamportChange);
         }
         // don't touch the account if the lamports do not change
-        let old_lamports = self.get_lamports();
         if old_lamports == lamports {
             return Ok(());
         }
+        self.check_mutable()?;
 
-        let lamports_balance = (lamports as i128).saturating_sub(old_lamports as i128);
-        self.transaction_context.accounts.add_lamports_delta(lamports_balance)?;
+        // The difference between two u64 balances always fits in i128.
+        let delta = i128::from(lamports) - i128::from(old_lamports);
+        self.transaction_context.accounts.add_lamports_delta(delta)?;
 
         self.touch()?;
         self.account.set_lamports(lamports);
@@ -272,7 +281,10 @@ impl BorrowedInstructionAccount<'_, '_> {
         self.account.executable()
     }
 
-    /// Configures whether this account is executable (transaction wide)
+    /// Changes the executable flag on a rent-exempt account owned by this program.
+    ///
+    /// Instruction writability is required even for an unchanged value; mode
+    /// permission and dirty accounting apply only when the flag changes.
     pub fn set_executable(&mut self, is_executable: bool) -> Result<(), InstructionError> {
         // To become executable an account must be rent exempt
         if !self
@@ -282,12 +294,7 @@ impl BorrowedInstructionAccount<'_, '_> {
         {
             return Err(InstructionError::ExecutableAccountNotRentExempt);
         }
-        // Only the owner can set the executable flag
-        if !self.is_owned_by_current_program() {
-            return Err(InstructionError::ExecutableModified);
-        }
-        // and only if the account is writable
-        if !self.is_writable() {
+        if !self.is_owned_by_current_program() || !self.is_writable() {
             return Err(InstructionError::ExecutableModified);
         }
         // don't touch the account if the executable flag does not change
@@ -295,6 +302,7 @@ impl BorrowedInstructionAccount<'_, '_> {
         if self.is_executable() == is_executable {
             return Ok(());
         }
+        self.check_mutable()?;
         self.touch()?;
         self.account.set_executable(is_executable);
         Ok(())
@@ -311,7 +319,7 @@ impl BorrowedInstructionAccount<'_, '_> {
         self.instruction_account.is_signer()
     }
 
-    /// Returns whether this account is writable (instruction wide)
+    /// Returns the instruction's writable flag, independently of mode and owner.
     pub fn is_writable(&self) -> bool {
         self.instruction_account.is_writable()
     }
@@ -324,7 +332,10 @@ impl BorrowedInstructionAccount<'_, '_> {
             .unwrap_or_default()
     }
 
-    /// Returns an error if the account data can not be mutated by the current program
+    /// Checks instruction writability, ownership, and mode before data mutation.
+    ///
+    /// Setters and VM mappings share this check, including when rebuilding the
+    /// caller's data regions after CPI changes an account's owner or mode.
     pub fn can_data_be_changed(&self) -> Result<(), InstructionError> {
         // and only if the account is writable
         if !self.is_writable() {
@@ -334,7 +345,16 @@ impl BorrowedInstructionAccount<'_, '_> {
         if !self.is_owned_by_current_program() {
             return Err(InstructionError::ExternalAccountDataModified);
         }
-        Ok(())
+        self.check_mutable()
+    }
+
+    /// Requires a currently mutable mode, regardless of transaction dirty markers.
+    fn check_mutable(&self) -> Result<(), InstructionError> {
+        if self.account.mode().mutable() {
+            Ok(())
+        } else {
+            Err(InstructionError::Immutable)
+        }
     }
 
     /// Returns an error if the account data can not be resized to the given length
@@ -377,5 +397,90 @@ fn is_zeroed(buf: &[u8]) -> bool {
     {
         chunks.all(|chunk| chunk == &ZEROS[..])
             && chunks.remainder() == &ZEROS[..chunks.remainder().len()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solana_account::{AccountBuilder, AccountMode, AccountSharedData, DirtyMarkers};
+    use solana_rent::Rent;
+
+    /// Proves scalar and data mutations reject immutable modes without changing
+    /// state or lamport deltas, while no-ops preserve legal lifecycle markers.
+    #[test]
+    fn immutable_modes_reject_mutations() {
+        use AccountMode::*;
+        for mode in [Placeholder, ReadOnly, System, Transient, Closed] {
+            let owner = Pubkey::new_unique();
+            let initial = match mode {
+                Transient => Delegated,
+                Closed => Ephemeral,
+                _ => mode,
+            };
+            let mut account = AccountBuilder::default()
+                .mode(initial)
+                .owner(owner)
+                .lamports(Rent::default().minimum_balance(0))
+                .build::<AccountSharedData>();
+            if initial != mode {
+                account.set_lifecycle(mode, account.slot()).unwrap();
+                assert!(account.markers().contains(DirtyMarkers::MODE));
+                assert!(account.mutable(), "the transition still permits writeback");
+            }
+            let before = account.clone();
+            let mut context = TransactionContext::new(
+                vec![(owner, AccountSharedData::default()), (Pubkey::new_unique(), account)],
+                Rent::default(),
+                1,
+                1,
+                1,
+            );
+            context
+                .configure_top_level_instruction_for_tests(
+                    0,
+                    vec![InstructionAccount::new(1, false, true)],
+                    vec![],
+                )
+                .unwrap();
+            context.push().unwrap();
+            let instruction = context.get_current_instruction_context().unwrap();
+            let mut account = instruction.try_borrow_instruction_account(0).unwrap();
+            let balance = account.get_lamports();
+            assert_eq!(account.set_lamports(balance), Ok(()));
+            assert_eq!(account.set_owner(owner.as_ref()), Ok(()));
+            assert_eq!(account.set_executable(false), Ok(()));
+            assert_eq!(
+                account.set_lamports(balance + 1),
+                Err(InstructionError::Immutable)
+            );
+            assert_eq!(
+                account.set_lamports(balance - 1),
+                Err(InstructionError::Immutable)
+            );
+            assert_eq!(
+                account.set_owner(Pubkey::new_unique().as_ref()),
+                Err(InstructionError::Immutable)
+            );
+            assert_eq!(
+                account.set_executable(true),
+                Err(InstructionError::Immutable)
+            );
+            assert_eq!(account.get_data_mut(), Err(InstructionError::Immutable));
+            assert_eq!(
+                account.set_data_from_slice(&[1]),
+                Err(InstructionError::Immutable)
+            );
+            assert_eq!(account.set_data_length(1), Err(InstructionError::Immutable));
+            assert_eq!(
+                account.extend_from_slice(&[1]),
+                Err(InstructionError::Immutable)
+            );
+            assert_eq!(**account.account, before, "{mode:?}");
+            assert_eq!(account.account.markers(), before.markers());
+            assert_eq!(context.accounts.get_lamports_delta(), 0);
+            drop(account);
+            context.pop().unwrap();
+        }
     }
 }

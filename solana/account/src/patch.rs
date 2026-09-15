@@ -18,7 +18,7 @@ pub enum AccountPatchError {
         /// Requested account mode.
         to: AccountMode,
     },
-    /// The requested slot neither advances nor accompanies a mode transition.
+    /// The requested slot regresses or fails the mode pair's advancement requirement.
     #[error("invalid account slot transition: {from} -> {to}")]
     InvalidSlotTransition {
         /// Current account slot.
