@@ -13,8 +13,8 @@ invokes each action.
 `MagicRootInstruction::compose_account` builds the ordered patch sequence for a
 complete account's non-flag fields and appends a finalization instruction that
 installs its complete flag value without changing lamports. The underlying
-patch sequence applies mode before slot so the program can validate
-lifecycle-aware slot progression. Callers are responsible for composing current
-account state. Internal create composition appends `PostFinalize` immediately
+patch sequence validates mode and slot together through one lifecycle patch.
+Callers are responsible for composing current account state under the
+[lifecycle rules](../../solana/account/README.md). Engine materialization appends `PostFinalize` immediately
 after finalization; MagicRoot relies on this ordering after authenticating the
 engine authority and caller.

@@ -18,17 +18,46 @@ Retained local-ledger replay has a separate private verification bypass.
 
 ## Account replacement
 
-`AccountAccessor::{create, update}` composes complete-account MagicRoot patch
-transactions. Replacement slots are monotonic: a newer slot is accepted, an
-equal slot requires a genuine account-mode transition, and an older slot is
-rejected even when the mode changes. Failed replacements are transactionally
-rolled back. Complete-account patch sequences cover non-flag fields, while
-finalization atomically installs the caller-supplied complete flag value without
-changing lamports. Callers are responsible for supplying current state; later
-replacements remain subject to the account's slot and lifecycle rules. `create`
-appends any `PostFinalize` actions immediately after finalization in the same
-transaction. Magicblock construction rejects instruction, address, account-meta,
-and instruction-data lengths that cannot be represented by the V1 wire fields.
+`Engine::account(pubkey).await` acquires an exclusive materialization lease.
+`AccountAccessor::materialize` composes complete-account MagicRoot patches,
+finalization, and optional `PostFinalize` actions in one transaction. Patches
+cover non-flag fields; finalization installs the complete caller-supplied flags
+without changing lamports. Actions immediately follow finalization. Accepted
+mode/slot combinations follow the [account lifecycle table](../solana/account/README.md).
+A newer slot alone does not permit replacement of authoritative state.
+
+### Confirmed redelegation
+
+Use that same operation for direct `Transient(S) -> Delegated(T)`, with `T > S`.
+Equal-slot and stale input are rejected. Once delegated, the account cannot be
+rematerialized as delegated at any slot, preventing duplicate activation actions
+through this operation. Do not synthesize an intermediate `ReadOnly` update.
+
+Chainlink, not Engine, establishes that the previous delegation ended. Before
+replacement it must obtain a coherent confirmed account/delegation-record pair,
+verify delegation to this engine's authority, and establish that the record's
+`delegation_slot > S`. A newer observation slot alone is insufficient. Actions
+and their `PostFinalize::source_program` must come from that verified record.
+After acquiring the accessor, reread local state and reconcile the request before
+materializing; a waiting caller cannot assume its original classification still
+applies. The lease serializes accessor operations, not ordinary transactions;
+execution validates the lifecycle against the account state it actually loads.
+
+The confirmed image at `S` precedes the subsequent on-chain undelegation and
+redelegation, so that new delegation necessarily occurs after `S`. Under this
+caller contract, equal-slot reactivation is invalid input, not a missing feature.
+Engine neither verifies chain confirmation nor classifies delegation generations.
+
+A definitive execution failure rolls back replacement and action account changes,
+preserving the transient image. The accessor retains its lease for a serialized
+retry. A submission timeout does not cancel execution or prove rollback; the
+caller must reconcile the outcome before deciding on recovery. Chainlink must
+retain undelegation tracking until materialization succeeds or retry ownership
+is retained; its recovery implementation is tracked in
+[MBV #1671](https://github.com/magicblock-labs/magicblock-validator/issues/1671).
+
+Magicblock construction rejects instruction, address, account-meta, and
+instruction-data lengths that cannot be represented by the V1 wire fields.
 
 ## Startup and recovery
 

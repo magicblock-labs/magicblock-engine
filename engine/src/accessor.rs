@@ -52,6 +52,15 @@ impl AccountAccessor<'_> {
     ///
     /// Callers supplying `post_finalize` must verify its trusted provenance as
     /// required by [`PostFinalize`] before invoking this method.
+    /// Confirmed redelegation replaces `Transient` directly with `Delegated`
+    /// at a strictly newer remote slot. The caller must establish a new
+    /// delegation generation, not merely a newer observation of the old one,
+    /// and recheck local state through [`Self::read`] after acquiring this accessor.
+    /// See the crate's account replacement contract for caller evidence.
+    ///
+    /// Patches, finalization, and actions share one transaction; an execution
+    /// failure rolls back their account changes. A timeout does not cancel a
+    /// submitted transaction and must not be treated as proof of rollback.
     /// The accessor retains mutation ownership after both success and failure,
     /// and may be reused before it is dropped.
     pub async fn materialize(

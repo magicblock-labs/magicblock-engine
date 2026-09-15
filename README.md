@@ -205,9 +205,9 @@ copy from the other backend, so there is only ever one live copy. `Transient`
 accounts remain authoritative and persisted even though runtime code cannot
 mutate them.
 
-To replace accounts directly, use `Engine::account(pubkey)`. `create`, `update`,
-and `delete` each run as one signed, committed transaction and require the local
-signer to match the engine authority.
+To replace accounts directly, acquire `Engine::account(pubkey).await`.
+`materialize` and `delete` each run as one signed, committed transaction and
+require the local signer to match the engine authority.
 
 ```rust
 use solana_account::{AccountBuilder, AccountMode};
@@ -223,7 +223,7 @@ let account = AccountBuilder::default()
     .data(vec![1, 2, 3, 4])
     .build();
 
-engine.account(key).create(account, None).await?;
+engine.account(key).await.materialize(account, None).await?;
 
 let replacement = AccountBuilder::default()
     .lamports(2_000_000)
@@ -232,18 +232,21 @@ let replacement = AccountBuilder::default()
     .slot(2)
     .data(vec![5; 4])
     .build();
-engine.account(key).update(replacement).await?;
-engine.account(key).delete().await?;
+engine.account(key).await.materialize(replacement, None).await?;
+engine.account(key).await.delete().await?;
 ```
 
-Each mutation is one committed transaction. `create` can also run optional
+Each mutation is one committed transaction. `materialize` can also run optional
 post-finalize instructions in that transaction; if an instruction fails, the
-creation does not commit. Complete-account patches cover non-flag fields, and
+replacement and action account changes roll back. A submission timeout does not
+cancel execution or prove rollback. Complete-account patches cover non-flag fields, and
 finalization atomically installs the caller-supplied flags without changing
 lamports. Callers are responsible for supplying current state; later
-replacements remain subject to the account's slot and lifecycle rules. Internal
-create composition places post-finalize instructions immediately after
-finalization.
+replacements remain subject to the account's slot and lifecycle rules.
+Materialization places post-finalize instructions immediately after finalization.
+Confirmed redelegation uses this same atomic operation, directly replacing
+`Transient` with `Delegated` at a newer remote slot; Chainlink must establish the
+new delegation. See the [replacement contract](engine/README.md#account-replacement).
 
 Missing external accounts can be coordinated with `Engine::accounts().ensure`.
 The first caller receives `MissingAccount::Load`; concurrent callers receive a
