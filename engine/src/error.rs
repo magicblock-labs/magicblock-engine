@@ -8,7 +8,7 @@ use nucleus::shutdown::Service;
 use processor::ProcessorError;
 use solana_message::CompileError;
 use solana_transaction::{InstructionError, SignerError, TransactionError};
-use tokio::sync::mpsc::error::SendError;
+use tokio::{sync::mpsc::error::SendError, task::JoinError};
 
 /// Result type used by engine APIs.
 pub type Result<T> = std::result::Result<T, EngineError>;
@@ -22,6 +22,9 @@ pub enum EngineError {
     /// Scheduling or executing a transaction failed.
     #[error("processor error: {0}")]
     Processor(#[source] ProcessorError),
+    /// An account completion task panicked or was cancelled, not proof of rollback.
+    #[error("account completion task failed: {0}")]
+    Task(#[source] JoinError),
     /// Replaying the ledger into volatile state on startup failed.
     #[error("replay error: {0}")]
     Replay(#[source] ReplayError),
@@ -31,9 +34,6 @@ pub enum EngineError {
     /// The engine has begun coordinated shutdown and rejects new work.
     #[error("engine is shutting down")]
     ShuttingDown,
-    /// Timed out waiting for a submitted transaction's committed result.
-    #[error("timed out waiting for transaction result")]
-    TransactionTimeout,
     /// Signing a transaction with the engine authority failed.
     #[error("signature error: {0}")]
     Signature(#[source] SignerError),

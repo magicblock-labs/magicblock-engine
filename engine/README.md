@@ -26,6 +26,32 @@ without changing lamports. Actions immediately follow finalization. Accepted
 mode/slot combinations follow the [account lifecycle table](../solana/account/README.md).
 A newer slot alone does not permit replacement of authoritative state.
 
+`materialize` and `delete` consume the borrowing accessor and return `Result<()>`.
+Ownership is released after definitive completion and success bookkeeping;
+retrying requires reacquiring the account and rechecking its state.
+Dropping an idle accessor or cancelling before submission releases ownership
+without submitting work. Immediately after successful submission, a mutation
+transfers its lease to a task that awaits the existing signature subscription and
+completes recency bookkeeping even if its caller stops waiting. There is no
+execution deadline; callers may time out their own wait, then reacquire and reread
+state. A completion task panic or cancellation returns `EngineError::Task` with
+the original Tokio `JoinError`; this is an infrastructure failure, not proof of
+transaction rollback.
+
+```rust,ignore
+let accessor = engine.account(key).await;
+accessor.materialize(account, None).await?;
+// Any retry must acquire a new accessor and reread current state first.
+```
+
+Execution relies on the host's fail-stop contract: accepted work publishes a
+terminal signature result, or the host shuts down the process after an execution
+infrastructure failure. It does not recover a missing result in a live process.
+Keep the Tokio runtime alive until Engine services stop; aborting its tasks is
+not an account-operation cancellation mechanism. Ordinary transaction `execute`
+also waits without an internal deadline, but cancelling its wait never cancels
+submitted execution.
+
 ### Confirmed redelegation
 
 Use that same operation for direct `Transient(S) -> Delegated(T)`, with `T > S`.
@@ -49,11 +75,12 @@ caller contract, equal-slot reactivation is invalid input, not a missing feature
 Engine neither verifies chain confirmation nor classifies delegation generations.
 
 A definitive execution failure rolls back replacement and action account changes,
-preserving the transient image. The accessor retains its lease for a serialized
-retry. A submission timeout does not cancel execution or prove rollback; the
-caller must reconcile the outcome before deciding on recovery. Chainlink must
-retain undelegation tracking until materialization succeeds or retry ownership
-is retained; its recovery implementation is tracked in
+preserving the transient image. A retry must reacquire the account and reclassify
+its current state. A caller's timeout does not cancel execution or prove rollback;
+the caller must reconcile the outcome before deciding on recovery. Chainlink must
+retain undelegation tracking until materialization succeeds or recovery is
+reconciled; its consuming-API migration must make rescue reacquire and reclassify
+rather than reuse the old accessor. Its recovery implementation is tracked in
 [MBV #1671](https://github.com/magicblock-labs/magicblock-validator/issues/1671).
 
 Magicblock construction rejects instruction, address, account-meta, and

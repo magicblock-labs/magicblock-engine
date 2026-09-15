@@ -400,7 +400,7 @@ async fn account_replacement_slot_ordering() {
 }
 
 /// Proves creation and redelegation atomically roll back an earlier action on
-/// failure, retain the lease for retry, and cannot replay actions once active.
+/// failure, permit retry after reacquiring, and cannot replay actions once active.
 #[tokio::test(flavor = "multi_thread")]
 async fn account_activation_is_atomic() {
     let te = TestEngine::new().await;
@@ -419,7 +419,7 @@ async fn account_activation_is_atomic() {
             source_program: V42_ID,
             actions: vec![transfer(key, output, 1)],
         };
-        let mut accessor = te.account(key).await;
+        let accessor = te.account(key).await;
         let mut failing = actions();
         failing.actions.push((E::lit(i64::MIN) - E::lit(1)).compose(output, &[]));
         let error = accessor
@@ -444,19 +444,16 @@ async fn account_activation_is_atomic() {
             "replacement and earlier transfer roll back"
         );
 
-        let mut waiting = Box::pin(Engine::account(&te, key));
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut waiting)
-                .await
-                .is_err(),
-            "failed activation retains the lease"
+        let accessor = te.account(key).await;
+        assert_eq!(
+            accessor.read(Clone::clone).unwrap(),
+            before[0],
+            "reacquired state still permits creation or redelegation"
         );
         accessor
             .materialize(replacement.clone(), Some(actions()))
             .await
-            .expect("retry commits through the retained accessor");
-        drop(accessor);
-        let mut accessor = waiting.await;
+            .expect("retry commits after reacquiring and rereading");
 
         let expected = replacement
             .clone()
@@ -480,7 +477,9 @@ async fn account_activation_is_atomic() {
             // Distinct payloads avoid signature deduplication masking lifecycle
             // rejection under the same recent blockhash.
             let duplicate = replacement.clone().slot(slot).lamports(LAMPORTS + 200);
-            let error = accessor
+            let error = te
+                .account(key)
+                .await
                 .materialize(duplicate, Some(actions()))
                 .await
                 .expect_err("active delegation cannot be rematerialized");

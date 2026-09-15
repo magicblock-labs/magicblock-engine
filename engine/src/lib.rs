@@ -119,8 +119,8 @@ impl Engine {
         self.sync(true).map_err(Into::into)
     }
 
-    /// Waits for exclusive account-mutation ownership, held until the returned
-    /// accessor is dropped.
+    /// Waits for exclusive account-mutation ownership. An idle accessor releases
+    /// it on drop; a submitted mutation owns it independently of its waiter.
     pub async fn account(&self, pubkey: Pubkey) -> AccountAccessor<'_> {
         let lease = self.accounts().lock(pubkey).await;
         AccountAccessor { engine: self, lease }
