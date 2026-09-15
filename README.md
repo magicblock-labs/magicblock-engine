@@ -238,9 +238,12 @@ engine.account(key).await.delete().await?;
 
 Each mutation is one committed transaction. `materialize` can also run optional
 post-finalize instructions in that transaction; if an instruction fails, the
-replacement and action account changes roll back. A submission timeout does not
-cancel execution or prove rollback. Complete-account patches cover non-flag fields, and
-finalization atomically installs the caller-supplied flags without changing
+replacement and action account changes roll back. Mutations consume the accessor
+and return only their result, releasing ownership after completion and success
+bookkeeping. Retrying requires reacquiring the account and rechecking its state.
+Cancelling the wait leaves ownership with the operation until completion; callers
+must reacquire and reread before recovery. Complete-account patches cover non-flag
+fields, and finalization atomically installs the caller-supplied flags without changing
 lamports. Callers are responsible for supplying current state; later
 replacements remain subject to the account's slot and lifecycle rules.
 Materialization places post-finalize instructions immediately after finalization.
@@ -283,7 +286,7 @@ async fn submit(
 }
 ```
 
-- `execute` waits for the committed transaction result.
+- `execute` waits for the committed transaction result without an internal deadline.
 - `schedule` queues execution without waiting for its result.
 - `simulate` executes against owned account copies without committing state.
 

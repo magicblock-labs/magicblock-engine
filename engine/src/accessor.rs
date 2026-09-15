@@ -1,16 +1,16 @@
 //! Account- and transaction-scoped operation facades.
 
-use std::{sync::atomic::Ordering, time::Duration};
+use std::sync::atomic::Ordering;
 
 use keeper::{
-    AccountLease, ExecutionRecord, ResolvedTransaction, TransactionView, error::KeeperError,
+    AccountLease, ExecutionRecord, ResolvedTransaction, TransactionStatus, TransactionView,
+    error::KeeperError,
 };
 use magic_root_interface::{MagicRootInstruction, PostFinalize};
 use processor::{SequencerMessage, Simulation, SimulatorMessage};
 use solana_account::{AccountMode, AccountSharedData, OwnedAccount};
 use solana_instruction::Instruction;
 use solana_transaction::TransactionResult;
-use tokio::time;
 
 use crate::{
     Engine, IntoTransactionView,
@@ -18,13 +18,11 @@ use crate::{
     transaction::{self, VerifiedTransaction},
 };
 
-/// Upper bound on awaiting a submitted transaction's committed result.
-const EXECUTION_TIMEOUT: Duration = Duration::from_secs(8);
-
 /// Exclusive mutation access to one account.
 ///
-/// Dropping the accessor releases the account for the next caller. Keeping it
-/// across a failed operation allows a serialized fallback attempt.
+/// Mutations consume the accessor and release it after definitive completion.
+/// Cancelling a submitted mutation's wait leaves its lease with Engine until
+/// completion; dropping an idle accessor releases it immediately.
 pub struct AccountAccessor<'a> {
     pub(crate) lease: AccountLease,
     pub(crate) engine: &'a Engine,
@@ -59,12 +57,13 @@ impl AccountAccessor<'_> {
     /// See the crate's account replacement contract for caller evidence.
     ///
     /// Patches, finalization, and actions share one transaction; an execution
-    /// failure rolls back their account changes. A timeout does not cancel a
-    /// submitted transaction and must not be treated as proof of rollback.
-    /// The accessor retains mutation ownership after both success and failure,
-    /// and may be reused before it is dropped.
+    /// failure rolls back their account changes. Retrying requires reacquiring
+    /// the account and rechecking its state.
+    /// There is no internal deadline. Cancelling this wait does not cancel
+    /// submitted execution; Engine retains ownership through completion and
+    /// recency bookkeeping. Reacquire and reread before deciding on recovery.
     pub async fn materialize(
-        &mut self,
+        self,
         acc: impl Into<OwnedAccount>,
         post_finalize: Option<PostFinalize>,
     ) -> Result<()> {
@@ -76,18 +75,15 @@ impl AccountAccessor<'_> {
             let ix = MagicRootInstruction::PostFinalize(post_finalize);
             instructions.push(ix.compose(pubkey)?);
         }
-        self.execute(instructions).await?;
-        self.lease.materialized(mode).await;
-        Ok(())
+        self.execute(&instructions, Some(mode)).await
     }
 
-    /// Closes the account.
-    pub async fn delete(&mut self) -> Result<()> {
+    /// Closes the account, releasing ownership after definitive completion.
+    /// Cancellation has the same ownership contract as [`Self::materialize`].
+    pub async fn delete(self) -> Result<()> {
         let pubkey = self.lease.pubkey();
-        let instructions = vec![MagicRootInstruction::Delete.compose(pubkey)?];
-        self.execute(instructions).await?;
-        self.lease.deleted();
-        Ok(())
+        let instruction = MagicRootInstruction::Delete.compose(pubkey)?;
+        self.execute(&[instruction], None).await
     }
 
     /// Releases a satisfied request, promoting non-authoritative state in
@@ -103,11 +99,23 @@ impl AccountAccessor<'_> {
         self.lease.cached_eviction_applies(mode).then_some(self)
     }
 
-    /// Composes the instructions into a signed engine transaction, executes it,
-    /// and flattens the committed transaction result into the engine error type.
-    async fn execute(&self, instructions: Vec<Instruction>) -> Result<()> {
-        let txn = transaction::magicblock(&instructions, self.engine)?;
-        self.engine.transaction(txn)?.execute().await?.map_err(Into::into)
+    /// Before submission, cancellation releases the lease without submitting work.
+    /// After submission, the task owns completion and success bookkeeping.
+    async fn execute(self, instructions: &[Instruction], mode: Option<AccountMode>) -> Result<()> {
+        let txn = transaction::magicblock(instructions, self.engine)?;
+        let rx = self.engine.transaction(txn)?.submit().await?;
+        // No await may separate successful submission from this lease handoff.
+        let lease = self.lease;
+        // Dropping the join handle detaches this task; it must never be aborted.
+        tokio::spawn(async move {
+            rx.await?.result?;
+            match mode {
+                Some(mode) => lease.materialized(mode).await,
+                None => lease.deleted(),
+            }
+            Ok(())
+        })
+        .await?
     }
 }
 
@@ -127,22 +135,22 @@ impl<'a> TransactionAccessor<'a> {
     }
 
     /// Submits `transaction` for execution and awaits its committed result.
-    /// A timeout does not cancel the submitted transaction.
+    /// There is no internal deadline: submitted execution either publishes a
+    /// terminal signature result or the host shuts down the process on an
+    /// infrastructure failure. Cancelling this wait does not cancel the transaction.
     pub async fn execute(self) -> Result<TransactionResult<()>> {
+        Ok(self.submit().await?.await?.result)
+    }
+
+    /// Registers completion before submission so fast execution cannot race it.
+    async fn submit(self) -> Result<oneshot::Receiver<TransactionStatus>> {
         if self.engine.terminating.load(Ordering::Acquire) {
             return Err(EngineError::ShuttingDown);
         }
-        let transaction =
-            ResolvedTransaction::try_new(self.transaction, None, &Default::default())?;
-        let signature = transaction.signatures()[0];
-        let msg = SequencerMessage::Transaction(transaction);
+        let signature = self.transaction.signatures()[0];
         let rx = self.engine.transactions().subscribe_signature(signature).await;
-        self.engine.sequencer.send(msg).await?;
-        let status = time::timeout(EXECUTION_TIMEOUT, rx)
-            .await
-            .map_err(|_| EngineError::TransactionTimeout)?
-            .map_err(|e| e.to_string())?;
-        Ok(status.result)
+        self.schedule().await?;
+        Ok(rx)
     }
 
     /// Submits `transaction` for execution without awaiting its result.

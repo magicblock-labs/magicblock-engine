@@ -6,6 +6,8 @@
 //! that post-finalize actions actually run.
 #![cfg(test)]
 
+use std::time::Duration;
+
 use engine::{Engine, EngineError, PostFinalize, testkit::TestEngine};
 use keeper::testkit::{
     V42_ID, load_v42_data, load_v42_lamports, patterned_bytes, store_v42, v42_builder,
@@ -19,6 +21,7 @@ use solana_pubkey::Pubkey;
 use solana_system_interface::MAX_PERMITTED_DATA_LENGTH;
 use solana_sysvar::rent::Rent;
 use solana_transaction::TransactionError;
+use tokio::time::timeout;
 use v42_calculator_interface::builder::{Expr as E, transfer};
 
 /// Rent-exempt for the data sizes used below; the SVM rejects a created account
@@ -400,7 +403,7 @@ async fn account_replacement_slot_ordering() {
 }
 
 /// Proves creation and redelegation atomically roll back an earlier action on
-/// failure, retain the lease for retry, and cannot replay actions once active.
+/// failure, permit retry after reacquiring, and cannot replay actions once active.
 #[tokio::test(flavor = "multi_thread")]
 async fn account_activation_is_atomic() {
     let te = TestEngine::new().await;
@@ -419,7 +422,7 @@ async fn account_activation_is_atomic() {
             source_program: V42_ID,
             actions: vec![transfer(key, output, 1)],
         };
-        let mut accessor = te.account(key).await;
+        let accessor = te.account(key).await;
         let mut failing = actions();
         failing.actions.push((E::lit(i64::MIN) - E::lit(1)).compose(output, &[]));
         let error = accessor
@@ -444,19 +447,16 @@ async fn account_activation_is_atomic() {
             "replacement and earlier transfer roll back"
         );
 
-        let mut waiting = Box::pin(Engine::account(&te, key));
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut waiting)
-                .await
-                .is_err(),
-            "failed activation retains the lease"
+        let accessor = te.account(key).await;
+        assert_eq!(
+            accessor.read(Clone::clone).unwrap(),
+            before[0],
+            "reacquired state still permits creation or redelegation"
         );
         accessor
             .materialize(replacement.clone(), Some(actions()))
             .await
-            .expect("retry commits through the retained accessor");
-        drop(accessor);
-        let mut accessor = waiting.await;
+            .expect("retry commits after reacquiring and rereading");
 
         let expected = replacement
             .clone()
@@ -480,7 +480,9 @@ async fn account_activation_is_atomic() {
             // Distinct payloads avoid signature deduplication masking lifecycle
             // rejection under the same recent blockhash.
             let duplicate = replacement.clone().slot(slot).lamports(LAMPORTS + 200);
-            let error = accessor
+            let error = te
+                .account(key)
+                .await
                 .materialize(duplicate, Some(actions()))
                 .await
                 .expect_err("active delegation cannot be rematerialized");
@@ -494,4 +496,108 @@ async fn account_activation_is_atomic() {
     }
 
     te.close().await;
+}
+
+/// Proves cancelling a submitted activation retains ownership until success or
+/// failure, after which rereading permits a failed activation's retry but not replay.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_activation_retains_ownership() {
+    const PENDING: Duration = Duration::from_millis(50);
+    const COMPLETION: Duration = Duration::from_secs(4);
+
+    for fail in [false, true] {
+        let te = TestEngine::new().await;
+        let key = Pubkey::new_unique();
+        let output = store_v42(&te, 0, AccountMode::Ephemeral);
+        let state = || [key, output, te.authority()].map(|key| te.get_account(key));
+        let before = state();
+        let replacement = delegated(V42_ID, 10_i64.to_le_bytes().to_vec(), SLOT);
+        let actions = || PostFinalize {
+            source_program: V42_ID,
+            actions: vec![transfer(key, output, 1)],
+        };
+        let mut post_finalize = actions();
+        if fail {
+            post_finalize.actions.push((E::lit(i64::MIN) - E::lit(1)).compose(output, &[]));
+        }
+        let mut processed = te.transactions().subscribe_processed().unwrap();
+        let barrier = te.barrier().await.unwrap();
+        let accessor = te.account(key).await;
+        // The barrier prevents completion, not submission. Passing the future
+        // by value makes this timeout drop the caller's mutation wait.
+        assert!(
+            timeout(
+                PENDING,
+                accessor.materialize(replacement.clone(), Some(post_finalize))
+            )
+            .await
+            .is_err()
+        );
+        let mut waiting = Box::pin(te.account(key));
+        assert!(
+            timeout(PENDING, &mut waiting).await.is_err(),
+            "cancellation must not let a conflicting activation acquire ownership"
+        );
+        assert_eq!(state(), before, "submitted work remains behind the barrier");
+        drop(barrier);
+
+        // A terminal event proves cancellation happened after submission even
+        // in the failure case, where unchanged account state alone cannot do so.
+        let completed = timeout(COMPLETION, processed.recv())
+            .await
+            .expect("submitted activation completes")
+            .expect("processed transaction stream remains open");
+        let execution = completed.execution.result.expect("activation reaches execution");
+        let result = &execution.execution_details.status;
+        let accessor = timeout(COMPLETION, waiting)
+            .await
+            .expect("completion releases mutation ownership");
+        let current = accessor.read(Clone::clone).unwrap();
+        if fail {
+            assert!(
+                matches!(
+                    result,
+                    Err(TransactionError::InstructionError(
+                        _,
+                        InstructionError::Custom(6)
+                    ))
+                ),
+                "expected arithmetic overflow, got {result:?}"
+            );
+            assert_eq!(current, before[0]);
+            assert_eq!(state(), before, "failed activation rolls back its transfer");
+            timeout(
+                COMPLETION,
+                accessor.materialize(replacement.clone(), Some(actions())),
+            )
+            .await
+            .expect("retry completes")
+            .expect("reacquired absent state permits retry");
+        } else {
+            assert_eq!(result, &Ok(()));
+            assert_eq!(current, te.get_account(key));
+            drop(accessor);
+        }
+        assert_eq!(load_v42_data(&te, key), Some(9));
+        assert_eq!(load_v42_data(&te, output), Some(1));
+        let activated = state();
+        // Change the signed payload so lifecycle rejection, not signature
+        // deduplication, proves the activation cannot replay its transfer.
+        let error = timeout(COMPLETION, async {
+            te.account(key)
+                .await
+                .materialize(replacement.slot(SLOT + 1), Some(actions()))
+                .await
+        })
+        .await
+        .expect("conflicting activation completes")
+        .expect_err("active delegation cannot be rematerialized");
+        assert_invalid_lifecycle(error);
+        assert_eq!(
+            state(),
+            activated,
+            "conflicting activation cannot replay actions"
+        );
+        te.close().await;
+    }
 }
