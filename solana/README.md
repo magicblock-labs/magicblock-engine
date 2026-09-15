@@ -151,6 +151,14 @@ readonly, size, and realloc errors.
 
 ## CPI synchronization
 
+Builtin CPI into MagicRoot requires `InvokeContext::native_invoke_magic_root`,
+in addition to MagicRoot's authority-payer, builtin-caller, and recursion checks.
+Only its exact child instruction is authorized; descendants and post-finalize
+actions do not inherit authorization. Builtins must construct or validate the
+privileged operation, not elevate arbitrary forwarded payloads. Ordinary native
+CPI and logical caller provenance do not grant this access. Top-level authority
+operations and instruction serialization remain unchanged.
+
 `CallerAccount::serialized_data` remains empty. CPI entry and exit synchronize
 lamports, owner, and data length, while account bytes remain directly mapped.
 When storage can move, CPI replaces the caller `MemoryRegion` with one created

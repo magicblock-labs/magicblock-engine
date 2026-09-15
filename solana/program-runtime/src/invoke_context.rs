@@ -228,6 +228,8 @@ pub struct InvokeContext<'a, 'ix_data> {
     /// Pairs of index in TX instruction trace and VM register trace
     register_traces: Vec<(usize, Vec<[u64; 12]>)>,
     native_caller: Option<NativeCaller>,
+    /// Exact child instruction authorized by an explicit native MagicRoot call.
+    magic_root: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -260,6 +262,7 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
             memory_contexts: MemoryContexts::new(),
             register_traces: Vec::new(),
             native_caller: None,
+            magic_root: None,
         }
     }
 
@@ -333,6 +336,33 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
         self.prepare_next_cpi_instruction(instruction, &signers)?;
         self.process_instruction(&mut 0)?;
         Ok(())
+    }
+
+    /// Invokes a trusted instruction with MagicRoot authorization for this child only.
+    ///
+    /// Builtins must construct or validate the privileged operation, never forward
+    /// arbitrary user instructions through this entrypoint. Existing CPI account
+    /// privileges still apply; no additional signers are granted. Authorization
+    /// does not extend to nested CPI or post-finalize actions, even if the supplied
+    /// instruction targets a program other than MagicRoot.
+    pub fn native_invoke_magic_root(
+        &mut self,
+        instruction: Instruction,
+    ) -> Result<(), InstructionError> {
+        self.prepare_next_cpi_instruction(instruction, &[])?;
+        let magic_root =
+            self.magic_root.replace(self.transaction_context.get_instruction_trace_length());
+        let result = self.process_instruction(&mut 0);
+        self.magic_root = magic_root;
+        result
+    }
+
+    /// Whether the current instruction is the exact child of an explicit native
+    /// MagicRoot invocation. Descendants and later siblings have different indices.
+    pub fn is_magic_root_authorized(&self) -> bool {
+        self.magic_root.is_some_and(|index| {
+            self.transaction_context.get_current_instruction_index() == Ok(index)
+        })
     }
 
     /// Invokes an instruction from a builtin while attributing its direct frame
