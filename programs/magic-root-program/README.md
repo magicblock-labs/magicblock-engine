@@ -45,7 +45,8 @@ After authority and caller checks pass, MagicRoot does not determine whether a
 complete account image is stale. Callers must supply current state; slot and
 lifecycle validation still apply.
 
-Complete-account patch sequences apply mode before slot. `AccountSharedData`
-marks mode dirty only when its value changes, so a no-op mode patch cannot make
-an equal-slot replacement appear fresh. Rejection aborts the transaction, and
-therefore rolls back every earlier field patch in that sequence.
+Complete-account patch sequences validate mode and slot together through one
+lifecycle patch, following the [account lifecycle table](../../solana/account/README.md).
+Rejection aborts the transaction and rolls back every earlier field patch in
+that sequence. Post-finalize action failures also roll back replacement and
+action account changes.

@@ -11,7 +11,9 @@ use keeper::testkit::{
     V42_ID, load_v42_data, load_v42_lamports, patterned_bytes, store_v42, v42_builder,
 };
 use magic_root_interface::MagicRootInstruction;
-use solana_account::{AccountBuilder, AccountMode, ReadableAccount, testkit::delegated_account};
+use solana_account::{
+    AccountBuilder, AccountMode, AccountSharedData, ReadableAccount, testkit::delegated_account,
+};
 use solana_instruction_error::InstructionError;
 use solana_pubkey::Pubkey;
 use solana_system_interface::MAX_PERMITTED_DATA_LENGTH;
@@ -329,31 +331,33 @@ async fn account_program_cache_tracks_v42_lifecycle() {
     te.close().await;
 }
 
-// Complete replacements obey the lifecycle pair's slot rule; authoritative
-// state cannot be replaced in the same mode even with a newer slot.
+/// Proves accepted replacements install the full image, while forbidden mode
+/// and slot pairs roll back funding and never execute their follow-up actions.
 #[tokio::test(flavor = "multi_thread")]
 async fn account_replacement_slot_ordering() {
     let te = TestEngine::new().await;
     let owner = Pubkey::new_unique();
 
-    for (from, to) in [
-        (AccountMode::ReadOnly, AccountMode::Delegated),
-        (AccountMode::Placeholder, AccountMode::Ephemeral),
+    for (from, to, slot) in [
+        (AccountMode::ReadOnly, AccountMode::Delegated, SLOT),
+        (AccountMode::Placeholder, AccountMode::Ephemeral, SLOT),
+        (AccountMode::Transient, AccountMode::Delegated, SLOT + 1),
     ] {
         let key = Pubkey::new_unique();
         materialize_with(&te, key, owner, from).await;
+        let replacement = account(owner, vec![2; 8], to, slot);
         te.account(key)
             .await
-            .materialize(account(owner, vec![2], to, SLOT), None)
+            .materialize(replacement.clone(), None)
             .await
-            .expect("equal-slot mode transition is accepted");
-
-        let updated = te.get_account(key).expect("transitioned account exists");
-        assert!(updated.is(to), "{from:?} transitions to {to:?}");
-        assert_eq!(updated.slot(), SLOT);
-        assert_eq!(updated.data(), &[2]);
+            .expect("valid replacement commits without actions");
+        assert_eq!(
+            te.get_account(key).unwrap(),
+            replacement.build::<AccountSharedData>()
+        );
     }
 
+    let output = store_v42(&te, 0, AccountMode::Ephemeral);
     for (from, to, slot) in [
         (AccountMode::Placeholder, AccountMode::Transient, SLOT),
         (AccountMode::Ephemeral, AccountMode::Delegated, SLOT),
@@ -361,158 +365,133 @@ async fn account_replacement_slot_ordering() {
         (AccountMode::Delegated, AccountMode::Delegated, SLOT + 1),
         (AccountMode::Ephemeral, AccountMode::Ephemeral, SLOT + 1),
         (AccountMode::Transient, AccountMode::Transient, SLOT + 1),
+        (AccountMode::ReadOnly, AccountMode::ReadOnly, SLOT),
+        (AccountMode::ReadOnly, AccountMode::Delegated, SLOT - 1),
+        (AccountMode::Transient, AccountMode::Delegated, SLOT),
+        (AccountMode::Transient, AccountMode::Delegated, SLOT - 1),
     ] {
         let key = Pubkey::new_unique();
-        // Seed the source directly so only the mode-transition invariant is
-        // under test.
+        // Seed the source directly so only replacement validation is under test.
         te.accounts()
             .store(&[(key, account(owner, vec![1], from, SLOT).build())])
             .unwrap();
+        let state = || [key, output, te.authority()].map(|key| te.get_account(key));
+        let before = state();
+        let post = PostFinalize {
+            source_program: V42_ID,
+            actions: vec![E::lit(1).compose(output, &[])],
+        };
         let error = te
             .account(key)
             .await
             .materialize(
-                account(owner, vec![2], to, slot).lamports(LAMPORTS + 1),
-                None,
+                account(owner, vec![2; 8], to, slot).lamports(LAMPORTS + 100),
+                Some(post),
             )
             .await
-            .expect_err("invalid mode transition is rejected");
+            .expect_err("forbidden mode or slot pair is rejected");
         assert_invalid_lifecycle(error);
-
-        let unchanged = te.get_account(key).expect("rejected transition preserves the account");
-        assert!(unchanged.is(from), "{from:?} does not transition to {to:?}");
-        assert_eq!(unchanged.slot(), SLOT);
-        assert_eq!(unchanged.data(), &[1]);
-        // The lamport patch precedes lifecycle validation; failure must roll it back.
-        assert_eq!(unchanged.lamports(), LAMPORTS);
+        // The lamport patch precedes lifecycle validation: compare target,
+        // action output, and sponsor to catch partial funding or action effects.
+        assert_eq!(state(), before, "{from:?} -> {to:?} at {slot}");
     }
 
-    let key = Pubkey::new_unique();
-    te.account(key)
-        .await
-        .materialize(account(owner, vec![3], AccountMode::ReadOnly, SLOT), None)
-        .await
-        .expect("baseline account is created");
-
-    let error = te
-        .account(key)
-        .await
-        .materialize(account(owner, vec![4], AccountMode::ReadOnly, SLOT), None)
-        .await
-        .expect_err("equal-slot replacement without a mode change is rejected");
-    assert_invalid_lifecycle(error);
-
-    let error = te
-        .account(key)
-        .await
-        .materialize(
-            account(owner, vec![5], AccountMode::Delegated, SLOT - 1),
-            None,
-        )
-        .await
-        .expect_err("a mode change never authorizes an older slot");
-    assert_invalid_lifecycle(error);
-
-    let unchanged = te.get_account(key).expect("rejected replacements preserve the account");
-    assert!(unchanged.is(AccountMode::ReadOnly));
-    assert_eq!(unchanged.slot(), SLOT);
-    assert_eq!(unchanged.data(), &[3]);
-
     te.close().await;
 }
 
-// Post-finalize actions are invoked via CPI after the account is finalized, so a
-// failing action aborts the whole creation (nothing commits), while a benign one
-// lets it through. The contrast proves the actions actually execute rather than
-// being silently dropped.
+/// Proves creation and redelegation atomically roll back an earlier action on
+/// failure, retain the lease for retry, and cannot replay actions once active.
 #[tokio::test(flavor = "multi_thread")]
-async fn materialize_runs_post_finalize_actions() {
+async fn account_activation_is_atomic() {
     let te = TestEngine::new().await;
 
-    // A successful v42 transfer proves the post-finalize action ran after the
-    // new account became writable and program-owned.
-    let source = store_v42(&te, 0, AccountMode::Delegated);
-    let source_before = load_v42_lamports(&te, source).expect("source exists");
-    let ok_key = Pubkey::new_unique();
-    let acc = v42_builder(0, AccountMode::Delegated);
-    let benign = transfer(source, ok_key, 1);
-    let post = PostFinalize {
-        source_program: V42_ID,
-        actions: vec![benign],
-    };
-    te.account(ok_key)
-        .await
-        .materialize(acc, Some(post))
-        .await
-        .expect("materialization with a succeeding post-finalize action");
-    assert_eq!(
-        load_v42_lamports(&te, source).expect("source remains"),
-        source_before - 1,
-        "post-finalize action debited its source"
-    );
-    assert_eq!(
-        load_v42_lamports(&te, ok_key).expect("created account exists"),
-        source_before + 1,
-        "post-finalize action credited the created account"
-    );
-
-    // An overflowing v42 action errors; the failure propagates and rolls back
-    // the account creation in the same transaction.
-    let bad_key = Pubkey::new_unique();
-    let failing = (E::lit(i64::MIN) - E::lit(1)).compose(bad_key, &[]);
-    let acc = v42_builder(0, AccountMode::Delegated);
-    let post = PostFinalize {
-        source_program: V42_ID,
-        actions: vec![failing],
-    };
-    let result = te.account(bad_key).await.materialize(acc, Some(post)).await;
-    assert!(
-        result.is_err(),
-        "failing post-finalize action surfaces an error"
-    );
-    assert!(
-        te.get_account(bad_key).is_none(),
-        "nothing commits when the action fails"
-    );
-
-    te.close().await;
-}
-
-/// Proves a failed activation keeps its account lease, blocks a competing
-/// waiter, and wakes that waiter only after a fallback materialization commits.
-#[tokio::test(flavor = "multi_thread")]
-async fn failed_materialization_retains_lease_for_fallback() {
-    let te = TestEngine::new().await;
-    let key = Pubkey::new_unique();
-    let account = v42_builder(0, AccountMode::Delegated);
-    let mut accessor = te.account(key).await;
-    let failing = (E::lit(i64::MIN) - E::lit(1)).compose(key, &[]);
-    let post = PostFinalize {
-        source_program: V42_ID,
-        actions: vec![failing],
-    };
-    accessor
-        .materialize(account.clone(), Some(post))
-        .await
-        .expect_err("failed action rolls activation back");
-
-    let mut waiting = Box::pin(Engine::account(&te, key));
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(50), &mut waiting)
+    for redelegation in [false, true] {
+        let key = Pubkey::new_unique();
+        if redelegation {
+            materialize_with(&te, key, Pubkey::new_unique(), AccountMode::Transient).await;
+        }
+        let output = store_v42(&te, 0, AccountMode::Ephemeral);
+        let state = || [key, output, te.authority()].map(|key| te.get_account(key));
+        let before = state();
+        let replacement =
+            delegated(V42_ID, 10_i64.to_le_bytes().to_vec(), SLOT + 1).lamports(LAMPORTS + 100);
+        let actions = || PostFinalize {
+            source_program: V42_ID,
+            actions: vec![transfer(key, output, 1)],
+        };
+        let mut accessor = te.account(key).await;
+        let mut failing = actions();
+        failing.actions.push((E::lit(i64::MIN) - E::lit(1)).compose(output, &[]));
+        let error = accessor
+            .materialize(replacement.clone(), Some(failing))
             .await
-            .is_err(),
-        "failed first attempt retains the lease"
-    );
-    accessor
-        .materialize(account, None)
-        .await
-        .expect("fallback commits through the same lease");
-    drop(accessor);
-    drop(waiting.await);
-    assert!(
-        te.get_account(key).is_some_and(|account| account.is(AccountMode::Delegated)),
-        "fallback leaves the account in its terminal delegated state"
-    );
+            .expect_err("second action aborts the whole activation");
+        // V42's stable Arithmetic error is 6: a different action failure must
+        // not pass as evidence that the intended overflow was reached.
+        assert!(
+            matches!(
+                error,
+                EngineError::TransactionExecution(TransactionError::InstructionError(
+                    _,
+                    InstructionError::Custom(6)
+                ))
+            ),
+            "expected arithmetic overflow, got {error:?}"
+        );
+        assert_eq!(
+            state(),
+            before,
+            "replacement and earlier transfer roll back"
+        );
+
+        let mut waiting = Box::pin(Engine::account(&te, key));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut waiting)
+                .await
+                .is_err(),
+            "failed activation retains the lease"
+        );
+        accessor
+            .materialize(replacement.clone(), Some(actions()))
+            .await
+            .expect("retry commits through the retained accessor");
+        drop(accessor);
+        let mut accessor = waiting.await;
+
+        let expected = replacement
+            .clone()
+            .data(9_i64.to_le_bytes().to_vec())
+            .lamports(LAMPORTS + 99)
+            .build::<AccountSharedData>();
+        let funding = LAMPORTS + 100 - before[0].as_ref().map_or(0, |account| account.lamports());
+        assert_eq!(te.get_account(key).unwrap(), expected);
+        assert_eq!(load_v42_data(&te, output), Some(1));
+        assert_eq!(
+            load_v42_lamports(&te, output),
+            Some(before[1].as_ref().unwrap().lamports() + 1)
+        );
+        assert_eq!(
+            te.get_account(te.authority()).unwrap().lamports(),
+            before[2].as_ref().unwrap().lamports() - funding
+        );
+
+        let activated = state();
+        for slot in [SLOT + 1, SLOT + 2] {
+            // Distinct payloads avoid signature deduplication masking lifecycle
+            // rejection under the same recent blockhash.
+            let duplicate = replacement.clone().slot(slot).lamports(LAMPORTS + 200);
+            let error = accessor
+                .materialize(duplicate, Some(actions()))
+                .await
+                .expect_err("active delegation cannot be rematerialized");
+            assert_invalid_lifecycle(error);
+            assert_eq!(
+                state(),
+                activated,
+                "duplicate activation cannot replay its transfer"
+            );
+        }
+    }
 
     te.close().await;
 }
