@@ -218,7 +218,12 @@ async fn block_hash_includes_appended_transaction_signature() {
 #[tokio::test(flavor = "current_thread")]
 async fn seeded_program_and_recursive_cpi_return_data_work() {
     let harness = Harness::new(false).await;
-    let account = harness.accounts().loader().load(&V42_ID).unwrap().expect("v42 program seeded");
+    let account = harness
+        .accounts()
+        .loader()
+        .read(&V42_ID, Clone::clone)
+        .unwrap()
+        .expect("v42 program seeded");
 
     assert!(account.executable());
     assert_eq!(*account.owner(), loader_v4::ID);

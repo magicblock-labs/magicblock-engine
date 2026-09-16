@@ -149,9 +149,9 @@ impl Keeper {
 
     /// Snapshot the current superblock, enqueue its seal, and archive the snapshot.
     ///
-    /// Must run only when no account store can race the snapshot export; the
-    /// in-body `SAFETY` note relies on this exclusivity. The returned signal
-    /// resolves after the appender durably seals and rotates the ledger.
+    /// Must run only when account writes and unscoped borrowed views are
+    /// quiesced. Accountsdb drains scoped readers during compaction. The returned
+    /// signal resolves after the appender durably seals and rotates the ledger.
     /// An upstream seal must already be authenticated; its payload must match
     /// the snapshot state, and its signature is retained unchanged.
     pub fn finalize_superblock(
@@ -160,8 +160,8 @@ impl Keeper {
     ) -> Result<oneshot::Receiver<()>> {
         let _timer = metrics::time(Operation::FinalizeSuperblock);
         let head = self.ledger.head();
-        // SAFETY: the caller must ensure exclusive account-store
-        // access. Snapshot also publishes the checksum for this superblock id;
+        // SAFETY: the caller excludes writes and unscoped borrowed views;
+        // accountsdb drains scoped readers. Snapshot also publishes the checksum;
         // read/sign/compare it only after that refresh.
         let snapshot = unsafe { self.accountsdb.snapshot(head) }?;
         let payload = self.superblocks().sealed();
@@ -226,7 +226,7 @@ impl Keeper {
     pub fn apply_reset(&self, reset: Reset) -> Result<()> {
         self.accountsdb.reset();
         let authority = self.authority();
-        let account = self.accounts().loader().load(&authority)?;
+        let account = self.accounts().loader().read(&authority, Clone::clone)?;
         if let Some(account) = account {
             let acc = AccountBuilder::from(account).lamports(SPONSOR_INIT_BALANCE);
             self.accounts().store(&[(authority, acc.build())])?;

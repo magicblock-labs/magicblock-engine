@@ -14,6 +14,7 @@ use solana_pubkey::Pubkey;
 use tracing::{info, warn};
 
 use crate::{
+    readers::{ReadGuard, Readers},
     store::{DatabaseVersion, PersistedProgramIter, PersistedStore, index::RoTxnTls},
     volatile::VolatileStore,
 };
@@ -22,6 +23,7 @@ pub use snapshot::{BackupOp, SnapshotError, SnapshotResult};
 pub use store::mmap::STORAGE_FILE;
 
 mod metrics;
+mod readers;
 mod snapshot;
 mod store;
 mod volatile;
@@ -40,17 +42,25 @@ pub struct AccountsDB {
     volatile: VolatileStore,
     /// Database root directory.
     root: PathBuf,
+    /// Reader admission while the persisted layout is being relocated.
+    readers: Readers,
 }
 
 impl AccountsDB {
     /// Opens or creates the database at `root`.
     pub fn new(root: impl AsRef<Path>) -> Result<Self> {
+        let readers = Readers::new()?;
         let root = root.as_ref().to_owned();
         let path = Self::directory(&root);
         let persisted = PersistedStore::new(&path)?;
         let volatile = VolatileStore::new(&path)?;
         info!(?path, "opened accountsdb");
-        let db = Self { persisted, volatile, root };
+        let db = Self {
+            persisted,
+            volatile,
+            root,
+            readers,
+        };
         metrics::init(&db);
         Ok(db)
     }
@@ -100,11 +110,31 @@ impl AccountsDB {
         AccountLoader::new(self)
     }
 
-    /// Iterates program-owned accounts across both backends.
-    pub fn program(&self, owner: &Pubkey) -> Result<ProgramIter<'_>> {
-        let persisted = self.persisted.program(*owner)?;
-        let volatile = self.volatile.program(owner);
-        Ok(ProgramIter { persisted, volatile, db: self })
+    /// Reads each program-owned account without letting borrowed images escape.
+    ///
+    /// The iterator retains reader admission and the persisted index snapshot.
+    /// `reader` may run again after a concurrent image publish and must have no
+    /// side effects. Only its result escapes; copying account data is optional.
+    pub fn program<'a, F, R>(
+        &'a self,
+        owner: &Pubkey,
+        reader: F,
+    ) -> Result<impl Iterator<Item = (Pubkey, R)> + 'a>
+    where
+        F: Fn(&Pubkey, &AccountSharedData) -> R + 'a,
+        R: 'a,
+    {
+        let guard = self.readers.enter();
+        let iter = ProgramIter {
+            persisted: self.persisted.program(*owner)?,
+            volatile: self.volatile.program(owner),
+            db: self,
+            _reader: guard,
+        };
+        Ok(iter.map(move |(pubkey, account)| {
+            let result = AccountSeqLock::new(account).read(|account| reader(&pubkey, account));
+            (pubkey, result)
+        }))
     }
 
     /// Returns the latest slot persisted in the database metadata.
@@ -136,11 +166,14 @@ impl AccountsDB {
 
     /// Flushes persisted account storage, forcing synchronous durability when requested.
     pub fn flush(&self, force: bool) -> Result<()> {
+        // A synchronous flush walks indexed account images for the checksum.
+        let _reader = force.then(|| self.readers.enter());
         self.persisted.flush(force).map_err(Into::into)
     }
 
     /// Validates the persisted store checksum and on-disk format version.
     pub fn validate(&self) -> Result<()> {
+        let _reader = self.readers.enter();
         self.persisted.validate()
     }
 
@@ -186,25 +219,64 @@ impl AccountsDB {
     }
 }
 
-/// Loader that caches a read transaction for persisted account lookups.
+/// Synchronous reader scope caching a persisted index transaction.
+///
+/// Holding a guarded loader delays compaction. Finish the batch and drop it before
+/// awaiting unrelated work. [`Self::read`] keeps account access within the scope;
+/// raw execution views must obey [`Self::load`]'s safety contract.
+/// Execution with its own compaction barrier can use [`Self::unguarded`].
 pub struct AccountLoader<'a> {
     /// Cached read transaction for the persisted index.
     txn: RefCell<Option<RoTxnTls<'a>>>,
     /// Database handle used for volatile and persisted lookups.
     db: &'a AccountsDB,
+    /// Present for ordinary readers, absent when the caller excludes compaction.
+    /// Drops after the cached transaction so old offsets cannot escape admission.
+    _reader: Option<ReadGuard<'a>>,
 }
 
 impl<'a> AccountLoader<'a> {
     /// Creates a new loader bound to `db`.
+    #[inline]
     pub fn new(db: &'a AccountsDB) -> Self {
-        Self { txn: Default::default(), db }
+        Self {
+            txn: RefCell::new(None),
+            db,
+            _reader: Some(db.readers.enter()),
+        }
     }
 
-    /// Loads one account, reusing the persisted read transaction across calls.
+    /// Creates a loader without reader-admission bookkeeping.
     ///
-    /// Reuse the loader for batch lookups to keep them on the same persisted
-    /// index snapshot. Persisted accounts take precedence over volatile ones.
-    pub fn load(&self, pubkey: &Pubkey) -> Result<Option<AccountSharedData>> {
+    /// Intended for execution already covered by the sequencer's barrier. It
+    /// uses the same account lookup and cached index transaction as [`Self::new`].
+    ///
+    /// # Safety
+    /// The caller must independently exclude compaction for this loader's
+    /// entire lifetime, including its cached index transaction, and until all
+    /// returned borrowed accounts have had their final access.
+    #[inline]
+    pub unsafe fn unguarded(db: &'a AccountsDB) -> Self {
+        Self {
+            txn: RefCell::new(None),
+            db,
+            _reader: None,
+        }
+    }
+
+    /// Loads a zero-copy account view for externally synchronized execution.
+    ///
+    /// The SVM retains these views through transaction commit. Ordinary readers
+    /// must use [`Self::read`] instead. Both paths reuse the same cached index
+    /// transaction and give volatile accounts precedence over persisted ones.
+    ///
+    /// # Safety
+    /// The database must outlive borrowed results. Retain a guarded loader until
+    /// their last access, or independently exclude relocation for their use.
+    /// Concurrent image updates require `AccountSeqLock`; account deletion and
+    /// storage reuse must also be excluded while borrowed results are used.
+    /// Mutating borrowed results additionally requires exclusive account access.
+    pub unsafe fn load(&self, pubkey: &Pubkey) -> Result<Option<AccountSharedData>> {
         if let Some(account) = self.db.volatile.load(pubkey) {
             metrics::load(StoreKind::Volatile);
             return Ok(Some(account.into()));
@@ -221,18 +293,17 @@ impl<'a> AccountLoader<'a> {
 
     /// Applies `reader` to an account image stable across a concurrent publish.
     ///
-    /// Prefer this over [`Self::load`] when reading fields from persisted
-    /// accounts that may be updated concurrently. The reader may be called more
-    /// than once when the borrowed image changes, so it should have no side
-    /// effects.
+    /// The reader may be called more than once when the borrowed image changes,
+    /// so it should have no side effects. Only its result escapes the scope;
+    /// clone the account inside the callback when an owned snapshot is needed.
     pub fn read<F, R>(&self, pubkey: &Pubkey, reader: F) -> Result<Option<R>>
     where
         F: Fn(&AccountSharedData) -> R,
     {
-        let Some(account) = self.load(pubkey)? else {
-            return Ok(None);
-        };
-        Ok(Some(AccountSeqLock::new(account).read(reader)))
+        // SAFETY: the callback and sequence checks finish within this loader's
+        // admission scope, or the caller's unguarded-construction contract.
+        let account = unsafe { self.load(pubkey) }?;
+        Ok(account.map(|account| AccountSeqLock::new(account).read(reader)))
     }
 
     /// Returns whether an account exists in either backend.
@@ -246,14 +317,16 @@ impl<'a> AccountLoader<'a> {
     }
 }
 
-/// Iterates program-owned accounts across both backends.
-pub struct ProgramIter<'a> {
+/// Internal images consumed only by scoped program reads.
+struct ProgramIter<'a> {
     /// Persisted program accounts.
     persisted: Option<PersistedProgramIter<'a>>,
     /// Volatile program pubkeys.
     volatile: BTreeSet<Pubkey>,
     /// Database handle used to resolve volatile accounts.
     db: &'a AccountsDB,
+    /// Outlives the persisted iterator and its LMDB transaction.
+    _reader: ReadGuard<'a>,
 }
 
 impl<'a> Iterator for ProgramIter<'a> {

@@ -53,12 +53,12 @@ fn in_volatile(db: &AccountsDB, pubkey: &Pubkey) -> bool {
 
 /// Pubkeys `owner` owns, in iteration order (persisted first, then volatile).
 fn program(db: &AccountsDB, owner: &Pubkey) -> Vec<Pubkey> {
-    db.program(owner).unwrap().map(|(k, _)| k).collect()
+    db.program(owner, |_, _| ()).unwrap().map(|(k, _)| k).collect()
 }
 
 /// Balance of the account currently loaded for `pubkey`.
 fn lamports(db: &AccountsDB, pubkey: &Pubkey) -> u64 {
-    db.loader().load(pubkey).unwrap().unwrap().lamports()
+    db.loader().read(pubkey, |account| account.lamports()).unwrap().unwrap()
 }
 
 /// Loads the account currently stored for `pubkey`.
@@ -68,7 +68,9 @@ fn lamports(db: &AccountsDB, pubkey: &Pubkey) -> u64 {
 /// through the routing layer (a freshly built owned account with a
 /// non-authoritative mode is filtered out of the persisted backend entirely).
 fn reload(db: &AccountsDB, pubkey: &Pubkey) -> AccountSharedData {
-    db.loader().load(pubkey).unwrap().unwrap()
+    // SAFETY: these synchronous tests exclusively own the database and finish
+    // using borrowed results before relocation, deletion, or storage reuse.
+    unsafe { db.loader().load(pubkey) }.unwrap().unwrap()
 }
 
 /// Closes `pubkey`, deleting it from whichever backend currently holds it.
@@ -145,8 +147,8 @@ fn test_routing_and_persistence_flips() {
 
     // Loader reads across both backends; contains agrees.
     let loader = db.loader();
-    assert_eq!(loader.load(&a).unwrap().unwrap().lamports(), 10);
-    assert_eq!(loader.load(&b).unwrap().unwrap().lamports(), 20);
+    assert_eq!(loader.read(&a, |acc| acc.lamports()).unwrap().unwrap(), 10);
+    assert_eq!(loader.read(&b, |acc| acc.lamports()).unwrap().unwrap(), 20);
     assert!(loader.contains(&a).unwrap() && loader.contains(&b).unwrap());
     assert!(!loader.contains(&Pubkey::new_unique()).unwrap());
     drop(loader);
@@ -399,7 +401,7 @@ fn test_defragment_preserves_live_accounts() {
 
     // Every survivor still loads unchanged and remains program-indexed.
     for (k, lam) in &live {
-        let acc = db.loader().load(k).unwrap().unwrap();
+        let acc = reload(&db, k);
         assert_eq!(acc.lamports(), *lam);
         assert_eq!(acc.owner(), &owner);
     }
@@ -698,10 +700,7 @@ fn test_variable_sizes_and_exact_freelist() {
 
     defrag_to_stable(&db);
     for (k, data) in &live {
-        assert_eq!(
-            db.loader().load(k).unwrap().unwrap().data(),
-            data.as_slice()
-        );
+        assert_eq!(reload(&db, k).data(), data.as_slice());
     }
 }
 
@@ -768,8 +767,153 @@ fn test_large_accounts_growth_and_defrag() {
 
     // Every survivor keeps its full 2 MiB image byte-for-byte.
     for (k, fill) in &live {
-        let acc = db.loader().load(k).unwrap().unwrap();
+        let acc = reload(&db, k);
         assert_eq!(acc.data().len(), SIZE);
         assert!(acc.data().iter().all(|&b| b == *fill));
     }
+}
+
+/// Proves snapshot relocation waits for a cached old index view, rejects a new
+/// reader during that wait, and only then moves the account below a real EOF
+/// truncation. Channel events force the schedule; timeouts only bound failures.
+#[test]
+fn test_snapshot_drains_readers_before_truncation() {
+    use std::{sync::mpsc, thread, time::Duration};
+
+    #[derive(Debug)]
+    enum Event {
+        Ready(u64),
+        Registered,
+        Draining,
+        Blocked,
+        Finished,
+    }
+
+    const SIZE: usize = 2 << 20;
+    const WATCHDOG: Duration = Duration::from_secs(10);
+    let (dir, db) = db();
+    let keys = [Pubkey::new_unique(), Pubkey::new_unique(), Pubkey::new_unique()];
+    for key in keys {
+        store(
+            &db,
+            key,
+            delegated_account(1, vec![0x5a; SIZE], Pubkey::default()).build(),
+        );
+    }
+    close(&db, &keys[0]);
+    close(&db, &keys[1]);
+    let key = keys[2];
+    let original = offset(&db, &key);
+    let file = AccountsDB::directory(dir.path()).join(STORAGE_FILE);
+    let length = || std::fs::metadata(&file).unwrap().len();
+    let before = length();
+    let valid = |account: &AccountSharedData| {
+        account.data().len() == SIZE && account.data().iter().all(|&byte| byte == 0x5a)
+    };
+
+    let (events, observed) = mpsc::channel();
+    let sender = events.clone();
+    *db.readers.on_drain.lock() = Some(Box::new(move || {
+        sender.send(Event::Draining).unwrap();
+    }));
+    let sender = events.clone();
+    *db.readers.on_block.lock() = Some(Box::new(move || {
+        sender.send(Event::Blocked).unwrap();
+    }));
+
+    thread::scope(|scope| {
+        let db = &db;
+        let (release, resume) = mpsc::channel();
+        let sender = events.clone();
+        let old_reader = scope.spawn(move || {
+            let loader = db.loader();
+            assert!(loader.contains(&key).unwrap());
+            let old = db
+                .persisted
+                .index
+                .offset(&key, loader.txn.borrow().as_ref().unwrap())
+                .unwrap()
+                .unwrap();
+            // This is a lower bound on the file offset: it excludes the metadata
+            // header, so exceeding the new EOF proves the old image was removed.
+            let old_bytes = bytemuck::cast::<_, u64>(old) * solana_account::STORAGE_UNIT as u64;
+            sender.send(Event::Ready(old_bytes)).unwrap();
+            // On a broken-barrier negative control, discard the stale transaction
+            // without dereferencing its truncated image. Failure is an assertion,
+            // not an intentional SIGBUS or undefined mapped-memory access.
+            resume
+                .recv_timeout(WATCHDOG)
+                .unwrap_or(false)
+                .then(|| loader.read(&key, valid).unwrap().unwrap())
+        });
+
+        let (start, proceed) = mpsc::channel();
+        let sender = events.clone();
+        let new_reader = scope.spawn(move || {
+            // Exercise the registered-slot admission path, not first registration.
+            drop(db.loader());
+            sender.send(Event::Registered).unwrap();
+            proceed
+                .recv_timeout(WATCHDOG)
+                .unwrap_or(false)
+                .then(|| db.loader().read(&key, valid).unwrap().unwrap())
+        });
+        let mut old_bytes = None;
+        for _ in 0..2 {
+            match observed.recv_timeout(WATCHDOG).unwrap() {
+                Event::Ready(bytes) => old_bytes = Some(bytes),
+                Event::Registered => {}
+                event => panic!("unexpected reader setup event: {event:?}"),
+            }
+        }
+        let snapshot = scope.spawn(|| {
+            // SAFETY: setup writes are finished; all readers use guarded loaders.
+            let result = unsafe { db.snapshot(1) };
+            events.send(Event::Finished).unwrap();
+            result
+        });
+
+        let draining = matches!(observed.recv_timeout(WATCHDOG).unwrap(), Event::Draining);
+        start.send(draining).unwrap();
+        let blocked = draining
+            && loop {
+                match observed.recv_timeout(WATCHDOG).unwrap() {
+                    Event::Draining => continue,
+                    Event::Blocked => break true,
+                    Event::Finished => break false,
+                    event => panic!("unexpected admission event: {event:?}"),
+                }
+            };
+        let unchanged = length() == before && offset(db, &key) == original;
+        release.send(draining && blocked && unchanged).unwrap();
+        let old_valid = old_reader.join().unwrap();
+        let new_valid = new_reader.join().unwrap();
+        snapshot.join().unwrap().unwrap();
+
+        assert!(
+            draining,
+            "snapshot bypassed the active reader instead of draining it"
+        );
+        assert!(blocked, "a new reader must observe closed admission");
+        assert!(
+            unchanged,
+            "relocation or truncation happened while the old view was live"
+        );
+        assert_eq!(old_valid, Some(true));
+        assert_eq!(new_valid, Some(true));
+        assert!(
+            offset(db, &key) != original,
+            "the fixture must actually relocate the image"
+        );
+        assert!(
+            length() < before,
+            "the fixture must actually truncate the file"
+        );
+        // The retained pre-compaction offset would address a removed mmap page.
+        assert!(
+            old_bytes.unwrap() > length(),
+            "the stale image must lie beyond the new EOF"
+        );
+    });
+    assert_eq!(db.loader().read(&key, valid).unwrap(), Some(true));
 }

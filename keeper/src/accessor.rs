@@ -83,13 +83,13 @@ impl<'a> AccountsAccessor<'a> {
     pub fn update_sysvars(&self, block: Block) -> Result<()> {
         let loader = self.loader();
 
-        let Some(mut hacc) = loader.load(&SlotHashes::id())? else {
+        let Some(mut hacc) = loader.read(&SlotHashes::id(), Clone::clone)? else {
             return Ok(());
         };
         let mut hashes: SlotHashes = hacc.deserialize_data().map_err(AccountsDBError::from)?;
         hashes.add(block.slot, block.hash);
         hacc.serialize_data(&hashes).map_err(AccountsDBError::from)?;
-        let Some(mut cacc) = loader.load(&Clock::id())? else {
+        let Some(mut cacc) = loader.read(&Clock::id(), Clone::clone)? else {
             return Ok(());
         };
         let mut clock: Clock = cacc.deserialize_data().map_err(AccountsDBError::from)?;
@@ -219,10 +219,22 @@ impl<'a> TransactionsAccessor<'a> {
                 }
             }
             while let Some(msg) = TlsManager::dequeue() {
-                subs.services.blocking_send(msg);
+                subs.services.blocking_send(|| msg);
             }
         }
-        subs.transactions.blocking_send(txn);
+        subs.transactions.blocking_send(|| {
+            // Subscriber queues outlive the execution barrier. Materialize
+            // borrowed accounts before handing off, while their mmap images
+            // are still protected by execution's account ownership.
+            if let Ok(execution) = &mut txn.execution.result {
+                for (_, account) in &mut execution.loaded_transaction.accounts {
+                    if matches!(account.cow(), solana_account::CoWAccount::Borrowed(_)) {
+                        *account = account.clone();
+                    }
+                }
+            }
+            txn
+        });
         // Clear TLS unconditionally so unsent messages cannot leak into the next transaction.
         TlsManager::clear();
         subs.signatures.send(&commit.signature, &commit.status);

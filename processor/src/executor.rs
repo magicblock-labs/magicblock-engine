@@ -8,6 +8,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+use accountsdb::AccountLoader;
 use keeper::{ExecutionRecord, FullTransaction, Keeper, ResolvedTransaction};
 use nucleus::{
     ledger::Block,
@@ -169,7 +170,11 @@ impl TransactionExecutor {
     /// its raw state transition (replay) or full execution.
     fn process(&mut self, txn: ResolvedTransaction) -> Result<()> {
         let accounts = self.state.accounts();
-        let output = self.svm.execute::<false>(accounts.loader(), &txn, self.state.features());
+        // SAFETY: the sequencer cannot acknowledge compaction until this
+        // executor completes processing, including commit and owned fanout.
+        // Replay follows the same drain protocol; no borrowed result escapes.
+        let loader = unsafe { AccountLoader::unguarded(&accounts) };
+        let output = self.svm.execute::<false>(loader, &txn, self.state.features());
         if !output.processing_result.was_processed_with_successful_result() {
             metrics::failed_transaction(FailureKind::Execution);
         }
