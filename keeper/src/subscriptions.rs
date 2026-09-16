@@ -154,7 +154,10 @@ impl<V> Unicast<V> {
         let _ = sender.send(value).await;
     }
 
-    /// Prepares a value only for a live receiver, then waits for queue capacity.
+    /// Prepares and sends a value, waiting for queue capacity.
+    ///
+    /// Skips preparation if no sender exists or it is observed closed.
+    /// The receiver may close after this check.
     pub(crate) fn blocking_send(&self, prepare: impl FnOnce() -> V) {
         if let Some(sender) = self.sender.get()
             && !sender.is_closed()
