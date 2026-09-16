@@ -119,7 +119,7 @@ impl TestEngine {
 
     /// Full committed account, or `None` when absent/closed.
     pub fn get_account(&self, key: Pubkey) -> Option<AccountSharedData> {
-        self.engine.accounts().loader().load(&key).unwrap()
+        self.engine.accounts().loader().read(&key, Clone::clone).unwrap()
     }
 
     /// Executes instructions and returns the committed transaction result.

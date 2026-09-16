@@ -21,16 +21,18 @@ pub(crate) struct LoadCallback<'a, const LOAD_OWNED: bool> {
 
 impl<const LOAD_OWNED: bool> TransactionProcessingCallback for LoadCallback<'_, LOAD_OWNED> {
     fn get_account_shared_data(&self, pubkey: &Pubkey) -> Option<(AccountSharedData, Slot)> {
-        self.loader
-            .load(pubkey)
+        let account = if LOAD_OWNED {
+            self.loader.read(pubkey, Clone::clone)
+        } else {
+            // SAFETY: execution owns the account until commit/fanout and is
+            // drained before compaction. Startup cache seeding is exclusive.
+            // Borrowed results are made owned before leaving that boundary.
+            unsafe { self.loader.load(pubkey) }
+        };
+        account
             .inspect_err(|error| error!(?error, "accountsdb load error"))
             .unwrap_or_default()
-            .map(|mut acc| {
-                if LOAD_OWNED {
-                    acc = acc.owned().into();
-                }
-                (acc, 0)
-            })
+            .map(|acc| (acc, 0))
     }
 }
 

@@ -54,7 +54,7 @@ async fn seeds_features_programs_and_sysvars() {
     }
     for (&id, &slot) in keeper.features().active() {
         assert_eq!(slot, 0, "features activate at slot 0");
-        let acc = loader.load(&id).unwrap().expect("feature account seeded");
+        let acc = loader.read(&id, Clone::clone).unwrap().expect("feature account seeded");
         assert_eq!(acc.owner(), &solana_feature_gate_interface::ID);
         assert!(acc.lamports() >= rent.minimum_balance(acc.data().len()));
     }
@@ -63,7 +63,7 @@ async fn seeds_features_programs_and_sysvars() {
     // owned by loader_v4 (not the BPF upgradeable loader), and rent-exempt.
     // Builtins are seeded through the same path with an executable native-loader
     // account, so they share this shape.
-    let acc = loader.load(&program).unwrap().expect("program seeded");
+    let acc = loader.read(&program, Clone::clone).unwrap().expect("program seeded");
     assert!(acc.executable());
     assert_eq!(acc.owner(), &loader_v4::ID);
     assert_eq!(acc.data(), elf.as_slice());
@@ -72,7 +72,7 @@ async fn seeds_features_programs_and_sysvars() {
     // The Clock is seeded one slot ahead of the last block; a fresh ledger's last
     // block defaults to slot 0, so the clock starts at slot 1.
     let clock: Clock = loader
-        .load(&Clock::id())
+        .read(&Clock::id(), Clone::clone)
         .unwrap()
         .expect("clock seeded")
         .deserialize_data()
@@ -81,7 +81,7 @@ async fn seeds_features_programs_and_sysvars() {
 
     // Rent and EpochSchedule sysvars are present and sysvar-owned.
     for id in [Rent::id(), EpochSchedule::id()] {
-        let acc = loader.load(&id).unwrap().expect("sysvar seeded");
+        let acc = loader.read(&id, Clone::clone).unwrap().expect("sysvar seeded");
         assert_eq!(acc.owner(), &sysvar::ID);
     }
     drop(loader);
@@ -123,7 +123,12 @@ async fn recovers_the_newest_snapshot() {
 
     let keeper = TestKeeper::from_builder(dirs, builder).await;
     keeper.accounts().validate().expect("restored store validates");
-    let restored = keeper.accounts().loader().load(&marker).unwrap().expect("marker restored");
+    let restored = keeper
+        .accounts()
+        .loader()
+        .read(&marker, Clone::clone)
+        .unwrap()
+        .expect("marker restored");
     assert_eq!(restored.lamports(), 2, "newest snapshot wins");
     // The corrupt tree saved for inspection is removed on successful recovery.
     assert!(!keeper.dirs.accounts.path().join("CURRENT.bkp").exists());

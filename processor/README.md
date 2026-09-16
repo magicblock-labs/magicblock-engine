@@ -34,6 +34,12 @@ coherent superblock snapshots, replay seal checks, replication handshakes, and
 shutdown. A superblock checkpoint finalizes its block and enters that pause as
 one sequencer message, so later transactions cannot enter the sealed snapshot.
 
+Transaction execution uses an unguarded AccountsDB loader: the sequencer already
+excludes compaction through execution, commit, and owned subscription fanout.
+This avoids reader registration, slot updates, and admission fences on the
+transaction-loading path. Simulation retains guarded reads because it runs
+independently of the sequencer barrier.
+
 ## Simulation
 
 Simulation has a separate worker and SVM context. It resolves a transaction,

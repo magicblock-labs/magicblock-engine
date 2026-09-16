@@ -55,19 +55,21 @@ impl AccountsDB {
     /// Writes a superblock snapshot under `root`.
     ///
     /// # Safety
-    /// The caller must ensure exclusive access while the snapshot is in
-    /// progress. The persisted backend runs one non-overlapping packing pass
-    /// and is flushed before the active tree is cloned and the volatile store
-    /// is rewritten in the clone. That ordering keeps the exported state
-    /// coherent only when no concurrent access can race with the export.
+    /// The caller must exclude account writes for the duration of export and
+    /// quiesce any raw borrowed views not covered by reader scopes.
+    /// Reader admission is paused internally during the packing pass;
+    /// ordinary reads may run again while the flushed tree is cloned.
     pub unsafe fn snapshot(&self, superblock: u64) -> SnapshotResult<PathBuf> {
         let _timer = metrics::time(Operation::Snapshot);
         let src = self.root.join(ACTIVE_DIR);
         let dst = self.root.join(format!("{PREFIX}{superblock:0>9}"));
         self.set_superblock(superblock);
-        // SAFETY: snapshot owns exclusive access, so defrag cannot race with
-        // readers or writers while compacting the persisted store.
-        unsafe { self.persisted.defragment() }?;
+        {
+            let _pause = self.readers.pause()?;
+            // SAFETY: the caller excludes writers; the pause drains readers
+            // and prevents new index snapshots until relocation is complete.
+            unsafe { self.persisted.defragment() }?;
+        }
         // Persisted state must reach disk before we copy the active tree.
         self.persisted.flush(true)?;
         // Clone the whole active tree, then replace the volatile payload below.

@@ -58,10 +58,11 @@ rejects a non-empty deployment whose configured authority account is absent.
 
 ## Superblock finalization
 
-`Keeper::finalize_superblock` requires quiesced execution. It snapshots accountsdb
-to refresh the checksum, then signs the reconstructed seal or compares it with
-an authenticated upstream payload and retains its signature. The snapshot is
-archived in the successor directory; completion acknowledges durable sealing
+`Keeper::finalize_superblock` requires quiesced execution; accountsdb separately
+drains scoped readers while relocating and truncating storage. It snapshots
+accountsdb to refresh the checksum, then signs the reconstructed seal or compares
+it with an authenticated upstream payload and retains its signature. The snapshot
+is archived in the successor directory; completion acknowledges durable sealing
 and rotation, not archive completion. `SuperblockAccessor::sealed` returns the
 unsigned accountsdb state.
 
@@ -88,7 +89,10 @@ delegated, ephemeral, and unresolved transient state remains outside it.
 
 Dedicated channels publish account and program updates, signature results, logs,
 processed transactions, blocks, cache evictions, completed snapshots, and
-service messages. Signatures have terminal oneshot fanout; persistent multicast
+service messages. Processed-transaction accounts are made owned before queueing,
+so subscribers never retain mmap views across compaction. This copy is skipped
+when there is no live processed-transaction subscriber.
+Signatures have terminal oneshot fanout; persistent multicast
 streams give each receiver a bounded queue and disconnect a receiver that falls
 behind. Processed transactions, service messages, and cache evictions each have
 one process-lifetime receiver and apply producer backpressure when full.

@@ -101,7 +101,7 @@ impl KeeperBuilder {
         self.seed_programs(&mut accounts)?;
         let caches = self.seed_sysvars(accountsdb, ledger, &mut accounts).await?;
         let authority = self.authority.pubkey();
-        if accountsdb.loader().load(&authority)?.is_none() {
+        if !accountsdb.loader().contains(&authority)? {
             let sponsor = AccountBuilder::default()
                 .lamports(SPONSOR_INIT_BALANCE)
                 .mode(AccountMode::Ephemeral);
@@ -182,14 +182,14 @@ impl KeeperBuilder {
         accounts: &mut Vec<AccountEntry>,
     ) -> Result<Caches> {
         let slot = accountsdb.slot();
-        let loader = accountsdb.loader();
         let id = SlotHashes::id();
         // AccountsDB starts at slot 1 and the ledger starts at head 1.
         let genesis = slot == 1 && ledger.head() == 1;
-        let slothashes = match loader.load(&id)? {
-            Some(account) => {
-                account.deserialize_data::<SlotHashes>().map_err(AccountsDBError::from)?
-            }
+        let slothashes = accountsdb
+            .loader()
+            .read(&id, |account| account.deserialize_data::<SlotHashes>())?;
+        let slothashes = match slothashes {
+            Some(hashes) => hashes.map_err(AccountsDBError::from)?,
             None => {
                 // Keep the sysvar account at its fixed serialized capacity so live
                 // updates can replace entries without resizing the account.

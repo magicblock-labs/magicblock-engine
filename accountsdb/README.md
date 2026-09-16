@@ -43,17 +43,43 @@ limits old-page retention without giving up reader-slot reuse.
 iteration. The optional `testkit` feature uses smaller maps and growth blocks
 without changing the on-disk format.
 
+## Reader scopes
+
+Use `AccountLoader::read` and `AccountsDB::program` for scoped zero-copy
+reads; callbacks can return encoded results or owned snapshots. Program iteration
+only exposes callback results. `unsafe load` is reserved for
+zero-copy transaction execution: borrowed results must remain protected through
+commit, with concurrent account writes, deletion, and storage reuse excluded.
+Retaining a loader or iterator excludes compaction, not ordinary account writes.
+`AccountLoader::unguarded` is the exception: callers must exclude compaction
+themselves for the loader and all borrowed results. It skips reader admission
+without introducing a separate account lookup path.
+
+Guarded loaders and program iterators enter the scope before opening their LMDB
+transactions. Registered readers update only their own cache-line-separated
+slot; first registration and reads meeting compaction use the maintenance mutex.
+Nested synchronous scopes share the outer admission. Do not hold a reader scope
+across asynchronous work or invoke compaction from inside one.
+
+Linux requires expedited private `membarrier` support, registered through rustix
+when opening the database. Readers use compiler fences; compaction issues the
+process-wide barrier. Registration and barrier errors propagate, with admission
+restored on maintenance failure. macOS uses full memory fences on both sides of
+the same protocol.
+
 ## Writes and compaction
 
 A persisted batch commits its LMDB transaction once. If applying or committing
 the batch fails, already committed borrowed images are rolled back so indexed
 state remains authoritative. Freed image spans enter the freelist.
 
-Defragmentation requires exclusive access. Snapshot export packs tail accounts
-into exact holes or the smallest fitting holes that leave a minimum useful
-remainder. It copies only between non-overlapping spans and publishes all
-relocations in one index transaction. Vacated source spans are deferred to the
-next pass, so some fragmented layouts may stall.
+Defragmentation requires exclusive access. Snapshot export drains registered
+readers before packing and blocks new readers until relocation and truncation
+finish. Account writes must still be quiesced by the caller. Snapshot export
+packs tail accounts into exact holes or the smallest fitting holes that leave
+a minimum useful remainder. It copies only between non-overlapping spans and
+publishes all relocations in one index transaction. Vacated source spans are
+deferred to the next pass, so some fragmented layouts may stall.
 
 After validation, keeper startup repeats committed packing passes to a fixed
 point before exposing the database to readers. Snapshot export runs one pass.

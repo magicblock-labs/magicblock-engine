@@ -154,12 +154,13 @@ impl<V> Unicast<V> {
         let _ = sender.send(value).await;
     }
 
-    /// Sends from a synchronous worker, waiting until the receiver has capacity.
-    pub(crate) fn blocking_send(&self, value: V) {
-        let Some(sender) = self.sender.get() else {
-            return;
-        };
-        let _ = sender.blocking_send(value);
+    /// Prepares a value only for a live receiver, then waits for queue capacity.
+    pub(crate) fn blocking_send(&self, prepare: impl FnOnce() -> V) {
+        if let Some(sender) = self.sender.get()
+            && !sender.is_closed()
+        {
+            let _ = sender.blocking_send(prepare());
+        }
     }
 }
 

@@ -30,7 +30,7 @@ async fn subscribers_send_semantics() {
 
     unicast.send(3).await;
     let sender = unicast.clone();
-    let send = std::thread::spawn(move || sender.blocking_send(4));
+    let send = std::thread::spawn(move || sender.blocking_send(|| 4));
     assert_eq!(unicast_rx.recv().await, Some(3));
     send.join().unwrap();
     assert_eq!(unicast_rx.recv().await, Some(4));
