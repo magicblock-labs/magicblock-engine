@@ -14,7 +14,7 @@ use tracing::{error, warn};
 use twox_hash::XxHash3_64;
 
 use crate::{
-    AccountEntry, AccountsDBError, Result, StoreKind,
+    AccountEntry, AccountsDBError, Result,
     metrics::{self, Operation},
     store::{
         index::{Index, OptRoTxn, OptRwTxn, OwnerIter, read_txn, write_txn},
@@ -105,7 +105,6 @@ impl PersistedStore {
         if let Some(txn) = txn
             && result.is_ok()
         {
-            metrics::accounts(StoreKind::Persisted, self.index.accounts.len(&txn)?);
             result = txn.commit().map_err(Into::into);
         }
         if let Err(error) = &result {

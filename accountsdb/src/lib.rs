@@ -9,7 +9,7 @@ use std::{
 
 use derive_more::From;
 use nucleus::Slot;
-use solana_account::{AccountSeqLock, AccountSharedData, CoWAccount};
+use solana_account::{AccountMode, AccountSeqLock, AccountSharedData, CoWAccount};
 use solana_pubkey::Pubkey;
 use tracing::{info, warn};
 
@@ -278,16 +278,16 @@ impl<'a> AccountLoader<'a> {
     /// Mutating borrowed results additionally requires exclusive account access.
     pub unsafe fn load(&self, pubkey: &Pubkey) -> Result<Option<AccountSharedData>> {
         if let Some(account) = self.db.volatile.load(pubkey) {
-            metrics::load(StoreKind::Volatile);
             return Ok(Some(account.into()));
         }
+        self.persisted(pubkey)
+    }
+
+    /// Resolves a persisted view using this scope's cached index transaction.
+    /// Borrowed results must remain within the same boundary as `load` results.
+    fn persisted(&self, pubkey: &Pubkey) -> Result<Option<AccountSharedData>> {
         let txn = &mut self.txn.borrow_mut();
         let account = self.db.persisted.load(txn, pubkey)?;
-        if account.is_some() {
-            metrics::load(StoreKind::Persisted);
-        } else {
-            metrics::load(StoreKind::Absent);
-        }
         Ok(account.map(Into::into))
     }
 
@@ -306,14 +306,25 @@ impl<'a> AccountLoader<'a> {
         Ok(account.map(|account| AccountSeqLock::new(account).read(reader)))
     }
 
+    /// Reads only the mode, without cloning volatile data or copying persisted data.
+    /// Uses the same backend precedence and cached index snapshot as [`Self::read`].
+    /// Persisted mode reads retry if a concurrent publish changes the image.
+    pub fn mode(&self, pubkey: &Pubkey) -> Result<Option<AccountMode>> {
+        if let Some(mode) = self.db.volatile.mode(pubkey) {
+            return Ok(Some(mode));
+        }
+        Ok(self
+            .persisted(pubkey)?
+            .map(|account| AccountSeqLock::new(account).read(AccountSharedData::mode)))
+    }
+
     /// Returns whether an account exists in either backend.
     pub fn contains(&self, pubkey: &Pubkey) -> Result<bool> {
         let txn = &mut self.txn.borrow_mut();
         if self.db.persisted.contains(txn, pubkey)? {
             return Ok(true);
         }
-        let contains = self.db.volatile.contains(pubkey);
-        Ok(contains)
+        Ok(self.db.volatile.contains(pubkey))
     }
 }
 
@@ -382,28 +393,6 @@ pub enum AccountsDBError {
 type Result<T> = std::result::Result<T, AccountsDBError>;
 /// Account key plus shared account payload.
 pub type AccountEntry = (Pubkey, AccountSharedData);
-
-/// Classification used by accountsdb metrics.
-#[derive(Clone, Copy)]
-pub(crate) enum StoreKind {
-    /// Mmap-backed persisted storage.
-    Persisted,
-    /// In-memory volatile storage.
-    Volatile,
-    /// Account was absent from both storage backends.
-    Absent,
-}
-
-impl StoreKind {
-    /// Returns the Prometheus label value for this classification.
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            StoreKind::Persisted => "persisted",
-            StoreKind::Volatile => "volatile",
-            StoreKind::Absent => "absent",
-        }
-    }
-}
 
 /// Returns `true` for entries that must touch persisted storage.
 fn persisted(entry: &&AccountEntry) -> bool {

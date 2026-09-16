@@ -47,13 +47,19 @@ without changing the on-disk format.
 
 Use `AccountLoader::read` and `AccountsDB::program` for scoped zero-copy
 reads; callbacks can return encoded results or owned snapshots. Program iteration
-only exposes callback results. `unsafe load` is reserved for
+only exposes callback results. `AccountLoader::mode` reads volatile mode under
+the map guard without cloning account data, and persisted mode through the same
+cached index and sequence check as ordinary reads. `unsafe load` is reserved for
 zero-copy transaction execution: borrowed results must remain protected through
 commit, with concurrent account writes, deletion, and storage reuse excluded.
 Retaining a loader or iterator excludes compaction, not ordinary account writes.
 `AccountLoader::unguarded` is the exception: callers must exclude compaction
 themselves for the loader and all borrowed results. It skips reader admission
 without introducing a separate account lookup path.
+
+Per-source load counters (`accountsdb_loads`) and backend account-count gauges
+(`accountsdb_accounts`) are no longer exported. Persisted storage counters,
+including `accountsdb_persisted_reads`, and operation timings remain available.
 
 Guarded loaders and program iterators enter the scope before opening their LMDB
 transactions. Registered readers update only their own cache-line-separated
