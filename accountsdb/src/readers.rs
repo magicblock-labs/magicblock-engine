@@ -36,18 +36,7 @@ pub(crate) struct Readers {
     idle: Mutex<()>,
     /// Wakes the sole compactor when an outer reader exits or withdraws.
     drained: Condvar,
-    /// Test hook before parking for active readers; may fire more than once.
-    #[cfg(test)]
-    pub(crate) on_drain: Observer,
-    /// Test hook after a registered reader withdraws from a closed gate.
-    #[cfg(test)]
-    pub(crate) on_block: Observer,
 }
-
-/// Per-database scheduling observations, absent from production builds.
-/// Callbacks run under internal locks and must not reenter this protocol.
-#[cfg(test)]
-type Observer = Mutex<Option<Box<dyn Fn() + Send>>>;
 
 /// Isolates one thread's writes, including paired 64-byte cache-line prefetches
 /// on x86-64. Padding is per thread, not per account.
@@ -92,10 +81,6 @@ impl Readers {
             maintenance: Mutex::new(()),
             idle: Mutex::new(()),
             drained: Condvar::new(),
-            #[cfg(test)]
-            on_drain: Mutex::new(None),
-            #[cfg(test)]
-            on_block: Mutex::new(None),
         })
     }
 
@@ -124,10 +109,6 @@ impl Readers {
                 return guard;
             }
             drop(guard);
-            #[cfg(test)]
-            if let Some(observe) = self.on_block.lock().as_ref() {
-                observe();
-            }
             // Only readers that meet maintenance touch the mutex. Never wait
             // while marked active: the compactor is waiting for these slots.
             drop(self.maintenance.lock());
@@ -163,10 +144,6 @@ impl Readers {
         // exclusive maintenance ownership or allowing a second compactor in.
         let mut idle = self.idle.lock();
         while self.slots.iter().any(|slot| slot.depth.load(Acquire) != 0) {
-            #[cfg(test)]
-            if let Some(observe) = self.on_drain.lock().as_ref() {
-                observe();
-            }
             self.drained.wait(&mut idle);
         }
         // Keep subsequent relocation after the complete slot scan, including
