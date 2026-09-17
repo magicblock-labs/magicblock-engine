@@ -33,38 +33,21 @@ representation, transaction context, serialization, VM mapping, and CPI.
 
 ## Account representation
 
-`solana-account` replaces the shared-data representation with copy-on-write
-storage. `AccountSharedData` contains either an owned `Arc<Vec<u8>>` or a borrowed
-view into an aligned external buffer. `DirtyMarkers` record changes to data,
-owner, lamports, slot, mode, and state flags for higher-layer writeback.
+`solana-account` uses copy-on-write owned data or an 8-byte-aligned borrowed
+view with active/shadow images. Mutation copies into the shadow; commit publishes
+it, reset abandons it, and rollback is valid only after commit. Growth beyond
+borrowed capacity promotes to owned storage; shared owned data uses
+`Arc::make_mut`. See [layout and lifecycle rules](account/README.md).
 
-Borrowed storage has these invariants:
+Only delegated and ephemeral accounts are user-mutable. Transient and closed
+revoke mutation immediately, including across CPI. The transaction-final guard
+accepts dirty transitions into those modes for writeback, not further writes.
+Transient remains authoritative and persisted; the caller removes closed state.
 
-- The buffer is 8-byte aligned and remains live for the borrow.
-- One header and pubkey prefix are followed by two account images.
-- `AccountHeader::sequence` selects the active image.
-- `translate` copies active state into the shadow image before mutation.
-- `commit` publishes the shadow image; `reset` abandons it.
-- `rollback` is valid only after `commit`.
-
-Writes remain borrowed while they fit the image capacity. Growth beyond that
-capacity promotes the account to owned storage. Shared owned data becomes unique
-through `Arc::make_mut` before mutation.
-
-`AccountMode` contains `ReadOnly`, `Placeholder`, `System`, `Delegated`,
-`Ephemeral`, `Transient`, and `Closed`. Only delegated and ephemeral accounts are
-mutable by user programs. Entering transient or closed revokes that permission
-immediately, including across CPI. Instruction setters and data mappings enforce
-the current mode. The transaction-final access guard separately accepts dirty
-mode transitions into transient or closed, allowing legitimate writeback without
-authorizing further writes. Transient state remains authoritative and persistent;
-closed state is removed by the caller's storage layer.
-
-`StateFlags` contains `EXECUTABLE`. Complete-account patch sequences cover
-non-flag fields; MagicRoot finalization installs the caller's complete flag value
-without changing lamports. Replacement freshness remains the caller's responsibility.
-`AccountSharedData` does not store `rent_epoch`; compatibility APIs return or
-ignore the masked value required by their interface.
+Dirty markers track data, owner, lamports, slot, mode, and flags. Complete-account
+patches cover non-flag fields; MagicRoot finalization installs all supplied flags
+without changing lamports. Freshness remains the caller's responsibility.
+`rent_epoch` is not stored; compatibility APIs return or ignore its masked value.
 
 ## Transaction context
 
@@ -80,42 +63,22 @@ deconstruction; failure of `Rc::try_unwrap` indicates a lifetime bug.
 
 ## Transaction parsing and Engine-private transactions
 
-`agave-transaction-view` parses Legacy, v0, V1, and Engine-private Magicblock
-transactions directly from their serialized bytes. Legacy and v0 retain the
-standard Solana wire layouts, while V1 retains the Agave V1 layout. All three
-accept serialized sizes through `u16::MAX` bytes, inclusive. The compact-u16
-parser supports the complete canonical one-, two-, and three-byte encoding, so
-instruction data and other framed arrays are no longer limited by the former
-two-byte parser assumption.
+`agave-transaction-view` supports Legacy, v0, V1, and private Magicblock version
+127. Standard versions accept up to `u16::MAX` bytes; Magicblock uses the V1
+layout with a distinct prefix and a 16 MiB limit. Full canonical compact-u16
+parsing and checked `u32` framing precede unchecked views.
 
-Frame offsets and total lengths are stored as `u32`. Fallible parsing uses
-checked range arithmetic and validates every frame before unchecked iterators
-or typed views access the original bytes. The engine is guaranteed not to run
-on 16-bit targets, so conversion from validated `u32` offsets to `usize` is
-direct.
+Engine composes account operations as Magicblock transactions, signs the exact
+message after setting the prefix, and requires the first static account to be
+the configured authority. The private format permits atomic chunked account
+patches without widening standard policy: instruction traces allow 255 entries,
+CPI remains limited to 64 and reserves space for top-level instructions, and
+V1-shaped address counts remain limited to 255.
 
-Magicblock is private transaction version 127 and reuses the V1 layout with a
-distinct prefix. Its signatures follow the V1 message at the end of the byte
-stream. The Engine transaction composer compiles account operations as V1,
-writes the Magicblock prefix, signs the exact message range, and verifies that
-the first static account is the configured Engine authority. Magicblock
-transactions may be at most 16 MiB and raise only the SVM instruction-trace
-limit to 255; CPI invocations remain limited to 64 and reserve capacity for all
-top-level instructions. Standard versions retain their existing structural
-limits. The account accessor uses this private path so a 64 KiB account payload
-can be split into patch instructions and executed atomically without relaxing
-standard transaction policy. Its V1-shaped address count remains encodable at a
-maximum of 255.
-
-Address lookup tables are intentionally disabled. Any transaction containing a
-lookup table entry fails sanitization with `AddressLookupMismatch`; an empty v0
-lookup list remains valid and resolves without loaded addresses. Sequencing and
-simulation therefore resolve transactions without supplying loaded addresses.
-
-The crate-specific wire and safety contracts are documented in
-[`transaction-view/README.md`](transaction-view/README.md). Keep its version
-prefix, signed message range, size limits, sanitizer, Engine composer, and SVM
-trace-limit override synchronized.
+Address lookup entries fail sanitization with `AddressLookupMismatch`; empty v0
+lookup lists remain valid. Static account keys must be unique. See the
+[wire and safety contracts](transaction-view/README.md); keep parsing, sanitizing,
+Engine composition, and SVM trace limits synchronized.
 
 ## VM account mapping
 

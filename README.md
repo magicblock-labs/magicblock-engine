@@ -18,32 +18,9 @@
 MagicBlock Engine executes Solana transactions for ephemeral rollups. It owns
 account state, records transaction and block history, and exposes asynchronous
 APIs for execution, simulation, reads, and subscriptions.
-
-## ✨ Highlights
-
-|   |   |   |
-| :-- | :-- | :-- |
-| ⚙️ **Runs Solana programs** — a real SVM, without the overhead of a validator | 🗃️ **Storage that fits the account** — engine-owned state on disk, chain-mirrored state in memory | 📚 **Retained history** — transactions and blocks kept in segments you can retain or drop wholesale |
-| 🔁 **Replication** — mirror a live engine onto standby nodes over TCP | 🩹 **Recoverable startup** — restores snapshots and verifies replayed history after a crash | 📡 **Async APIs** — execute, simulate, read, and subscribe over live state |
-
-## 📖 Contents
-
-- [🚀 Starting the engine](#-starting-the-engine)
-- [🛑 Shutdown](#-shutdown)
-- [🔁 Replication](#-replication)
-- [📦 Account state](#-account-state)
-- [📨 Transactions](#-transactions)
-- [📡 Subscriptions](#-subscriptions)
-- [🩹 Startup and recovery](#-startup-and-recovery)
-- [🧩 Workspace layout](#-workspace-layout)
-
----
+It does not provide consensus, fork choice, or confirmation policy.
 
 ## 🚀 Starting the engine
-
-Bringing up an engine is mostly filling in one struct and awaiting one call —
-everything underneath (storage, ledger, scheduler, background tasks) is wired up
-for you.
 
 The embedding service must retain both the engine and its `ShutdownManager`.
 The manager coordinates every background service started by `Engine::new`.
@@ -89,68 +66,37 @@ async fn open_engine(
 }
 ```
 
-The second argument chooses who advances blocks. `None` runs the built-in
-pacer, which produces blocks on its own clock — the standalone case. Passing a
-channel instead makes block boundaries caller-driven, as replication followers
-do when they step in time with a leader. `BlockInput::Production` supplies the slot
-and timestamp; the sequencer computes the block hash and parent and signs the
-record. `BlockInput::Replay` validates the supplied hash and parent and preserves
-the signed upstream record.
-The `superblock` interval is a `u64`; zero disables periodic sealing of nonzero
-slots. Replication followers apply upstream seals independently of this interval.
+The second argument selects block pacing: `None` produces blocks locally; an
+external channel supplies production or replay boundaries. `superblock = 0`
+disables periodic sealing of nonzero slots; followers still apply upstream seals.
 
-The two modes also start differently: the built-in pacer wipes chain-mirrored
-volatile accounts at startup (internal system accounts stay available), so a
-standalone engine begins from clean external state. An external pacer keeps
-whatever volatile state was restored, which replication depends on.
-
----
+Internal pacing clears chain-mirrored volatile accounts at startup, preserving
+internal system accounts. External pacing retains restored volatile state.
 
 ## 🛑 Shutdown
 
-Shutdown isn't a hard stop — it unwinds in tiers, so in-flight work drains and
-durable state lands on disk before the process goes away.
-
-The host waits for an OS signal or premature service termination with
-`ShutdownManager::wait`. It should then stop external ingress and call
-`ShutdownManager::terminate` while retaining the engine handle.
+Retain the engine and its `ShutdownManager`. Stop external ingress before
+terminating managed services:
 
 ```rust
 let cause = shutdown.wait().await;
-
 // Stop accepting transactions and other external work here.
-shutdown.terminate().await;
+let outcome = shutdown.terminate().await;
 ```
 
-`wait` returns whether shutdown was requested by an OS signal or by a managed
-service terminating early. Embedding processes can use the service reason to
-distinguish recoverable lifecycle events, such as a replication snapshot that
-requires reopening the engine, from fatal failures.
-
-Shutdown proceeds by service tier:
-
-1. A replication client stops consuming upstream state.
-2. The pacemaker stops producing boundaries and calls `Engine::shutdown`.
-3. The already-drained sequencer and terminally-synced ledger appender stop.
-4. Ledger readers, simulation, subscriptions, and other backing services stop.
+Inspect both reasons: `wait` identifies the trigger (including a replication
+snapshot restart), while `terminate` reports failures encountered during draining.
+The manager stops replication, pacing, execution, and backing services in order.
+Dropping it cancels services but does not wait for them.
 
 Internal pacing publishes a final block and flushes durable state. External
-pacing also writes volatile state to `CURRENT/volatile.db` after flushing the
-corresponding ledger cursor. The final sync explicitly closes ledger workers,
-so retained but inactive engine handles cannot hold shutdown open. Each tier
-has a bounded termination window.
-
----
+pacing flushes the ledger cursor before saving volatile state for restart. See
+[shutdown details](engine/README.md#shutdown).
 
 ## 🔁 Replication
 
-Point a follower at a leader and it keeps itself in sync — replaying the stream
-when it can, and pulling a fresh snapshot when it has fallen too far behind.
-
-Replication keeps a standby engine in step with a live one: a **leader** serves
-its history over TCP, and one or more **followers** replay that stream to stay
-current. On the leader machine, bind a dispatcher to a reachable address and
-serve the retained ledger:
+A leader serves retained history over TCP; followers replay it or bootstrap
+from a snapshot. On the leader machine:
 
 ```rust
 use std::sync::Arc;
@@ -174,36 +120,21 @@ let engine = Engine::new(builder, Some(block_rx), &mut shutdown).await?;
 ReplicationClient::spawn(leader_addr, engine.clone(), block_tx, &mut shutdown)?;
 ```
 
-Leader and follower local keypairs do not need to match. The server allowlist
-contains follower local identities and denies all access when empty. The
-follower's remote authority identifies its immediate upstream, whose signed
-responses must arrive within 30 seconds of the follower's clock.
+The allowlist contains follower **local** identities; an empty list denies all
+followers. Set the follower's remote authority to the source identity. Handshake
+clocks must agree within 30 seconds. Distinct-key followers cannot serve replicas;
+relays must hold the source's private key.
 
-The external pacer keeps replicated blocks ordered with transactions, resets,
-and seals. If the leader's retained stream cannot satisfy the follower's cursor,
-it sends the newest snapshot. The client stages it, reports `RestartRequired`
-through the follower's shutdown manager, and the follower host reopens its
-engine from the same directories.
-
----
+If history has expired, the client stages a snapshot and reports `RestartRequired`.
+The host must drain services and reopen the engine from the same directories. See
+[replication contracts](replicator/README.md) for authentication, relay, and
+shutdown behavior.
 
 ## 📦 Account state
 
-You never have to decide where an account lives — the engine watches what each
-account *is* and keeps it in the right place on its own.
-
-The engine holds two kinds of accounts and stores each where it makes sense:
-
-- Accounts the engine controls — delegated, ephemeral, and transient — are
-  authoritative here and **persisted to disk**.
-- Accounts that only mirror external chain or system state — read-only,
-  placeholders, and sysvars — are kept **in volatile memory**.
-
-An account's `AccountMode::authoritative()` classification decides which side it
-belongs to. When that changes, accountsdb moves the account and drops the stale
-copy from the other backend, so there is only ever one live copy. `Transient`
-accounts remain authoritative and persisted even though runtime code cannot
-mutate them.
+Delegated, ephemeral, and transient accounts are authoritative and persisted;
+externally mirrored accounts are volatile. `Transient` remains persisted but is
+not user-mutable. Accountsdb handles backend changes and removes closed accounts.
 
 To replace accounts directly, acquire `Engine::account(pubkey).await`.
 `materialize` and `delete` each run as one signed, committed transaction and
@@ -224,32 +155,15 @@ let account = AccountBuilder::default()
     .build();
 
 engine.account(key).await.materialize(account, None).await?;
-
-let replacement = AccountBuilder::default()
-    .lamports(2_000_000)
-    .owner(owner)
-    .mode(AccountMode::ReadOnly)
-    .slot(2)
-    .data(vec![5; 4])
-    .build();
-engine.account(key).await.materialize(replacement, None).await?;
 engine.account(key).await.delete().await?;
 ```
 
-Each mutation is one committed transaction. `materialize` can also run optional
-post-finalize instructions in that transaction; if an instruction fails, the
-replacement and action account changes roll back. Mutations consume the accessor
-and return only their result, releasing ownership after completion and success
-bookkeeping. Retrying requires reacquiring the account and rechecking its state.
-Cancelling the wait leaves ownership with the operation until completion; callers
-must reacquire and reread before recovery. Complete-account patches cover non-flag
-fields, and finalization atomically installs the caller-supplied flags without changing
-lamports. Callers are responsible for supplying current state; later
-replacements remain subject to the account's slot and lifecycle rules.
-Materialization places post-finalize instructions immediately after finalization.
-Confirmed redelegation uses this same atomic operation, directly replacing
-`Transient` with `Delegated` at a newer remote slot; Chainlink must establish the
-new delegation. See the [replacement contract](engine/README.md#account-replacement).
+`materialize` also replaces existing accounts and can run post-finalize actions
+atomically. Lifecycle rules apply: a newer slot alone does not authorize replacing
+engine-owned state. Mutations consume the accessor and retain its lease through
+completion even if the caller stops waiting. Reacquire and reread before retrying;
+a timeout or completion-task failure does not prove rollback. See the
+[replacement and redelegation contract](engine/README.md#account-replacement).
 
 Missing external accounts can be coordinated with `Engine::accounts().ensure`.
 The first caller receives `MissingAccount::Load`; concurrent callers receive a
@@ -261,9 +175,6 @@ failed outcome.
 ---
 
 ## 📨 Transactions
-
-Hand it whatever you've already got — a few instructions, a `Message`, or raw
-encoded bytes — and pick how much you want to wait around for.
 
 `Engine::transaction` accepts an instruction slice, `Message`, sanitized
 `TransactionView`, or encoded transaction bytes. Instruction slices and messages
@@ -294,9 +205,6 @@ async fn submit(
 
 ## 📡 Subscriptions
 
-No polling loops — subscribe to what you care about and the engine pushes
-updates as they happen.
-
 Keeper accessors expose dedicated Tokio channels for live state:
 
 ```rust
@@ -319,45 +227,30 @@ full.
 
 ## 🩹 Startup and recovery
 
-After an interrupted write, the next start checks local state against retained
-history and restores a retained snapshot when necessary.
+Startup validates accountsdb against retained history, restores a retained
+snapshot when necessary, and replays missing entries. Seal or final transaction
+count mismatches fail startup with `ReplayError::StateMismatch`; recovery requires
+a valid snapshot when current state is unusable. See
+[recovery and restart semantics](engine/README.md#startup-and-recovery).
 
-Every startup reconciles the account store with the transaction history. A
-crash, corruption, and a staged replication snapshot enter the same recovery
-path, but recovery requires a valid retained snapshot when the current store
-cannot be used.
-
-Concretely: keeper validates the account store against the retained ledger. A
-corrupt store, or a valid one whose latest checkpoint trails the ledger, is
-replaced with the newest retained snapshot. If that restored state still trails
-the ledger tip, the engine replays the missing history to catch up, checking the
-rebuilt state against each recorded checkpoint and refusing to continue
-(`ReplayError::StateMismatch`) if they diverge. When the store is already
-current, nothing runs.
-
----
+This is not a guarantee of complete history after a crash: ledger indexes become
+visible asynchronously and no crash-tail index rebuild is performed. Graceful
+shutdown is the supported complete-history boundary; see
+[ledger durability](ledger/README.md#append-and-read-paths).
 
 ## 🧩 Workspace layout
 
 | Crate | Role |
 | :-- | :-- |
-| `nucleus` | Shared ledger, runtime, metrics, TLS, and shutdown types. |
-| `solana/*` | The runtime forks required by the engine account model. |
-| `accountsdb` | Owns persisted and volatile account storage and snapshots. |
-| `ledger` | Stores transactions, execution records, blocks, and superblocks. |
-| `keeper` | Opens both stores and provides caches, reads, and subscriptions. |
-| `processor` | Schedules transactions across SVM executors and commits results. |
+| [`nucleus`](nucleus/README.md) | Shared ledger, runtime, metrics, TLS, and shutdown types. |
+| [`solana/*`](solana/README.md) | The runtime forks required by the engine account model. |
+| [`accountsdb`](accountsdb/README.md) | Owns persisted and volatile account storage and snapshots. |
+| [`ledger`](ledger/README.md) | Stores transactions, execution records, blocks, and superblocks. |
+| [`keeper`](keeper/README.md) | Opens both stores and provides caches, reads, and subscriptions. |
+| [`processor`](processor/README.md) | Schedules transactions across SVM executors and commits results. |
 | `programs/*` | MagicRoot and the v42 test program and interfaces. |
-| `engine` | Wires the execution engine and exposes the public handle. |
-| `replicator` | Streams durable engine state between nodes. |
+| [`engine`](engine/README.md) | Wires the execution engine and exposes the public handle. |
+| [`replicator`](replicator/README.md) | Streams durable engine state between nodes. |
 
 Transactions are appended before execution, then paired with execution metadata.
-Successful dirty accounts are written through accountsdb and live notifications
-are published. Superblock boundaries quiesce execution while keeper snapshots
-accountsdb and archives it beside the next retained ledger segment.
-
----
-
-<p align="center">
-  <sub>Built with 🦀 Rust · licensed under Apache-2.0 · © MagicBlock contributors</sub>
-</p>
+Superblock boundaries quiesce execution for coherent account snapshots.

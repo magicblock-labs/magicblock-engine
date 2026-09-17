@@ -45,30 +45,23 @@ Directory N carries the snapshot and seal of N−1: its starting state, not its
 closing state. `Superblock::seal()` therefore returns seal N−1; seal N is written
 to N's blockstore when it closes and retained in N+1's metadata.
 
-Reader requests run on a worker pool. Each worker owns its decode buffers and
-reads only through published cursors. The ledger-wide Fjall index uses two
-background workers and one 64 MiB cache across all superblock keyspaces. The
-optional `testkit` feature uses one reader worker without changing the on-disk
-format. Point lookups read the latest visible value, while range and prefix
-iterators carry their own Fjall snapshot guard; the append-only index does not
-need a request-wide snapshot.
+Reader workers own their decode buffers and read only through published cursors.
+Fjall shares two background workers and a 64 MiB cache across superblocks. Point
+lookups see the latest value; range/prefix iterators retain snapshot guards.
+`testkit` uses one reader without changing the format.
 
-Block-range reads scan published blockstore bytes directly, without consulting
-the index or executions file. They stream boundaries in storage order through a
-bounded channel, with the preceding transactions' 16-byte signature prefixes
-kept in blockstore order. Cancellation is checked between decoded entries. This
-is a read-side projection only and does not change the on-disk blockstore or
-index format.
+Block-range reads bypass indexes and execution records, streaming published
+blockstore boundaries with the preceding transactions' 16-byte signature prefixes
+through a bounded channel. Cancellation is checked between entries.
 
 Each block atomically commits its transaction, block, and account index changes.
 Index visibility is asynchronous: recent transaction and block lookups may be
 absent, account history omits trailing unindexed blocks, and the live signature
 cache may lead durable history. Explicit syncs, seals, resets, retention, and
-shutdown are ordered index drain fences and use file `sync_data` and Fjall
-`SyncData`. Ordinary block
-boundaries use `Buffer` durability. Thus a process crash can leave a published
-data tail without indexes; graceful shutdown is the supported complete-history
-boundary and no crash-tail index rebuild is performed. Sealing also queues the
+shutdown are ordered index drain fences using file `sync_data` and Fjall
+`SyncData`. Ordinary block boundaries use `Buffer` durability. A process crash
+can leave a published data tail without indexes; graceful shutdown is the supported
+complete-history boundary and no crash-tail index rebuild is performed. Sealing queues the
 immutable keyspace's active memtable for background SST flushing so its journal
 history can be reclaimed.
 
@@ -79,8 +72,6 @@ keys retain eight public-key bytes. The account index stores
 value. Fixed-width big-endian slot and account-span key components make reverse
 Fjall ranges start at the newest entry. Opaque span values remain little-endian.
 Accounts with colliding eight-byte prefixes share history results.
-LZ4 is disabled because the realistic index fixture reduced closed-directory
-size by only 7.37%.
 
 During coordinated shutdown, one queue marker per reader closes the pool after
 earlier requests. A final appender sync flushes every preceding event, fences the

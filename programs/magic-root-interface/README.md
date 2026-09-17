@@ -15,6 +15,7 @@ complete account's non-flag fields and appends a finalization instruction that
 installs its complete flag value without changing lamports. The underlying
 patch sequence validates mode and slot together through one lifecycle patch.
 Callers are responsible for composing current account state under the
-[lifecycle rules](../../solana/account/README.md). Engine materialization appends `PostFinalize` immediately
-after finalization; MagicRoot relies on this ordering after authenticating the
-engine authority and caller.
+[lifecycle rules](../../solana/account/README.md). Engine appends `PostFinalize`
+immediately after finalization; MagicRoot relies on this ordering. Actions and
+`source_program` must come from caller-verified provenance: the program supplies
+the declared signers and attributes CPI to that source.

@@ -8,11 +8,9 @@ Accountsdb routes account state between two backends according to
 - `VolatileStore` is an in-memory map for externally owned state that can be
   fetched again.
 
-Every store operation touches the backend required by both the account's current
-representation and authoritative classification. This commits borrowed images
-in persistent storage, inserts owned images there, updates owned volatile
-images, and removes stale copies after mode changes or closure. `Transient`
-remains authoritative and runtime-immutable until its lifecycle state resolves.
+Stores commit borrowed images or insert owned state into the appropriate backend,
+removing stale copies on mode changes and both copies on closure. `Transient`
+remains authoritative but runtime-immutable.
 
 `AccountsDB::commit` is the ledger-transaction boundary. It stores successful
 account transitions and then advances a persistent transaction counter; empty
@@ -34,32 +32,22 @@ The LMDB index under `CURRENT/index` contains:
 - `programs`: owner tag to account offsets.
 - `freelist`: image size to reusable offsets.
 
-Read transactions use LMDB's thread-local reader slots, with capacity for 256
-reader threads. Dropping a transaction ends its active snapshot, while its slot
-remains cached for reuse by the same thread. Keeping snapshots short therefore
-limits old-page retention without giving up reader-slot reuse.
-
-`PersistedProgramIter` retains its read transaction for the persisted portion of
-iteration. The optional `testkit` feature uses smaller maps and growth blocks
-without changing the on-disk format.
+LMDB caches reader slots per thread (up to 256 threads). Keep transactions short
+to limit old-page retention; `PersistedProgramIter` holds one while iterating
+persisted accounts. `testkit` uses smaller maps without changing the disk format.
 
 ## Reader scopes
 
 Use `AccountLoader::read` and `AccountsDB::program` for scoped zero-copy
-reads; callbacks can return encoded results or owned snapshots. Program iteration
-only exposes callback results. `AccountLoader::mode` reads volatile mode under
-the map guard without cloning account data, and persisted mode through the same
-cached index and sequence check as ordinary reads. `unsafe load` is reserved for
-zero-copy transaction execution: borrowed results must remain protected through
-commit, with concurrent account writes, deletion, and storage reuse excluded.
+reads; callbacks return encoded results or owned snapshots, never borrowed
+views. Read callbacks may retry after a concurrent publish; keep them side-effect
+free. `AccountLoader::mode` avoids data cloning and shares lookup validation.
+`unsafe load` is reserved for transaction execution: protect borrowed results
+through commit, excluding concurrent account writes, deletion, and storage reuse.
 Retaining a loader or iterator excludes compaction, not ordinary account writes.
 `AccountLoader::unguarded` is the exception: callers must exclude compaction
 themselves for the loader and all borrowed results. It skips reader admission
 without introducing a separate account lookup path.
-
-Per-source load counters (`accountsdb_loads`) and backend account-count gauges
-(`accountsdb_accounts`) are no longer exported. Persisted storage counters,
-including `accountsdb_persisted_reads`, and operation timings remain available.
 
 Guarded loaders and program iterators enter the scope before opening their LMDB
 transactions. Registered readers update only their own cache-line-separated

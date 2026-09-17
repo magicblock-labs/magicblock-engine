@@ -19,15 +19,10 @@ rule is unchanged.
 ## Instructions
 
 - `Patch` applies one `AccountFieldPatch`. Lamport changes are balanced against
-  the authority account, including no-op balance patches. Slot patches must
-  advance the stored slot; an equal slot is accepted only when an earlier patch
-  in the same transaction genuinely changed the account mode. Older slots are
-  always rejected. Data patches may produce at most 10 MiB of account data;
-  larger lengths return `InvalidRealloc`. Account mode transitions use the
-  policy owned by `AccountSharedData`: read-only and placeholder accounts may
-  transition to any mode except transient, transient accounts may resolve only
-  to read-only, and delegated accounts may transition only to transient.
-  Ephemeral accounts may close. Other mode changes are rejected.
+  the authority account, including no-op patches. `Lifecycle` validates mode and
+  slot together using the [account lifecycle table](../../solana/account/README.md);
+  stale slots and unlisted transitions are rejected. Data patches are limited
+  to 10 MiB; larger lengths return `InvalidRealloc`.
 - `Finalize` atomically installs the caller-supplied complete flag value and
   loads an executable target into the transaction program cache. It does not
   change lamports; failed executable loading rolls back the installed flags.

@@ -29,11 +29,11 @@ bootstrap verifies the original seal signature before staging any data. Follower
 preserve these signatures in their own ledger instead of signing again.
 
 Every dispatcher must sign with that same canonical authority key. A follower
-whose local signer differs from `Engine::authority()` is therefore a terminal
-leaf and dispatcher startup rejects it before binding a listener. Any number of
-such leaves may follow the source or a relay. Every relay instead holds the
-shared private key, so the source and all relays have one compromise and key
-rotation boundary.
+whose local signer differs from `Engine::authority()` is a terminal leaf:
+`ReplicationDispatcher::spawn` logs a warning and returns `Ok(())` without
+binding a listener. Any number of such leaves may follow the source or a relay.
+Every relay holds the shared private key, so the source and all relays have one
+compromise and key rotation boundary.
 
 The async dispatcher accepts sockets and assigns each connection to a blocking
 thread. File and socket operations on that thread use bounded blocking I/O.
@@ -44,7 +44,7 @@ intermediate superblocks.
 
 Before each handshake, the follower quiesces execution, flushes queued ledger
 appends, and reports the resulting cursor. A received snapshot is written to the
-successor superblock directory; staging waits for ordinary durable seal completion. The
+successor superblock directory; staging waits for durable seal completion. The
 seal's cumulative transaction count replaces the follower ledger baseline,
 including when a nonempty follower falls behind retention. The client then
 reports `RestartRequired`; keeper restores the staged snapshot on the next
@@ -58,21 +58,16 @@ internal system accounts.
 
 On normal follower shutdown, Control keeps consuming ordered transaction batches
 until the sequencer acknowledges the next validated and applied block, then
-barriers execution and
-flushes the cursor at that boundary before stopping Ingest. The operational
+barriers execution and flushes the cursor before stopping Ingest. The operational
 block heartbeat supplies that boundary, reconnecting first when necessary.
 Replication failure and snapshot restart paths do not claim this guarantee.
 
-Ingest decodes transaction batches of at most 128 transactions and typically
-128 KiB, fencing them before every block, superblock, reset, or reconnect.
-A rendezvous channel assigns verification to an idle control thread; otherwise
-Ingest verifies while Control schedules earlier work. Control alone owns
-handshakes, reconnect cursors, execution barriers, snapshot staging, transaction
-scheduling, and block pacing. These roles preserve stream order without a
-reverse control channel.
+Ingest batches at most 128 transactions (typically 128 KiB), fencing before each
+block, seal, reset, or reconnect. Verification runs on idle Control or overlaps
+Control's scheduling in Ingest. Control alone owns handshakes, reconnect cursors,
+barriers, snapshot staging, scheduling, and pacing, preserving stream order.
 
 A shared-key follower may also serve downstream followers. It waits for each
 upstream seal, validates its state, then persists the original seal and archives
-its own snapshot before consuming further entries. Downstream clients continue
-to verify every response against the original source authority. A distinct-key follower can consume the same
-state but cannot relay it.
+its own snapshot before consuming further entries. Downstream clients verify
+responses against the original source authority.

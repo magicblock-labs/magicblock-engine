@@ -1,8 +1,6 @@
 # `magicblock-engine-nucleus`
 
-Nucleus contains shared engine types that do not own storage or execution
-policy. It also exposes byte-size constants and a Unix-time helper that returns
-zero when the system clock predates the epoch. Its default feature set is empty.
+Shared engine types, without storage or execution policy. No default features.
 
 ## Features
 
