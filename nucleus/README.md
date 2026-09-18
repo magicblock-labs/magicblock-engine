@@ -23,7 +23,8 @@ Shared engine types, without storage or execution policy. No default features.
 - `metrics`: Prometheus metric construction, `engine_`-namespaced registration,
   labels, and timers.
 - `service`: the `metrics` and `shutdown` feature bundle.
-- `runtime`: transaction views, resolved-transaction execution messages,
+- `runtime`: transaction views, resolved-transaction execution requests with
+  optional request-owned replies (never serialized),
   sequencer handles, and quiescence barriers, including atomic block-checkpoint
   pauses; it also enables `ledger`, `service`, and `tls`.
 - `tls`: thread-local MagicRoot authority and encoded service-message state.

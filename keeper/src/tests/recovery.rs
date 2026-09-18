@@ -157,7 +157,7 @@ async fn restores_blockhash_history_from_ledger_and_snapshot() {
     );
     let transaction =
         ResolvedTransaction::try_new(view, Some(Default::default()), &Default::default()).unwrap();
-    assert!(keeper.transactions().append(&transaction).await.unwrap());
+    keeper.transactions().append(&transaction).await.unwrap().unwrap();
     // Match the executor's committed-count update while deliberately omitting
     // execution metadata, so recovery can only find this signature in blockstore.
     keeper.accounts().commit(std::iter::empty::<&AccountEntry>()).unwrap();
@@ -181,12 +181,15 @@ async fn restores_blockhash_history_from_ledger_and_snapshot() {
         keeper.blocks().is_valid(&ledger_hash),
         "follower restores history beyond SlotHashes from the blockstore"
     );
-    let status = keeper.transactions().subscribe_signature(signature).await;
-    assert!(!keeper.transactions().append(&transaction).await.unwrap());
+    let status = keeper.transactions().subscribe_signature(signature).await.unwrap();
     assert_eq!(
-        status.await.unwrap().result,
+        keeper.transactions().append(&transaction).await.unwrap(),
         Err(TransactionError::AlreadyProcessed)
     );
+    assert!(matches!(
+        status.try_recv(),
+        Err(oneshot::TryRecvError::Empty)
+    ));
     assert!(
         keeper.transactions().status(signature).await.unwrap().is_none(),
         "recovered follower signature has no historical status"
@@ -211,7 +214,7 @@ async fn restores_blockhash_history_from_ledger_and_snapshot() {
     let transaction =
         ResolvedTransaction::try_new(view, Some(Default::default()), &Default::default()).unwrap();
     assert!(
-        keeper.transactions().append(&transaction).await.unwrap(),
+        keeper.transactions().append(&transaction).await.unwrap().is_ok(),
         "follower accepts a snapshot-retained hash without ledger history"
     );
     keeper.close().await;

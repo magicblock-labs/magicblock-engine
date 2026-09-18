@@ -3,10 +3,10 @@
 use std::sync::atomic::Ordering;
 
 use keeper::{
-    AccountLease, ExecutionRecord, ResolvedTransaction, TransactionStatus, TransactionView,
-    error::KeeperError,
+    AccountLease, ExecutionRecord, ResolvedTransaction, TransactionView, error::KeeperError,
 };
 use magic_root_interface::{MagicRootInstruction, PostFinalize};
+use nucleus::runtime::ExecutionRequest;
 use processor::{SequencerMessage, Simulation, SimulatorMessage};
 use solana_account::{AccountMode, AccountSharedData, OwnedAccount};
 use solana_instruction::Instruction;
@@ -108,7 +108,7 @@ impl AccountAccessor<'_> {
         let lease = self.lease;
         // Dropping the join handle detaches this task; it must never be aborted.
         tokio::spawn(async move {
-            rx.await?.result?;
+            rx.await??;
             match mode {
                 Some(mode) => lease.materialized(mode).await,
                 None => lease.deleted(),
@@ -134,33 +134,35 @@ impl<'a> TransactionAccessor<'a> {
         Self { engine, transaction: verified.0 }
     }
 
-    /// Submits `transaction` for execution and awaits its committed result.
+    /// Submits `transaction` and awaits admission rejection or its committed result.
     /// There is no internal deadline: submitted execution either publishes a
-    /// terminal signature result or the host shuts down the process on an
+    /// request-specific result or the host shuts down the process on an
     /// infrastructure failure. Cancelling this wait does not cancel the transaction.
     pub async fn execute(self) -> Result<TransactionResult<()>> {
-        Ok(self.submit().await?.await?.result)
+        Ok(self.submit().await?.await?)
     }
 
-    /// Registers completion before submission so fast execution cannot race it.
-    async fn submit(self) -> Result<oneshot::Receiver<TransactionStatus>> {
-        if self.engine.terminating.load(Ordering::Acquire) {
-            return Err(EngineError::ShuttingDown);
-        }
-        let signature = self.transaction.signatures()[0];
-        let rx = self.engine.transactions().subscribe_signature(signature).await;
-        self.schedule().await?;
+    /// Transfers completion ownership with the submission, without subscribing.
+    async fn submit(self) -> Result<oneshot::Receiver<TransactionResult<()>>> {
+        let (response, rx) = oneshot::channel();
+        self.enqueue(Some(response)).await?;
         Ok(rx)
     }
 
     /// Submits `transaction` for execution without awaiting its result.
+    /// Success acknowledges queueing, not admission; rejected work is dropped.
     pub async fn schedule(self) -> Result<()> {
+        self.enqueue(None).await
+    }
+
+    /// Resolves and queues work, transferring any reply channel to the sequencer.
+    async fn enqueue(self, response: Option<oneshot::Sender<TransactionResult<()>>>) -> Result<()> {
         if self.engine.terminating.load(Ordering::Acquire) {
             return Err(EngineError::ShuttingDown);
         }
         let transaction =
             ResolvedTransaction::try_new(self.transaction, None, &Default::default())?;
-        let msg = SequencerMessage::Transaction(transaction);
+        let msg = SequencerMessage::Transaction(ExecutionRequest { transaction, response });
         self.engine.sequencer.send(msg).await.map_err(Into::into)
     }
 

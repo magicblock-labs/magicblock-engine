@@ -197,8 +197,8 @@ async fn submit(
 }
 ```
 
-- `execute` waits for the committed transaction result without an internal deadline.
-- `schedule` queues execution without waiting for its result.
+- `execute` waits for admission rejection or the committed result without an internal deadline.
+- `schedule` acknowledges queueing only; admission rejection is silently dropped.
 - `simulate` executes against owned account copies without committing state.
 
 ---

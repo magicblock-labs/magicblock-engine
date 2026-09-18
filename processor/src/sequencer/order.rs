@@ -30,7 +30,7 @@
 use std::{collections::VecDeque, mem};
 
 use ahash::HashMap;
-use keeper::ResolvedTransaction;
+use nucleus::runtime::ExecutionRequest;
 use smallvec::SmallVec;
 use solana_pubkey::Pubkey;
 use solana_svm_transaction::svm_message::SVMMessage;
@@ -48,7 +48,7 @@ pub(super) struct OrderingTable {
     /// Stable transaction nodes; indices are tickets until [`Self::reset`].
     nodes: Vec<TransactionNode>,
     /// Payloads retained only while their nodes have unfinished predecessors.
-    blocked: HashMap<Ticket, ResolvedTransaction>,
+    blocked: HashMap<Ticket, ExecutionRequest>,
     /// Dependency-free transactions awaiting an executor.
     ready: VecDeque<ReadyTransaction>,
     /// Number of registered transactions that have not completed.
@@ -79,17 +79,17 @@ impl OrderingTable {
     /// writer; writes follow both the latest writer and all current readers.
     /// Sanitization guarantees unique static keys, so frontier tickets always
     /// precede the ticket registered here.
-    pub(super) fn register(&mut self, transaction: ResolvedTransaction) -> bool {
+    pub(super) fn register(&mut self, request: ExecutionRequest) -> bool {
         let ticket = self.nodes.len();
         let mut predecessors = SmallVec::<[Ticket; 2]>::new();
         let nodes = &self.nodes;
 
-        for (index, &account) in transaction.static_account_keys().iter().enumerate() {
+        for (index, &account) in request.transaction.static_account_keys().iter().enumerate() {
             let frontier = self.accounts.entry(account).or_default();
             frontier.last_writer.take_if(|&mut prior| nodes[prior].predecessors == COMPLETE);
             predecessors.extend(frontier.last_writer);
 
-            if transaction.is_writable(index) {
+            if request.transaction.is_writable(index) {
                 frontier.readers.retain(|&mut prior| nodes[prior].predecessors != COMPLETE);
                 predecessors.extend(frontier.readers.drain(..));
                 frontier.last_writer = Some(ticket);
@@ -106,9 +106,9 @@ impl OrderingTable {
 
         let blocked = !predecessors.is_empty();
         if blocked {
-            self.blocked.insert(ticket, transaction);
+            self.blocked.insert(ticket, request);
         } else {
-            self.ready.push_back(ReadyTransaction { ticket, transaction });
+            self.ready.push_back(ReadyTransaction { ticket, request });
         }
         self.nodes.push(TransactionNode {
             predecessors: predecessors.len(),
@@ -145,8 +145,8 @@ impl OrderingTable {
                 continue;
             }
 
-            if let Some(transaction) = self.blocked.remove(&dependent) {
-                self.ready.push_back(ReadyTransaction { ticket: dependent, transaction });
+            if let Some(request) = self.blocked.remove(&dependent) {
+                self.ready.push_back(ReadyTransaction { ticket: dependent, request });
                 ready += 1;
             }
         }

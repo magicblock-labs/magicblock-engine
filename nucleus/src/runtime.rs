@@ -26,6 +26,15 @@ use crate::{
 pub type TransactionView = SanitizedTransactionView<Arc<Vec<u8>>>;
 /// Sanitized transaction view with its account keys already resolved.
 pub type ResolvedTransaction = ResolvedTransactionView<Arc<Vec<u8>>>;
+
+/// Execution work with an optional request-owned completion channel.
+/// Fire-and-forget submissions do not allocate completion state.
+pub struct ExecutionRequest {
+    /// Resolved transaction to admit and execute.
+    pub transaction: ResolvedTransaction,
+    /// Receives admission rejection or the committed execution result.
+    pub response: Option<oneshot::Sender<TransactionResult<()>>>,
+}
 /// Dropping this handle releases a sequencer quiescence barrier.
 pub type BarrierHandle = oneshot::Sender<()>;
 
@@ -63,7 +72,7 @@ impl BlockInput {
 #[derive(From)]
 pub enum SequencerMessage {
     /// A transaction with resolved account keys to schedule and execute.
-    Transaction(ResolvedTransaction),
+    Transaction(ExecutionRequest),
     /// Finalize a boundary and acknowledge validation and application.
     Block {
         /// Block boundary to finalize.

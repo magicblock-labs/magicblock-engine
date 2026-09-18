@@ -10,7 +10,7 @@ use keeper::{
 };
 use nucleus::{
     ledger::Block,
-    runtime::{SequencerHandle, Simulation, barrier},
+    runtime::{ExecutionRequest, SequencerHandle, Simulation, barrier},
 };
 use solana_account::{AccountMode, ReadableAccount};
 use solana_hash::Hash;
@@ -76,8 +76,9 @@ impl Harness {
 
     /// Queues a transaction on the execution path without waiting for commit.
     async fn execute(&self, tx: TransactionView) {
-        let tx = ResolvedTransaction::try_new(tx, None, &Default::default()).unwrap();
-        self.handle.execution.send(SequencerMessage::Transaction(tx)).await.unwrap();
+        let transaction = ResolvedTransaction::try_new(tx, None, &Default::default()).unwrap();
+        let msg = SequencerMessage::from(ExecutionRequest { transaction, response: None });
+        self.handle.execution.send(msg).await.unwrap();
     }
 
     /// Runs a transaction through simulation and returns the raw processing result.
@@ -86,14 +87,8 @@ impl Harness {
     /// transaction status.
     async fn simulate(&self, tx: TransactionView) -> TransactionProcessingResult {
         let (response, rx) = oneshot::channel();
-        self.handle
-            .simulation
-            .send(SimulatorMessage::Transaction(Simulation {
-                transaction: tx,
-                response,
-            }))
-            .await
-            .unwrap();
+        let msg = SimulatorMessage::Transaction(Simulation { transaction: tx, response });
+        self.handle.simulation.send(msg).await.unwrap();
         rx.await.unwrap().expect("simulation resolves").result
     }
 
@@ -102,14 +97,11 @@ impl Harness {
     /// Both paths maintain sysvar caches, so block metadata must be delivered to
     /// both before comparing simulated and committed behavior.
     async fn set_block(&self, block: Block) {
-        self.handle
-            .execution
-            .send(SequencerMessage::Block {
-                block: nucleus::runtime::BlockInput::Production(block),
-                tx: None,
-            })
-            .await
-            .unwrap();
+        let msg = SequencerMessage::Block {
+            block: nucleus::runtime::BlockInput::Production(block),
+            tx: None,
+        };
+        self.handle.execution.send(msg).await.unwrap();
         self.handle.simulation.send(SimulatorMessage::Block(block)).await.unwrap();
     }
 

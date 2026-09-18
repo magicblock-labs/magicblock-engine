@@ -4,13 +4,14 @@ use std::sync::Arc;
 
 use super::{TestKeeper, signed_tx};
 use crate::{
-    ResolvedTransaction,
-    subscriptions::{Multicast, MulticastOneshot, Subscription, Unicast},
+    ResolvedTransaction, TransactionStatus,
+    subscriptions::{Multicast, Signatures, Subscription, Unicast},
 };
 use nucleus::testkit::{V42_ID, signed_view};
 use solana_hash::Hash;
 use solana_instruction::Instruction;
 use solana_keypair::Keypair;
+use solana_signature::Signature;
 use solana_transaction_error::TransactionError;
 
 /// Proves unicast exclusivity, persistent fanout, terminal fanout, and slow-receiver removal.
@@ -39,8 +40,9 @@ async fn subscribers_send_semantics() {
 
     let multicast = Multicast::new(1, Subscription::Accounts);
     multicast.send(&1, &9);
-    let mut first = multicast.subscribe(1).await;
-    let mut second = multicast.subscribe(1).await;
+    assert!(!multicast.contains(&1));
+    let mut first = multicast.subscribe(1);
+    let mut second = multicast.subscribe(1);
     multicast.send(&1, &10);
     assert_eq!(first.recv().await, Some(10));
     assert_eq!(second.recv().await, Some(10));
@@ -51,47 +53,66 @@ async fn subscribers_send_semantics() {
     assert_eq!(second.recv().await, Some(11));
     assert_eq!(second.recv().await, None);
 
-    let oneshot = MulticastOneshot::default();
-    let first = oneshot.subscribe(1).await;
-    let closed = oneshot.subscribe(1).await;
+    // Overflow removed the last receivers. Registration must reopen
+    // delivery, and pruning a different key must not hide the remaining one.
+    let mut live = multicast.subscribe(2);
+    let closed = multicast.subscribe(3);
     drop(closed);
-    oneshot.send_last(&1, &18);
+    assert!(!multicast.contains(&3));
+    multicast.send(&2, &13);
+    assert_eq!(live.recv().await, Some(13));
+    drop(live);
+    assert!(!multicast.contains(&2));
+
+    let signatures = Signatures::default();
+    let signature = Signature::from([1; 64]);
+    signatures.send(&signature, &TransactionStatus { slot: 19, result: Ok(()) });
+    let first = signatures.subscribe(signature);
+    let closed = signatures.subscribe(signature);
+    drop(closed);
+    signatures.cleanup().await;
     assert!(matches!(
         first.try_recv(),
         Err(oneshot::TryRecvError::Empty)
     ));
-    let second = oneshot.subscribe(1).await;
-    oneshot.send_last(&1, &19);
-    assert_eq!(second.await.unwrap(), 19);
-    oneshot.send(&1, &20);
-    assert_eq!(first.await.unwrap(), 20);
-    let third = oneshot.subscribe(1).await;
-    oneshot.send(&1, &21);
-    assert_eq!(third.await.unwrap(), 21);
+    let second = signatures.subscribe(signature);
+    signatures.send(&signature, &TransactionStatus { slot: 20, result: Ok(()) });
+    assert_eq!(first.await.unwrap().slot, 20);
+    assert_eq!(second.await.unwrap().slot, 20);
+    let third = signatures.subscribe(signature);
+    signatures.send(&signature, &TransactionStatus { slot: 21, result: Ok(()) });
+    assert_eq!(third.await.unwrap().slot, 21);
+    let closed = signatures.subscribe(signature);
+    drop(closed);
+    signatures.cleanup().await;
+    signatures.cleanup().await;
+    let reopened = signatures.subscribe(signature);
+    signatures.send(&signature, &TransactionStatus { slot: 22, result: Ok(()) });
+    assert_eq!(reopened.await.unwrap().slot, 22);
 }
 
-// Appending reserves the signature while rejection wakes only its own latest
-// waiter. Invalid blockhash is retained as a terminal cached status.
+/// Proves admission rejections reserve signatures without publishing execution
+/// status or consuming any observer, including observers of invalid blockhashes.
 #[tokio::test]
 async fn append_dedup_and_status_sentinel() {
     let keeper = TestKeeper::new().await;
     let (signature, txn) = signed_tx();
-    let slot = keeper.blocks().current_slot();
-    let original = keeper.transactions().subscribe_signature(signature).await;
+    let original = keeper.transactions().subscribe_signature(signature).await.unwrap();
 
     // First append writes to the ledger; the duplicate is dropped.
     assert!(
-        keeper.transactions().append(&txn).await.unwrap(),
+        keeper.transactions().append(&txn).await.unwrap().is_ok(),
         "first append is accepted"
     );
-    let duplicate = keeper.transactions().subscribe_signature(signature).await;
-    assert!(
-        !keeper.transactions().append(&txn).await.unwrap(),
-        "duplicate is deduplicated"
+    let duplicate = keeper.transactions().subscribe_signature(signature).await.unwrap();
+    assert_eq!(
+        keeper.transactions().append(&txn).await.unwrap(),
+        Err(TransactionError::AlreadyProcessed)
     );
-    let status = duplicate.await.unwrap();
-    assert_eq!(status.result, Err(TransactionError::AlreadyProcessed));
-    assert_eq!(status.slot, slot);
+    assert!(matches!(
+        duplicate.try_recv(),
+        Err(oneshot::TryRecvError::Empty)
+    ));
     assert!(matches!(
         original.try_recv(),
         Err(oneshot::TryRecvError::Empty)
@@ -108,14 +129,20 @@ async fn append_dedup_and_status_sentinel() {
     );
     let txn =
         ResolvedTransaction::try_new(view, Some(Default::default()), &Default::default()).unwrap();
-    let rejected = keeper.transactions().subscribe_signature(signature).await;
-    assert!(!keeper.transactions().append(&txn).await.unwrap());
-    let status = rejected.await.unwrap();
-    assert_eq!(status.result, Err(TransactionError::BlockhashNotFound));
-    assert_eq!(status.slot, slot);
-    let cached = keeper.transactions().status(signature).await.unwrap().unwrap();
-    assert_eq!(cached.result, Err(TransactionError::BlockhashNotFound));
-    assert_eq!(cached.slot, slot);
+    let rejected = keeper.transactions().subscribe_signature(signature).await.unwrap();
+    assert_eq!(
+        keeper.transactions().append(&txn).await.unwrap(),
+        Err(TransactionError::BlockhashNotFound)
+    );
+    assert!(matches!(
+        rejected.try_recv(),
+        Err(oneshot::TryRecvError::Empty)
+    ));
+    assert!(keeper.transactions().status(signature).await.unwrap().is_none());
+    assert_eq!(
+        keeper.transactions().append(&txn).await.unwrap(),
+        Err(TransactionError::AlreadyProcessed)
+    );
 
     keeper.close().await;
 }

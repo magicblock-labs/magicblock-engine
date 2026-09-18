@@ -4,11 +4,11 @@
 use std::{sync::Arc, thread};
 
 use blake3::Hasher;
-use keeper::{Keeper, ResolvedTransaction};
+use keeper::Keeper;
 use nucleus::{
     Slot,
     ledger::Signed,
-    runtime::{BarrierGuard, BlockInput, SequencerHandle},
+    runtime::{BarrierGuard, BlockInput, ExecutionRequest, SequencerHandle},
     shutdown::{Service, ShutdownHandle, ShutdownManager, ShutdownReason},
 };
 use solana_hash::Hash;
@@ -46,7 +46,7 @@ pub(crate) struct ReadyTransaction {
     /// Stable node index returned by the executor on completion.
     pub(crate) ticket: Ticket,
     /// Transaction whose predecessor count reached zero.
-    pub(crate) transaction: ResolvedTransaction,
+    pub(crate) request: ExecutionRequest,
 }
 
 /// Schedules inbound transactions onto executors, ordering per-account
@@ -175,13 +175,18 @@ impl Sequencer {
     }
 
     /// Registers a transaction in input order and dispatches all ready work.
-    async fn schedule(&mut self, txn: ResolvedTransaction) -> Result<()> {
-        if !self.replay && !self.state.transactions().append(&txn).await? {
+    async fn schedule(&mut self, request: ExecutionRequest) -> Result<()> {
+        if !self.replay
+            && let Err(error) = self.state.transactions().append(&request.transaction).await?
+        {
             metrics::failed_transaction(FailureKind::SequencerDrop);
+            if let Some(response) = request.response {
+                let _ = response.send(Err(error));
+            }
             return Ok(());
         }
-        self.hasher.update(&txn.signatures()[0]);
-        if self.ordering.register(txn) {
+        self.hasher.update(&request.transaction.signatures()[0]);
+        if self.ordering.register(request) {
             metrics::ordering_dependency();
             metrics::blocked_transaction();
         }

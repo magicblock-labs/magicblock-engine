@@ -8,6 +8,12 @@ disjoint transactions and read/read access in parallel. Dependency tracking does
 not depend on executor completion order. Lookahead is bounded at 16 pending
 transactions per executor; full drains reset ordering state and block tickets.
 
+Execution requests carry an optional, request-owned reply through admission and
+ordering to commit. Admission rejection replies only to that request; accepted
+work replies after commit. Fire-and-forget requests carry no completion channel.
+Replies are not persisted, replicated, or included in transaction notifications;
+local replay uses requests without replies.
+
 Block hashes chain the prior hash with ordered transaction signatures. Boundaries
 drain executor work before publication, ensuring execution metadata precedes its
 block. Produced blocks are signed; replication and recovery recompute and
