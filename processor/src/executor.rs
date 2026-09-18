@@ -9,9 +9,10 @@ use std::{
 };
 
 use accountsdb::AccountLoader;
-use keeper::{ExecutionRecord, FullTransaction, Keeper, ResolvedTransaction};
+use keeper::{ExecutionRecord, FullTransaction, Keeper};
 use nucleus::{
     ledger::Block,
+    runtime::ExecutionRequest,
     shutdown::{Service, ShutdownHandle, ShutdownManager, ShutdownReason},
     tls::AUTHORITY,
 };
@@ -142,7 +143,7 @@ impl TransactionExecutor {
             };
             match msg {
                 ExecutorMessage::Transaction(txn) => {
-                    if let Err(error) = self.process(txn.transaction) {
+                    if let Err(error) = self.process(txn.request) {
                         drop(self.rx);
                         let event = ExecutorEvent::Failed { id: self.id };
                         let _ = self.events.blocking_send(event);
@@ -168,7 +169,8 @@ impl TransactionExecutor {
 
     /// Loads and executes one transaction through the SVM, committing either
     /// its raw state transition (replay) or full execution.
-    fn process(&mut self, txn: ResolvedTransaction) -> Result<()> {
+    fn process(&mut self, request: ExecutionRequest) -> Result<()> {
+        let ExecutionRequest { transaction: txn, response } = request;
         let accounts = self.state.accounts();
         // SAFETY: the sequencer cannot acknowledge compaction until this
         // executor completes processing, including commit and owned fanout.
@@ -190,7 +192,10 @@ impl TransactionExecutor {
                 transaction: txn.into_view(),
                 execution,
             };
-            self.state.transactions().commit_execution(txn)?;
+            let result = self.state.transactions().commit_execution(txn)?;
+            if let Some(response) = response {
+                let _ = response.send(result);
+            }
         }
         Ok(())
     }

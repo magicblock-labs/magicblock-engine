@@ -16,6 +16,12 @@ batch-verify payloads, then consumes the resulting opaque transactions through
 the trusted `TransactionAccessor::verified` path without repeating crypto.
 Retained local-ledger replay has a separate private verification bypass.
 
+`schedule` acknowledges queueing, not admission or execution, and allocates no
+completion channel. Duplicates and invalid blockhashes are silently dropped.
+`execute` instead owns one reply channel for admission rejection or committed
+execution, independent of signature subscriptions. Signature observers and
+status reads report execution results only, including retained results.
+
 ## Account replacement
 
 `Engine::account(pubkey).await` acquires an exclusive materialization lease.
@@ -27,7 +33,7 @@ mode/slot combinations follow the [account lifecycle table](../solana/account/RE
 A newer slot alone does not permit replacement of authoritative state.
 
 `materialize` and `delete` consume the accessor and return `Result<()>`. After
-submission, Engine retains the lease through terminal signature completion and
+submission, Engine retains the lease through request completion and
 success bookkeeping, even if the caller stops waiting. Dropping an idle accessor
 or cancelling before submission releases it without submitting work.
 

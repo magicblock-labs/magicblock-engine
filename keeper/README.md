@@ -90,8 +90,19 @@ Signatures have terminal oneshot fanout; persistent multicast
 streams give each receiver a bounded queue and disconnect a receiver that falls
 behind. Processed transactions, service messages, and cache evictions each have
 one process-lifetime receiver and apply producer backpressure when full.
-Append rejection notifies only its newest signature waiter, preserving older
-waiters for an already accepted transaction; invalid-blockhash status is cached.
+Admission rejection is returned only to the submitting request, never cached or
+sent to signature observers. Rejected signatures retain their dedup reservation
+until normal expiry. Processor owns request completion separately from fanout.
+`subscribe_signature` registers before checking retained status; commits cache
+their result before fanout so concurrent and late subscriptions cannot miss it.
+Signature and multicast registries count occupied keys atomically. Empty sends
+and membership checks skip hashing and map access; only first registration and
+last removal change the count. Closed receivers remain counted until pruning.
+No global subscription mutex or bucket-count scan is required.
+Registration is synchronous and may wait for an SCC bucket lock, never channel
+capacity. Account and program accessors return receivers directly; signature
+registration awaits the retained-status lookup. Full-map cleanup yields on
+bucket contention.
 
 ## `testkit`
 

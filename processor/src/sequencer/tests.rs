@@ -4,9 +4,9 @@ use std::sync::{Arc, mpsc};
 
 use keeper::{
     Keeper,
-    testkit::{TestKeeper, resolved},
+    testkit::{self, TestKeeper},
 };
-use nucleus::shutdown::Service;
+use nucleus::{runtime::ExecutionRequest, shutdown::Service};
 use solana_pubkey::Pubkey;
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -14,6 +14,13 @@ use super::{
     BlockHasher, MAX_PENDING_EXECUTOR_TXNS, Sequencer, order::OrderingTable, pool::Executors,
 };
 use crate::executor::{ExecutorEvent, ExecutorHandle, ExecutorId, ExecutorMessage};
+
+fn resolved(accounts: &[(Pubkey, bool)]) -> ExecutionRequest {
+    ExecutionRequest {
+        transaction: testkit::resolved(accounts),
+        response: None,
+    }
+}
 
 fn sequencer(tk: &mut TestKeeper) -> Sequencer {
     let state: Arc<Keeper> = tk.clone();

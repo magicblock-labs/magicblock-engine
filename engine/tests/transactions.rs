@@ -1,7 +1,7 @@
 //! Transaction submission at the engine boundary: the `execute`, `simulate`, and
 //! `schedule` wrappers around the sequencer. The processor suite already proves
 //! the SVM commits/simulates correctly; these assert the `TransactionAccessor`
-//! ergonomics on top — subscribe-then-await commit, the separate simulation
+//! ergonomics on top — request-owned completion, the separate simulation
 //! channel that never commits, and fire-and-forget scheduling.
 #![cfg(test)]
 
@@ -201,17 +201,21 @@ async fn processed_transaction_details_roundtrip() {
     te.close().await;
 }
 
-// A transaction that runs but errors resolves as a committed error result and
-// leaves its output account untouched — the engine surfaces the failure through
-// the outer Ok / inner Err split rather than dropping it.
+/// Proves a committed failure reaches both its caller and signature observers,
+/// including late observers, without changing the output account.
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_execution_surfaces_error_result() {
     let te = TestEngine::new().await;
     let output = store_v42(&te, 5, AccountMode::Ephemeral);
     // MIN - 1 overflows the program's checked_sub before any write.
     let ixs = [(E::lit(i64::MIN) - E::lit(1)).compose(output, &[])];
+    let (signature, transaction) = signed_view(&te, None, ixs[0].clone());
+    let observer = te.transactions().subscribe_signature(signature).await.unwrap();
 
-    let error = te.execute(&ixs).await.expect_err("overflow yields an error result");
+    let error = te.execute(transaction).await.expect_err("overflow yields an error result");
+    assert_eq!(observer.await.unwrap().result, Err(error.clone()));
+    let late = te.transactions().subscribe_signature(signature).await.unwrap();
+    assert_eq!(late.await.unwrap().result, Err(error.clone()));
     // CalcError::Arithmetic = 6; its discriminants are stable for tests.
     assert_eq!(
         error,
@@ -227,22 +231,55 @@ async fn failed_execution_surfaces_error_result() {
     te.close().await;
 }
 
-// schedule returns before the transaction commits; the write still lands, and an
-// account subscription (not a poll loop) observes it.
+/// Proves scheduling acknowledges queueing before admission and repeated bytes
+/// execute once without consuming signature observers registered around resends.
 #[tokio::test(flavor = "multi_thread")]
 async fn schedule_is_fire_and_forget() {
     let te = TestEngine::new().await;
     let output = store_v42(&te, 0, AccountMode::Ephemeral);
-    let mut updates = te.accounts().subscribe(output).await;
-    let ixs = [E::lit(7).compose(output, &[])];
-
-    te.schedule(&ixs).await;
+    let mut updates = te.accounts().subscribe(output);
+    let (signature, transaction) =
+        signed_view(&te, None, (E::acc(0) + E::lit(7)).compose(output, &[]));
+    let first = te.transactions().subscribe_signature(signature).await.unwrap();
+    let barrier = te.barrier().await.unwrap();
+    for _ in 0..3 {
+        te.transaction(transaction.inner_data().as_ref().clone())
+            .unwrap()
+            .schedule()
+            .await
+            .unwrap();
+    }
+    let second = te.transactions().subscribe_signature(signature).await.unwrap();
+    te.transaction(transaction.inner_data().as_ref().clone())
+        .unwrap()
+        .schedule()
+        .await
+        .unwrap();
+    // Queue acknowledgement must not wait for admission behind this barrier.
+    assert!(matches!(
+        first.try_recv(),
+        Err(oneshot::TryRecvError::Empty)
+    ));
+    drop(barrier);
+    assert_eq!(first.await.unwrap().result, Ok(()));
+    assert_eq!(second.await.unwrap().result, Ok(()));
+    assert_eq!(
+        te.transaction(transaction).unwrap().execute().await.unwrap(),
+        Err(TransactionError::AlreadyProcessed)
+    );
+    let late = te.transactions().subscribe_signature(signature).await.unwrap();
+    assert_eq!(late.await.unwrap().result, Ok(()));
 
     let account = updates.recv().await.expect("scheduled write reaches the subscriber");
     assert_eq!(
         decode_v42(&account),
         7,
         "scheduled transaction commits the write"
+    );
+    assert_eq!(
+        load_v42_data(&te, output),
+        Some(7),
+        "duplicates never repeat the increment"
     );
 
     te.close().await;

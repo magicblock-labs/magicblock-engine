@@ -26,7 +26,7 @@ use solana_sysvar::{
     clock::Clock,
     slot_hashes::{SlotHashes, SysvarId},
 };
-use solana_transaction_error::TransactionError;
+use solana_transaction_error::{TransactionError, TransactionResult};
 use tokio::sync::mpsc::Receiver;
 
 use crate::{
@@ -56,13 +56,13 @@ impl<'a> AccountsAccessor<'a> {
     }
 
     /// Subscribes to updates for one account pubkey.
-    pub async fn subscribe(&self, account: Pubkey) -> Receiver<AccountSharedData> {
-        self.keeper.subscriptions.accounts.subscribe(account).await
+    pub fn subscribe(&self, account: Pubkey) -> Receiver<AccountSharedData> {
+        self.keeper.subscriptions.accounts.subscribe(account)
     }
 
     /// Subscribes to account updates for accounts owned by `program`.
-    pub async fn subscribe_program(&self, program: Pubkey) -> Receiver<AccountEntry> {
-        self.keeper.subscriptions.programs.subscribe(program).await
+    pub fn subscribe_program(&self, program: Pubkey) -> Receiver<AccountEntry> {
+        self.keeper.subscriptions.programs.subscribe(program)
     }
 
     /// Subscribes as the sole receiver of account pubkeys evicted from the recency cache.
@@ -74,7 +74,7 @@ impl<'a> AccountsAccessor<'a> {
 
     /// Subscribes to completed accountsdb snapshot archives.
     pub fn subscribe_snapshots(&self) -> Receiver<PathBuf> {
-        self.keeper.subscriptions.snapshots.subscribe_sync(())
+        self.keeper.subscriptions.snapshots.subscribe(())
     }
 
     /// Updates durable `SlotHashes` and `Clock` sysvar accounts from `block`.
@@ -135,17 +135,25 @@ impl<'a> TransactionsAccessor<'a> {
         self.keeper.subscriptions.transactions.subscribe()
     }
 
-    /// Subscribes to status updates for one transaction signature.
+    /// Subscribes to one execution result, including an already retained result.
+    /// Admission rejections are request-specific and do not notify observers.
     pub async fn subscribe_signature(
         &self,
         signature: Signature,
-    ) -> oneshot::Receiver<TransactionStatus> {
-        self.keeper.subscriptions.signatures.subscribe(signature).await
+    ) -> Result<oneshot::Receiver<TransactionStatus>> {
+        let subscriptions = &self.keeper.subscriptions.signatures;
+        let rx = subscriptions.subscribe(signature);
+        // Register before reading: commit caches its result before fanout, so
+        // racing publication is observed through either the channel or status.
+        if let Some(status) = self.status(signature).await? {
+            subscriptions.send(&signature, &status);
+        }
+        Ok(rx)
     }
 
     /// Subscribes to log batches mentioning `account`.
     pub async fn subscribe_logs(&self, account: Pubkey) -> Receiver<Arc<TransactionLogs>> {
-        self.keeper.subscriptions.logs.subscribe(account).await
+        self.keeper.subscriptions.logs.subscribe(account)
     }
 
     /// Subscribes as the sole receiver of encoded service messages.
@@ -159,38 +167,32 @@ impl<'a> TransactionsAccessor<'a> {
     /// signature bytes. Distinct signatures with the same live prefix are
     /// treated as already processed.
     ///
-    /// Returns `Ok(true)` when the transaction was appended. On `Ok(false)`,
-    /// the latest signature subscriber receives `AlreadyProcessed` or
-    /// `BlockhashNotFound`. Execution details are appended later by
-    /// `commit_execution`.
-    pub async fn append(&self, transaction: &ResolvedTransaction) -> Result<bool> {
+    /// The inner result reports admission; the outer result reports infrastructure
+    /// failure. Rejections never publish or cache an execution result. A rejected
+    /// signature remains reserved until normal expiry. Execution details are
+    /// appended later by `commit_execution`.
+    pub async fn append(&self, transaction: &ResolvedTransaction) -> Result<TransactionResult<()>> {
         let caches = &self.keeper.caches;
         let slot = caches.blocks.latest.load().slot + 1;
         let signature = transaction.signatures()[0];
         let key = signature_prefix(&signature);
-        let mut result = Ok(());
         if !caches.signatures.push(key, None, slot) {
-            result = Err(TransactionError::AlreadyProcessed);
-        } else if !self.keeper.blocks().is_valid(transaction.recent_blockhash()) {
-            result = Err(TransactionError::BlockhashNotFound);
-            let status = TransactionStatus { result: result.clone(), slot };
-            caches.signatures.update(&key, Some(status));
+            return Ok(Err(TransactionError::AlreadyProcessed));
         }
-        if result.is_err() {
-            let status = TransactionStatus { result, slot };
-            self.keeper.subscriptions.signatures.send_last(&signature, &status);
-            return Ok(false);
+        if !self.keeper.blocks().is_valid(transaction.recent_blockhash()) {
+            return Ok(Err(TransactionError::BlockhashNotFound));
         }
         let event = Event::Transaction(TransactionEntry {
             signature,
             payload: transaction.inner_data().clone(),
         });
         self.keeper.ledger.appender.send_async(event).await?;
-        Ok(true)
+        Ok(Ok(()))
     }
 
     /// Commits execution metadata and publishes resulting account changes.
-    pub fn commit_execution(&self, mut txn: FullTransaction) -> Result<()> {
+    /// Returns the committed result for the caller to complete its request.
+    pub fn commit_execution(&self, mut txn: FullTransaction) -> Result<TransactionResult<()>> {
         let subs = &self.keeper.subscriptions;
         let commit = execution_commit(&mut txn);
         self.keeper.ledger.appender.send(commit.event)?;
@@ -237,10 +239,12 @@ impl<'a> TransactionsAccessor<'a> {
         });
         // Clear TLS unconditionally so unsent messages cannot leak into the next transaction.
         TlsManager::clear();
-        subs.signatures.send(&commit.signature, &commit.status);
+        // Cache before fanout so a subscriber that misses delivery can still
+        // discover the committed result.
         let key = &signature_prefix(&commit.signature);
-        self.keeper.caches.signatures.update(key, Some(commit.status));
-        Ok(())
+        self.keeper.caches.signatures.update(key, Some(commit.status.clone()));
+        subs.signatures.send(&commit.signature, &commit.status);
+        Ok(commit.status.result)
     }
 
     /// Commits replayed state and caches its re-executed terminal status.
@@ -303,7 +307,7 @@ impl<'a> BlocksAccessor<'a> {
 
     /// Subscribes to newly committed slots.
     pub fn subscribe(&self) -> Receiver<Block> {
-        self.keeper.subscriptions.blocks.subscribe_sync(())
+        self.keeper.subscriptions.blocks.subscribe(())
     }
 
     /// Publishes a completed block and advances block-derived account state.
