@@ -15,242 +15,134 @@
 
 ---
 
-MagicBlock Engine executes Solana transactions for ephemeral rollups. It owns
-account state, records transaction and block history, and exposes asynchronous
-APIs for execution, simulation, reads, and subscriptions.
-It does not provide consensus, fork choice, or confirmation policy.
+MagicBlock Engine brings Solana program execution into your Rust service. It
+combines the SVM with persistent account state, transaction history, live
+subscriptions, and replication: the execution foundation for ephemeral rollups.
 
-## 🚀 Starting the engine
+Your application chooses what to execute and when. Engine runs the transactions
+and keeps track of the resulting state. It is an embeddable library, not a
+validator; consensus, fork choice, and confirmation policy remain with the host.
 
-The embedding service must retain both the engine and its `ShutdownManager`.
-The manager coordinates every background service started by `Engine::new`.
+## ✨ Engine in practice
 
-```rust
-use std::{path::PathBuf, time::Duration};
+The sketches below show how the features fit together. They omit imports,
+configuration details, and error handling to keep the focus on the workflow;
+they are not standalone, compilable examples.
 
-use engine::Engine;
-use keeper::builder::KeeperBuilder;
-use nucleus::{
-    config::{AccountsDBParams, BlockstoreParams, LedgerParams},
-    shutdown::ShutdownManager,
-};
-use solana_keypair::Keypair;
-use solana_sysvar::rent::Rent;
+### 🚀 Bring execution into your service
 
-async fn open_engine(
-    home: PathBuf,
-) -> engine::Result<(Engine, ShutdownManager)> {
-    let mut shutdown = ShutdownManager::default();
-    let builder = KeeperBuilder {
-        authority: Keypair::new().into(),
-        accountsdb: AccountsDBParams {
-            directory: home.join("accountsdb"),
-            lru_capacity: 10_000,
-        },
-        ledger: LedgerParams {
-            directory: home.join("ledger"),
-            size_limit: 256 * 1024 * 1024 * 1024,
-        },
-        blockstore: BlockstoreParams {
-            blocktime: Duration::from_millis(400),
-            superblock: 16,
-        },
-        builtins: Default::default(),
-        programs: Default::default(),
-        accounts: Default::default(),
-        rent: Rent::default(),
-    };
-
-    let engine = Engine::new(builder, None, &mut shutdown).await?;
-    Ok((engine, shutdown))
-}
-```
-
-The second argument selects block pacing: `None` produces blocks locally; an
-external channel supplies production or replay boundaries. `superblock = 0`
-disables periodic sealing of nonzero slots; followers still apply upstream seals.
-
-Internal pacing clears chain-mirrored volatile accounts at startup, preserving
-internal system accounts. External pacing retains restored volatile state.
-
-## 🛑 Shutdown
-
-Retain the engine and its `ShutdownManager`. Stop external ingress before
-terminating managed services:
+Choose your programs, initial accounts, storage location, and block cadence.
+Engine opens the stores, handles recovery, and starts execution behind one async
+handle. Use its own clock for a standalone deployment, or supply block boundaries
+from your application.
 
 ```rust
-let cause = shutdown.wait().await;
-// Stop accepting transactions and other external work here.
-let outcome = shutdown.terminate().await;
+engine = Engine::new(config, pacing, shutdown).await;
 ```
 
-Inspect both reasons: `wait` identifies the trigger (including a replication
-snapshot restart), while `terminate` reports failures encountered during draining.
-The manager stops replication, pacing, execution, and backing services in order.
-Dropping it cancels services but does not wait for them.
+Keep the engine and its shutdown manager alive while serving requests. Reuse the
+same storage directories and authority identity when reopening a deployment.
+See [startup configuration](keeper/README.md#startup-and-recovery).
 
-Internal pacing publishes a final block and flushes durable state. External
-pacing flushes the ledger cursor before saving volatile state for restart. See
-[shutdown details](engine/README.md#shutdown).
+### ⚡ Execute in parallel, or simulate first
 
-## 🔁 Replication
-
-A leader serves retained history over TCP; followers replay it or bootstrap
-from a snapshot. On the leader machine:
+Submit instructions or an already signed transaction. Independent transactions
+run in parallel, while conflicting account accesses retain their canonical
+order. Your application does not have to schedule those dependencies itself.
 
 ```rust
-use std::sync::Arc;
-
-use replicator::ReplicationDispatcher;
-
-let allowed = Arc::from([follower_identity]);
-ReplicationDispatcher::spawn(bind_addr, engine.clone(), allowed, &mut shutdown).await?;
+engine.transaction(transaction).simulate().await; // Inspect without committing.
+engine.transaction(transaction).execute().await;  // Wait for the execution result.
+engine.transaction(transaction).schedule().await; // Queue without waiting for execution.
 ```
 
-On the follower machine, open its engine with an external pacer and connect the
-client to the leader's address:
+These are alternative ways to submit work. `execute` reports admission rejection
+or the committed result; `schedule` acknowledges queueing only. Cancelling a
+wait does not cancel submitted execution. See [transaction semantics](engine/README.md#submitting-transactions).
+
+### 📦 Keep local state durable and mirrored state lightweight
+
+Accounts controlled by the engine live on disk; external-chain copies live in
+memory. Storage follows the account lifecycle, so applications do not have to
+coordinate the two backends themselves.
+
+Import an account image, optionally applying follow-up instructions in the same
+transaction. This lets account activation and the work that depends on it succeed
+or fail together.
 
 ```rust
-use replicator::ReplicationClient;
-use tokio::sync::mpsc;
-
-let (block_tx, block_rx) = mpsc::channel(16);
-builder.authority.remote = Some(leader_identity);
-let engine = Engine::new(builder, Some(block_rx), &mut shutdown).await?;
-ReplicationClient::spawn(leader_addr, engine.clone(), block_tx, &mut shutdown)?;
+engine.account(key).await.materialize(account, actions).await;
 ```
 
-The allowlist contains follower **local** identities; an empty list denies all
-followers. Set the follower's remote authority to the source identity. Handshake
-clocks must agree within 30 seconds. Distinct-key followers cannot serve replicas;
-relays must hold the source's private key.
+The host supplies and verifies external-chain state. Replacement respects
+delegation and lifecycle rules, not just which image is newer, and requires the
+local signer to match the engine authority. If a submitted operation times out,
+reacquire and reread the account before retrying. See [account replacement](engine/README.md#account-replacement).
 
-If history has expired, the client stages a snapshot and reports `RestartRequired`.
-The host must drain services and reopen the engine from the same directories. See
-[replication contracts](replicator/README.md) for authentication, relay, and
-shutdown behavior.
+### 📡 React to changes instead of polling
 
-## 📦 Account state
-
-Delegated, ephemeral, and transient accounts are authoritative and persisted;
-externally mirrored accounts are volatile. `Transient` remains persisted but is
-not user-mutable. Accountsdb handles backend changes and removes closed accounts.
-
-To replace accounts directly, acquire `Engine::account(pubkey).await`.
-`materialize` and `delete` each run as one signed, committed transaction and
-require the local signer to match the engine authority.
+Follow account changes, transaction results, logs, and new blocks as they happen.
+Use live events to drive application updates, and retained transaction and block
+history for later inspection.
 
 ```rust
-use solana_account::{AccountBuilder, AccountMode};
-use solana_pubkey::Pubkey;
+account_updates = engine.accounts().subscribe(key);
+blocks = engine.blocks().subscribe();
 
-let key = Pubkey::new_unique();
-let owner = Pubkey::new_unique();
-let account = AccountBuilder::default()
-    .lamports(2_000_000)
-    .owner(owner)
-    .mode(AccountMode::ReadOnly)
-    .slot(1)
-    .data(vec![1, 2, 3, 4])
-    .build();
-
-engine.account(key).await.materialize(account, None).await?;
-engine.account(key).await.delete().await?;
+update = account_updates.recv().await;
+block = blocks.recv().await;
 ```
 
-`materialize` also replaces existing accounts and can run post-finalize actions
-atomically. Lifecycle rules apply: a newer slot alone does not authorize replacing
-engine-owned state. Mutations consume the accessor and retain its lease through
-completion even if the caller stops waiting. Reacquire and reread before retrying;
-a timeout or completion-task failure does not prove rollback. See the
-[replacement and redelegation contract](engine/README.md#account-replacement).
+Account and block streams have bounded queues; a subscriber that falls behind is
+disconnected. Other streams have different delivery guarantees. See
+[subscriptions](keeper/README.md#caches-and-subscriptions).
 
-Missing external accounts can be coordinated with `Engine::accounts().ensure`.
-The first caller receives `MissingAccount::Load`; concurrent callers receive a
-wait handle for the same pubkey. After storing the account, the loader calls
-`AccountLoad::complete(mode)` to publish success and update recency tracking for
-non-authoritative accounts. Dropping the load guard instead wakes waiters with a
-failed outcome.
+### 🔁 Keep another deployment in step
 
----
+A source serves execution history over TCP, and followers replay it locally.
+This gives you another copy of execution state without building your own
+transaction-streaming and snapshot-transfer machinery.
 
-## 📨 Transactions
+```text
+Source:   allow follower identities → serve retained history
+Follower: trust source authority → follow its transactions and block boundaries
+```
 
-`Engine::transaction` accepts an instruction slice, `Message`, sanitized
-`TransactionView`, or encoded transaction bytes. Instruction slices and messages
-use the effective authority as payer and the local signer with the latest
-blockhash, so local composition requires those identities to match.
+Followers resume from their durable position. When that history has expired,
+they receive a snapshot and ask the host to restart from it. This is replication,
+not automatic failover or consensus. See [follower setup](replicator/README.md#connecting-a-follower)
+for identities, pacing, and connection requirements.
+
+### 🩹 Stop cleanly and recover on restart
+
+Orderly shutdown gives in-flight work time to drain and flushes durable state.
+Reopening the same deployment checks account state against retained history,
+restores a snapshot when needed, and verifies replay before serving new work.
 
 ```rust
-use engine::Engine;
-use solana_instruction::Instruction;
-
-async fn submit(
-    engine: &Engine,
-    instructions: &[Instruction],
-) -> engine::Result<()> {
-    engine
-        .transaction(instructions)?
-        .execute()
-        .await?
-        .map_err(Into::into)
-}
+shutdown.wait().await;
+// Stop accepting new requests.
+shutdown.terminate().await;
 ```
 
-- `execute` waits for admission rejection or the committed result without an internal deadline.
-- `schedule` acknowledges queueing only; admission rejection is silently dropped.
-- `simulate` executes against owned account copies without committing state.
-
----
-
-## 📡 Subscriptions
-
-Keeper accessors expose dedicated Tokio channels for live state:
-
-```rust
-let mut account_updates = engine.accounts().subscribe(key).await;
-let mut blocks = engine.blocks().subscribe();
-
-let account = account_updates.recv().await.expect("account stream is open");
-let block = blocks.recv().await.expect("block stream is open");
-```
-
-Related accessors subscribe to program-owned accounts, cache evictions,
-snapshot completion, transaction status, logs, processed transactions, and
-service messages. Signatures use terminal oneshot channels; other multicast
-streams give each consumer a bounded queue and disconnect a consumer that falls
-behind. Processed transactions, service messages, and cache evictions each have
-one process-lifetime consumer and apply producer backpressure when its queue is
-full.
-
----
-
-## 🩹 Startup and recovery
-
-Startup validates accountsdb against retained history, restores a retained
-snapshot when necessary, and replays missing entries. Seal or final transaction
-count mismatches fail startup with `ReplayError::StateMismatch`; recovery requires
-a valid snapshot when current state is unusable. See
-[recovery and restart semantics](engine/README.md#startup-and-recovery).
-
-This is not a guarantee of complete history after a crash: ledger indexes become
-visible asynchronously and no crash-tail index rebuild is performed. Graceful
-shutdown is the supported complete-history boundary; see
-[ledger durability](ledger/README.md#append-and-read-paths).
+Keep the engine and Tokio runtime alive during draining, and inspect shutdown
+results for failures or a required follower restart. Crash recovery needs a valid
+retained snapshot when current state is unusable; it does not guarantee complete
+queryable history. See [recovery](engine/README.md#startup-and-recovery) and
+[durability](ledger/README.md#append-and-read-paths).
 
 ## 🧩 Workspace layout
 
-| Crate | Role |
-| :-- | :-- |
-| [`nucleus`](nucleus/README.md) | Shared ledger, runtime, metrics, TLS, and shutdown types. |
-| [`solana/*`](solana/README.md) | The runtime forks required by the engine account model. |
-| [`accountsdb`](accountsdb/README.md) | Owns persisted and volatile account storage and snapshots. |
-| [`ledger`](ledger/README.md) | Stores transactions, execution records, blocks, and superblocks. |
-| [`keeper`](keeper/README.md) | Opens both stores and provides caches, reads, and subscriptions. |
-| [`processor`](processor/README.md) | Schedules transactions across SVM executors and commits results. |
-| `programs/*` | MagicRoot and the v42 test program and interfaces. |
-| [`engine`](engine/README.md) | Wires the execution engine and exposes the public handle. |
-| [`replicator`](replicator/README.md) | Streams durable engine state between nodes. |
+For a closer look at a particular part of Engine:
 
-Transactions are appended before execution, then paired with execution metadata.
-Superblock boundaries quiesce execution for coherent account snapshots.
+| Crate | Read more about |
+| :-- | :-- |
+| [`engine`](engine/README.md) | Embedding Engine, account replacement, and recovery. |
+| [`accountsdb`](accountsdb/README.md) | Account storage, snapshots, and scoped zero-copy reads. |
+| [`ledger`](ledger/README.md) | Transaction and block history, durability, and retention. |
+| [`keeper`](keeper/README.md) | Startup configuration, cached reads, and subscriptions. |
+| [`processor`](processor/README.md) | Parallel transaction execution, ordering, and quiescence. |
+| [`replicator`](replicator/README.md) | Leader/follower replication and snapshot bootstrap. |
+| [`nucleus`](nucleus/README.md) | Shared configuration, runtime types, metrics, and shutdown support. |
+| [`solana/*`](solana/README.md) | Runtime forks supporting Engine's account model. |
+| `programs/*` | MagicRoot and the v42 test program and interfaces. |

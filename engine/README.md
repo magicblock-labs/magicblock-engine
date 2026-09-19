@@ -1,30 +1,54 @@
 # `magicblock-engine`
 
-This crate exposes `Engine`, the consumer-facing handle over keeper state,
-transaction sequencing, simulation, block pacing, recovery, and MagicRoot
-account operations. It registers MagicRoot and the System Program as native
-builtins before keeper opens startup state.
+Embed `Engine` to execute Solana transactions, simulate them without committing,
+and work with local account state. Start with the [workspace guide](../README.md)
+for startup and submission examples; this page covers the
+integration contracts behind those examples.
+
+## Opening an engine
+
+Pass a `KeeperBuilder` and a retained `ShutdownManager` to `Engine::new`.
+Use `None` for internal block pacing or an `ExternalPacer` for caller-supplied
+boundaries. Startup opens and recovers state before starting live execution.
+MagicRoot, the System Program, and the Compute Budget Program are registered as
+native builtins before keeper opens startup state.
 
 `Engine::signer` is always the local keypair. `Engine::authority` returns the
 configured remote authority for a replica, or the local identity when no
 override is configured. Replication uses that distinction to sign locally while
 authenticating its immediate upstream.
 
-Normal transaction submission sanitizes and verifies each transaction.
-Replication instead uses `Engine::verifier` to sanitize, authority-check, and
-batch-verify payloads, then consumes the resulting opaque transactions through
-the trusted `TransactionAccessor::verified` path without repeating crypto.
-Retained local-ledger replay has a separate private verification bypass.
+## Submitting transactions
 
-`schedule` acknowledges queueing, not admission or execution, and allocates no
-completion channel. Duplicates and invalid blockhashes are silently dropped.
-`execute` instead owns one reply channel for admission rejection or committed
-execution, independent of signature subscriptions. Signature observers and
+Choose whether you need a committed result, queueing acknowledgment, or a dry run:
+
+| Method | Result |
+| :-- | :-- |
+| `execute` | Waits for admission rejection or committed execution through a request-specific reply channel. |
+| `schedule` | Acknowledges queueing, not admission or execution; duplicates and invalid blockhashes are silently dropped. No completion channel is allocated. |
+| `simulate` | Executes against account copies without committing changes. |
+
+Signature subscriptions are observers, not request-completion channels. They and
 status reads report execution results only, including retained results.
+There is no execution deadline, and cancelling a wait does not cancel submitted
+work. Accepted work must publish a terminal result or the host must fail-stop on
+an execution infrastructure failure; Engine cannot recover a missing result in
+a live process. Keep Tokio running until Engine services stop.
+
+Normal submission sanitizes and verifies each transaction. Replication instead
+uses `Engine::verifier` to sanitize, authority-check, and batch-verify payloads,
+then passes the opaque results to `TransactionAccessor::verified` without
+repeating crypto. Only use verified values from that Engine's verifier.
+Retained local-ledger replay has a separate private verification bypass.
 
 ## Account replacement
 
-`Engine::account(pubkey).await` acquires an exclusive materialization lease.
+Use `Engine::account(pubkey).await` when importing or replacing an account image.
+It acquires an exclusive materialization lease so another accessor cannot replace
+the same account while your operation is pending. The lease does not serialize
+ordinary transactions. Materialization and deletion require the local signer to
+match the engine's authority.
+
 `AccountAccessor::materialize` composes complete-account MagicRoot patches,
 finalization, and optional `PostFinalize` actions in one transaction. Patches
 cover non-flag fields; finalization installs the complete caller-supplied flags
@@ -40,12 +64,6 @@ or cancelling before submission releases it without submitting work.
 There is no internal execution deadline. A timeout does not cancel execution;
 `EngineError::Task` preserves a completion task's Tokio `JoinError` and does not
 prove rollback. Reacquire the accessor and reread before retrying or recovering.
-Its lease serializes accessor operations, not ordinary transactions.
-
-Accepted work must publish a terminal result or the host must fail-stop on an
-execution infrastructure failure; Engine cannot recover a missing result in a
-live process. Keep Tokio running until Engine services stop. Ordinary transaction
-`execute` likewise has no deadline and cancelling its wait does not cancel work.
 
 ### Confirmed redelegation
 
@@ -97,13 +115,15 @@ Followers apply upstream seals under an execution barrier.
 
 ## Shutdown
 
-Shutdown behavior follows the pacing source. Internal pacing publishes a final
-block and flushes durable state. External pacing flushes the durable cursor
-before writing `CURRENT/volatile.db`, allowing the next open and replication
-handshake to resume from matching state. The pacemaker holds the sequencer
-barrier while issuing a terminal ledger sync, which closes the appender and
-reader workers without waiting for every engine handle to be dropped.
+Stop external ingress, then call `terminate` on the `ShutdownManager` retained
+from startup. Keep the engine handle and Tokio runtime alive while it drains.
+The manager stops the replication client, pacemaker, sequencer, and backing
+services in order.
 
-The embedding service retains the `ShutdownManager` passed to `Engine::new` and
-calls `terminate` after stopping external ingress. The manager stops the
-replication client, pacemaker, sequencer, and backing services in order.
+Shutdown behavior follows the pacing source. Internal pacing publishes a final
+block. External pacing also writes `CURRENT/volatile.db` so the next open can
+restore volatile state. Both paths hold the sequencer barrier while issuing a
+terminal ledger sync, which closes the appender and reader workers and flushes
+account storage without waiting for every engine handle to be dropped. During
+normal follower shutdown, the replication client first flushes its applied cursor;
+see the [follower recovery contract](../replicator/README.md#follower-recovery).

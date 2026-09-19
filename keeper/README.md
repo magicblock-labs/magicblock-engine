@@ -1,8 +1,69 @@
 # `magicblock-keeper`
 
-Keeper opens accountsdb and the ledger as one durable state boundary. It also
-owns startup account seeding, read-side caches, and live subscription fanout.
-Account routing remains in accountsdb and ledger retention remains in ledger.
+Keeper gives an embedding service a consistent place to read account state and
+history, follow live updates, and recover the two stores together. Most callers
+reach it through `Engine`; use `KeeperBuilder` to configure initial state and
+storage. Account routing stays in [accountsdb](../accountsdb/README.md), and
+history retention stays in [ledger](../ledger/README.md).
+
+## Authority
+
+`nucleus::config::Authority::local` is the keypair used for locally signed
+messages. When `Authority::remote` is set, `Keeper::authority` returns that
+immediate upstream identity instead of the local pubkey, while `Keeper::signer`
+continues to return the local signer. Replication followers retain both values
+across restart.
+
+The effective authority also identifies the engine's sponsor account. Keeper
+creates this engine-local account only for an empty ledger, persists its spent
+balance across restarts, and restores its initial balance on reset. Startup
+rejects a non-empty deployment whose configured authority account is absent.
+
+## Caches and subscriptions
+
+Subscribe when you need to react to changes; use reads for retained state and
+results. Delivery depends on the stream, so choose how your consumer handles
+backpressure before connecting it:
+
+| Subscription | Delivery |
+| :-- | :-- |
+| Signature result | Terminal oneshot fanout, including an already retained execution result. |
+| Account, program, logs, blocks, completed snapshots | Multicast, with a bounded queue per receiver; a receiver that falls behind is disconnected. |
+| Processed transactions, service messages, cache evictions | One process-lifetime receiver per stream; a full queue backpressures the producer. |
+
+Admission rejection goes only to the submitting request: it is neither cached
+nor sent to signature observers. Rejected signatures keep their dedup reservation
+until normal expiry. Processor completes requests independently of fanout.
+
+`subscribe_signature` registers before checking retained status, and commits
+cache results before fanout. This ordering lets concurrent and late subscribers
+observe a retained result without missing it between registration and lookup.
+Account and program accessors return receivers directly; signature registration
+awaits the retained-status lookup. Registration is synchronous and may wait for
+an SCC bucket lock, never channel capacity.
+
+### Cache lifetime
+
+Signature and recent-block caches expire by slot, not wall-clock time. Each push
+sweeps at most `EVICTION_LIMIT` expired entries under the insertion lock. Reads
+do not evict: an expired signature remains readable and rejects duplicates until
+a push sweeps it.
+
+The account cache coordinates concurrent loads of missing accounts and tracks
+non-authoritative accounts in an eviction LRU. Delegated, ephemeral, and
+unresolved transient state stays outside that LRU.
+
+### Delivery internals
+
+Processed-transaction accounts are copied into owned storage before queueing so
+a subscriber cannot retain mmap views across compaction. The copy is skipped
+when no processed-transaction subscriber is live.
+
+Signature and multicast registries count occupied keys atomically. Empty sends
+and membership checks skip hashing and map access; only first registration and
+last removal change the count. Closed receivers stay counted until pruning.
+This avoids a global subscription mutex or bucket-count scan. Full-map cleanup
+yields on bucket contention.
 
 ## Startup and recovery
 
@@ -39,70 +100,30 @@ cannot advance startup state:
 - Engine replay caches re-executed terminal results without ledger appends or
   live transaction notifications.
 
-## Authority
-
-`nucleus::config::Authority::local` is the keypair used for locally signed
-messages. When `Authority::remote` is set, `Keeper::authority` returns that
-immediate upstream identity instead of the local pubkey, while `Keeper::signer`
-continues to return the local signer. Replication followers retain both values
-across restart.
-
-The effective authority also identifies the engine's sponsor account. Keeper
-creates this engine-local account only for an empty ledger, persists its spent
-balance across restarts, and restores its initial balance on reset. Startup
-rejects a non-empty deployment whose configured authority account is absent.
-
 ## Superblock finalization
 
-`Keeper::finalize_superblock` requires quiesced execution; accountsdb separately
-drains scoped readers while relocating and truncating storage. It snapshots
-accountsdb to refresh the checksum, then signs the reconstructed seal or compares
-it with an authenticated upstream payload and retains its signature. The snapshot
-is archived in the successor directory; completion acknowledges durable sealing
-and rotation, not archive completion. `SuperblockAccessor::sealed` returns the
-unsigned accountsdb state.
+A superblock seals a checkpoint that recovery and replication can validate.
+Quiesce execution before calling `Keeper::finalize_superblock`; accountsdb also
+drains scoped readers before relocating and truncating storage. Finalization
+snapshots accountsdb to refresh the checksum, then signs the reconstructed seal
+or compares it with an authenticated upstream payload and retains its signature.
+
+The snapshot is archived in the successor directory. Completion acknowledges
+durable sealing and rotation, not archive completion.
+`SuperblockAccessor::sealed` returns the unsigned accountsdb state.
 
 Producers sign resets, followers append the original signed reset, and local
 recovery only applies its payload. All share the same volatile-state mutation.
 
 ## Synchronization
 
-`Keeper::sync(false)` flushes queued appends and accountsdb while keeping ledger
-workers available, as required by replay and replication. `Keeper::sync(true)`
-is the irreversible shutdown fence: it closes every reader after earlier queued
-requests, flushes and closes the appender, then flushes accountsdb.
+Choose a nonterminal flush during replay or replication; reserve the terminal
+fence for shutdown:
 
-## Caches and subscriptions
-
-Signature and recent-block caches use slot-based TTLs. Each push sweeps at most
-`EVICTION_LIMIT` expired entries under the insertion lock. Reads do not evict:
-expired signatures remain readable and reject duplicates until a push sweeps them.
-The account cache is an LRU that also coordinates concurrent loads of
-missing accounts. Only non-authoritative modes enter the eviction LRU;
-delegated, ephemeral, and unresolved transient state remains outside it.
-
-Dedicated channels publish account and program updates, signature results, logs,
-processed transactions, blocks, cache evictions, completed snapshots, and
-service messages. Processed-transaction accounts are made owned before queueing,
-so subscribers never retain mmap views across compaction. This copy is skipped
-when there is no live processed-transaction subscriber.
-Signatures have terminal oneshot fanout; persistent multicast
-streams give each receiver a bounded queue and disconnect a receiver that falls
-behind. Processed transactions, service messages, and cache evictions each have
-one process-lifetime receiver and apply producer backpressure when full.
-Admission rejection is returned only to the submitting request, never cached or
-sent to signature observers. Rejected signatures retain their dedup reservation
-until normal expiry. Processor owns request completion separately from fanout.
-`subscribe_signature` registers before checking retained status; commits cache
-their result before fanout so concurrent and late subscriptions cannot miss it.
-Signature and multicast registries count occupied keys atomically. Empty sends
-and membership checks skip hashing and map access; only first registration and
-last removal change the count. Closed receivers remain counted until pruning.
-No global subscription mutex or bucket-count scan is required.
-Registration is synchronous and may wait for an SCC bucket lock, never channel
-capacity. Account and program accessors return receivers directly; signature
-registration awaits the retained-status lookup. Full-map cleanup yields on
-bucket contention.
+- `Keeper::sync(false)` flushes queued appends and accountsdb while leaving ledger
+  workers available.
+- `Keeper::sync(true)` irreversibly closes every reader after earlier queued
+  requests, flushes and closes the appender, then flushes accountsdb.
 
 ## `testkit`
 

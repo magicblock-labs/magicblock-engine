@@ -164,3 +164,10 @@ todo = "deny"
 unimplemented = "deny"
 unwrap_used = "warn"
 wildcard_dependencies = "deny"
+
+[profile.dev]
+split-debuginfo = "unpacked" # Skip dsymutil on macOS
+
+[profile.dev.package."*"]
+debug = 0     # Strip debug symbols from 3rd-party crates
+opt-level = 0 # Keep dependency compile time fast

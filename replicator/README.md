@@ -1,44 +1,46 @@
 # `magicblock-replicator`
 
-Replicator transfers durable execution state over TCP between independent
-engine deployments, typically running on different machines. The follower
-reports its durable `BlockstorePosition`; the server either resumes the retained
-blockstore stream or sends the newest available accountsdb snapshot.
+Keep another Engine deployment in step with a running source over TCP. A follower
+resumes from its durable `BlockstorePosition` when the source still has that
+history; otherwise, it receives the newest available accountsdb snapshot and
+asks the host to restart.
 
-## Protocol
+## Connecting a follower
 
-Protocol version 1 uses wincode control messages prefixed by a little-endian
-`u32` length. Control frames are limited to 65,535 bytes before allocation.
-Snapshot archives and blockstore bytes follow the selected response without
-additional framing.
+The [workspace overview](../README.md#-keep-another-deployment-in-step) introduces the workflow. Configure
+the identities and pacing before starting the connection:
 
-Handshake requests and responses are signed with the sender's local key and
-must be within 30 seconds of the receiver's clock. A server accepts only local
-follower identities in its allowlist; an empty allowlist denies all followers.
-A follower identity may hold only one active transfer at a time; its reservation
-is released when that connection's worker exits. Stream workers detect peer
-disconnects through writes triggered by durable cursor updates, which are
-published at least every time block is produced while the engine is running.
-A follower verifies responses against `Engine::authority()`, which must be
-configured with the source authority through `nucleus::config::Authority::remote`.
+1. On the source, start `ReplicationDispatcher` with a reachable address and an
+   allowlist of follower local identities. An empty allowlist denies all followers.
+2. Open the follower with its own storage and local keypair. Set
+   `nucleus::config::Authority::remote` to the source authority, and give
+   `Engine::new` an external pacer so it applies upstream block boundaries.
+3. Start `ReplicationClient` with the source address and the pacer sender. Keep
+   both machines' clocks within 30 seconds for signed handshakes.
+4. Handle `RestartRequired` through the shutdown manager: drain services and
+   reopen the follower from the same directories to install a staged snapshot.
 
-Ingest also verifies each block, superblock seal, and reset against that authority
-before handing it to Control. Signatures cover the message kind and full payload,
-excluding the signature itself. Invalid signatures terminate replication. Snapshot
-bootstrap verifies the original seal signature before staging any data. Followers
-preserve these signatures in their own ledger instead of signing again.
+Each follower identity can have only one active transfer. The server releases
+its reservation when the connection worker exits. Stream workers detect peer
+disconnects on writes triggered by durable cursor updates, published at least
+once per produced block while the engine is running.
 
-Every dispatcher must sign with that same canonical authority key. A follower
-whose local signer differs from `Engine::authority()` is a terminal leaf:
-`ReplicationDispatcher::spawn` logs a warning and returns `Ok(())` without
-binding a listener. Any number of such leaves may follow the source or a relay.
-Every relay holds the shared private key, so the source and all relays have one
+## Identities and relays
+
+A follower signs handshake requests with its local key, but verifies the source
+against `Engine::authority()`. Responses are signed with the server's local key;
+every dispatcher must therefore hold the canonical authority key.
+
+A follower with a different local signer is a terminal leaf. On such an engine,
+`ReplicationDispatcher::spawn` logs a warning and returns `Ok(())` without binding
+a listener. Any number of leaves may follow the source or a shared-key relay.
+Every relay holds the shared private key, so the source and all relays share one
 compromise and key rotation boundary.
 
-The async dispatcher accepts sockets and assigns each connection to a blocking
-thread. File and socket operations on that thread use bounded blocking I/O.
-Published ledger cursors are transfer boundaries, including sealed tails and
-intermediate superblocks.
+A shared-key follower may also serve downstream followers. It waits for each
+upstream seal, validates its state, then persists the original seal and archives
+its own snapshot before consuming further entries. Downstream clients verify
+responses against the original source authority.
 
 ## Follower recovery
 
@@ -50,7 +52,7 @@ including when a nonempty follower falls behind retention. The client then
 reports `RestartRequired`; keeper restores the staged snapshot on the next
 startup and engine replay advances it to the ledger tip.
 
-Externally paced shutdown flushes the cursor before writing
+Normal follower shutdown flushes the cursor before the engine writes
 `CURRENT/volatile.db`. Internally paced origins instead append one reset marker
 at startup before producing their first new block, so followers clear
 chain-mirrored volatile state at the same stream position while retaining
@@ -62,12 +64,28 @@ barriers execution and flushes the cursor before stopping Ingest. The operationa
 block heartbeat supplies that boundary, reconnecting first when necessary.
 Replication failure and snapshot restart paths do not claim this guarantee.
 
+## Protocol
+
+Protocol version 1 uses wincode control messages prefixed by a little-endian
+`u32` length. Control frames are limited to 65,535 bytes before allocation.
+Snapshot archives and blockstore bytes follow the selected response without
+additional framing.
+
+Handshake requests and responses are signed with the sender's local key and
+must be within 30 seconds of the receiver's clock. Ingest also verifies each
+block, superblock seal, and reset against the configured authority before handing
+it to Control. Signatures cover the message kind and full payload, excluding
+the signature itself. Invalid signatures terminate replication. Snapshot
+bootstrap verifies the original seal signature before staging any data. Followers
+preserve these signatures in their own ledger instead of signing again.
+
+## Transfer ordering
+
+The async dispatcher assigns each accepted socket to a blocking thread with
+bounded blocking file and socket I/O. Published ledger cursors are transfer
+boundaries, including sealed tails and intermediate superblocks.
+
 Ingest batches at most 128 transactions (typically 128 KiB), fencing before each
 block, seal, reset, or reconnect. Verification runs on idle Control or overlaps
 Control's scheduling in Ingest. Control alone owns handshakes, reconnect cursors,
 barriers, snapshot staging, scheduling, and pacing, preserving stream order.
-
-A shared-key follower may also serve downstream followers. It waits for each
-upstream seal, validates its state, then persists the original seal and archives
-its own snapshot before consuming further entries. Downstream clients verify
-responses against the original source authority.
