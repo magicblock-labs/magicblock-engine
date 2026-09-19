@@ -26,7 +26,7 @@ rule is unchanged.
 - `Finalize` atomically installs the caller-supplied complete flag value and
   loads an executable target into the transaction program cache. It does not
   change lamports; failed executable loading rolls back the installed flags.
-- `Delete` transitions read-only, placeholder, or ephemeral targets to
+- `Delete` transitions ReadOnly, Uninit, or Magic targets to
   `AccountMode::Closed`, immediately hides any transaction-local cached program,
   and removes its shared cache entry after successful execution and access
   validation. Accountsdb removes closed accounts during writeback. Modes that

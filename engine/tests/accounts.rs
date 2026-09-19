@@ -195,7 +195,7 @@ async fn account_materialization_accepts_max_data_with_post_finalize() {
     let te = TestEngine::new().await;
     let key = Pubkey::new_unique();
     let source = store_v42(&te, 7, AccountMode::Delegated);
-    let output = store_v42(&te, 0, AccountMode::Ephemeral);
+    let output = store_v42(&te, 0, AccountMode::Magic);
     let data = patterned_bytes(MAX_PERMITTED_DATA_LENGTH as usize, 42);
     let account = delegated_account(
         Rent::default().minimum_balance(data.len()),
@@ -272,7 +272,7 @@ async fn account_program_cache_tracks_v42_lifecycle() {
     let seeded = te.get_account(V42_ID).expect("v42 program is seeded");
     let program = Pubkey::new_unique();
     let closeable = AccountBuilder::from(seeded.clone())
-        .mode(AccountMode::Ephemeral)
+        .mode(AccountMode::Magic)
         .slot(seeded.slot() + 1);
     te.account(program).await.materialize(closeable, None).await.unwrap();
 
@@ -280,7 +280,7 @@ async fn account_program_cache_tracks_v42_lifecycle() {
     te.accounts()
         .store(&[(
             output,
-            v42_builder(0, AccountMode::Ephemeral).owner(program).build(),
+            v42_builder(0, AccountMode::Magic).owner(program).build(),
         )])
         .unwrap();
     let invoke = |value| {
@@ -320,7 +320,7 @@ async fn account_program_cache_tracks_v42_lifecycle() {
         "committed deletion removes the account"
     );
 
-    let invalid = AccountBuilder::from(seeded).mode(AccountMode::Ephemeral).data(vec![0]);
+    let invalid = AccountBuilder::from(seeded).mode(AccountMode::Magic).data(vec![0]);
     te.accounts().store(&[(program, invalid.build())]).unwrap();
     assert_eq!(
         te.execute(&[invoke(9)]).await,
@@ -343,8 +343,10 @@ async fn account_replacement_slot_ordering() {
 
     for (from, to, slot) in [
         (AccountMode::ReadOnly, AccountMode::Delegated, SLOT),
-        (AccountMode::Placeholder, AccountMode::Ephemeral, SLOT),
         (AccountMode::Transient, AccountMode::Delegated, SLOT + 1),
+        (AccountMode::Uninit, AccountMode::Magic, SLOT),
+        (AccountMode::ReadOnly, AccountMode::Magic, SLOT),
+        (AccountMode::Magic, AccountMode::Delegated, SLOT),
     ] {
         let key = Pubkey::new_unique();
         materialize_with(&te, key, owner, from).await;
@@ -360,18 +362,19 @@ async fn account_replacement_slot_ordering() {
         );
     }
 
-    let output = store_v42(&te, 0, AccountMode::Ephemeral);
+    let output = store_v42(&te, 0, AccountMode::Magic);
     for (from, to, slot) in [
-        (AccountMode::Placeholder, AccountMode::Transient, SLOT),
-        (AccountMode::Ephemeral, AccountMode::Delegated, SLOT),
+        (AccountMode::Uninit, AccountMode::Transient, SLOT),
         (AccountMode::System, AccountMode::ReadOnly, SLOT),
         (AccountMode::Delegated, AccountMode::Delegated, SLOT + 1),
-        (AccountMode::Ephemeral, AccountMode::Ephemeral, SLOT + 1),
+        (AccountMode::Magic, AccountMode::Magic, SLOT + 1),
         (AccountMode::Transient, AccountMode::Transient, SLOT + 1),
         (AccountMode::ReadOnly, AccountMode::ReadOnly, SLOT),
         (AccountMode::ReadOnly, AccountMode::Delegated, SLOT - 1),
         (AccountMode::Transient, AccountMode::Delegated, SLOT),
         (AccountMode::Transient, AccountMode::Delegated, SLOT - 1),
+        (AccountMode::Magic, AccountMode::Delegated, SLOT - 1),
+        (AccountMode::Magic, AccountMode::ReadOnly, SLOT + 1),
     ] {
         let key = Pubkey::new_unique();
         // Seed the source directly so only replacement validation is under test.
@@ -402,18 +405,18 @@ async fn account_replacement_slot_ordering() {
     te.close().await;
 }
 
-/// Proves creation and redelegation atomically roll back an earlier action on
+/// Proves creation, redelegation, and Magic replacement roll back an earlier action on
 /// failure, permit retry after reacquiring, and cannot replay actions once active.
 #[tokio::test(flavor = "multi_thread")]
 async fn account_activation_is_atomic() {
     let te = TestEngine::new().await;
 
-    for redelegation in [false, true] {
+    for initial in [None, Some(AccountMode::Transient), Some(AccountMode::Magic)] {
         let key = Pubkey::new_unique();
-        if redelegation {
-            materialize_with(&te, key, Pubkey::new_unique(), AccountMode::Transient).await;
+        if let Some(mode) = initial {
+            materialize_with(&te, key, Pubkey::new_unique(), mode).await;
         }
-        let output = store_v42(&te, 0, AccountMode::Ephemeral);
+        let output = store_v42(&te, 0, AccountMode::Magic);
         let state = || [key, output, te.authority()].map(|key| te.get_account(key));
         let before = state();
         let replacement =
@@ -508,7 +511,7 @@ async fn cancelled_activation_retains_ownership() {
     for fail in [false, true] {
         let te = TestEngine::new().await;
         let key = Pubkey::new_unique();
-        let output = store_v42(&te, 0, AccountMode::Ephemeral);
+        let output = store_v42(&te, 0, AccountMode::Magic);
         let state = || [key, output, te.authority()].map(|key| te.get_account(key));
         let before = state();
         let replacement = delegated(V42_ID, 10_i64.to_le_bytes().to_vec(), SLOT);

@@ -176,7 +176,7 @@ mod tests {
         let mut transitioned = account(AccountMode::Delegated);
         let transitioned_slot = transitioned.slot();
         transitioned.set_lifecycle(AccountMode::Transient, transitioned_slot).unwrap();
-        let mut closed = account(AccountMode::Ephemeral);
+        let mut closed = account(AccountMode::Magic);
         let closed_slot = closed.slot();
         closed.set_lifecycle(AccountMode::Closed, closed_slot).unwrap();
 

@@ -104,7 +104,7 @@ impl KeeperBuilder {
         if !accountsdb.loader().contains(&authority)? {
             let sponsor = AccountBuilder::default()
                 .lamports(SPONSOR_INIT_BALANCE)
-                .mode(AccountMode::Ephemeral);
+                .mode(AccountMode::Magic);
             accounts.push((authority, sponsor.build()));
         }
         accounts.extend(self.accounts.drain());

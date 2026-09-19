@@ -473,7 +473,7 @@ mod tests {
             .build::<AccountSharedData>();
 
         AccountFieldPatch::Lifecycle {
-            mode: AccountMode::Ephemeral,
+            mode: AccountMode::Magic,
             slot: 42,
         }
         .apply(&mut account)
@@ -489,7 +489,7 @@ mod tests {
         let account = accounts.pop().unwrap();
 
         assert!(accounts.is_empty());
-        assert!(account.is(AccountMode::Ephemeral));
+        assert!(account.is(AccountMode::Magic));
         assert_eq!(account.slot(), 42);
         assert!(account.executable());
         assert_eq!(account.data(), &[4, 5, 3]);

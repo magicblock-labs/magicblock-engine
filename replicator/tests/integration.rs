@@ -181,6 +181,7 @@ async fn block_transactions(engine: &TestEngine, slot: Slot) -> Vec<Vec<u8>> {
 }
 
 /// Large raw transaction frames survive both retained catch-up and live replay.
+/// Magic creation and delegated replacement reproduce the same durable state.
 #[tokio::test(flavor = "multi_thread")]
 async fn replays_large_transactions_during_catch_up_and_live_streaming() {
     const BATCHED_INSTRUCTIONS: usize = 32;
@@ -218,7 +219,7 @@ async fn replays_large_transactions_during_catch_up_and_live_streaming() {
     let created = AccountBuilder::default()
         .lamports(lamports)
         .owner(owner)
-        .mode(AccountMode::ReadOnly)
+        .mode(AccountMode::Magic)
         .slot(ACCOUNT_SLOT)
         .data(patterned_bytes(CREATE_DATA_LEN, 1));
     leader
@@ -255,7 +256,7 @@ async fn replays_large_transactions_during_catch_up_and_live_streaming() {
     let updated = AccountBuilder::default()
         .lamports(lamports)
         .owner(owner)
-        .mode(AccountMode::ReadOnly)
+        .mode(AccountMode::Delegated)
         .slot(ACCOUNT_SLOT + 1)
         .data(patterned_bytes(UPDATE_DATA_LEN, 2));
     leader

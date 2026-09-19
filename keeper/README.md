@@ -50,7 +50,7 @@ do not evict: an expired signature remains readable and rejects duplicates until
 a push sweeps it.
 
 The account cache coordinates concurrent loads of missing accounts and tracks
-non-authoritative accounts in an eviction LRU. Delegated, ephemeral, and
+non-authoritative accounts in an eviction LRU. Delegated, Magic, and
 unresolved transient state stays outside that LRU.
 
 ### Delivery internals

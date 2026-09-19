@@ -189,28 +189,44 @@ fn test_account_patch_transition_errors() {
     assert_eq!(account.slot(), 10);
     assert_eq!(*account.markers(), markers);
 
-    let mut ephemeral = AccountBuilder::default()
-        .mode(AccountMode::Ephemeral)
-        .build::<AccountSharedData>();
-    ephemeral.set_lifecycle(AccountMode::Closed, 0).unwrap();
-    assert!(ephemeral.is(AccountMode::Closed));
+    let mut magic = AccountBuilder::default().mode(AccountMode::Magic).build::<AccountSharedData>();
+    magic.set_lifecycle(AccountMode::Closed, 0).unwrap();
+    assert!(magic.is(AccountMode::Closed));
 }
 
 /// Proves every lifecycle pair enforces slot ordering identically for owned and
 /// borrowed accounts, preserving rejected state and marking only accepted changes.
+/// Also pins mode classification, stored discriminants, and wire round-tripping.
 #[test]
 fn test_lifecycle_matrix() {
     use AccountMode::*;
 
-    let modes = [Placeholder, ReadOnly, System, Delegated, Ephemeral, Transient, Closed];
+    let modes = [Uninit, ReadOnly, System, Delegated, Magic, Transient, Closed];
+    for (index, mode) in modes.into_iter().enumerate() {
+        // Wire indices follow declaration order; mmap discriminants do not.
+        assert_eq!(mode as u8, [0, 1, 2, 3, 4, 5, 255][index]);
+        let bytes = bincode::serialize(&mode).unwrap();
+        assert_eq!(bytes, (index as u32).to_le_bytes());
+        assert_eq!(bincode::deserialize::<AccountMode>(&bytes).unwrap(), mode);
+        #[cfg(feature = "wincode")]
+        {
+            assert_eq!(wincode::serialize(&mode).unwrap(), bytes);
+            assert_eq!(wincode::deserialize::<AccountMode>(&bytes).unwrap(), mode);
+        }
+        assert_eq!(mode.mutable(), matches!(mode, Delegated | Magic));
+        assert_eq!(
+            mode.authoritative(),
+            matches!(mode, Delegated | Magic | Transient)
+        );
+    }
     // Columns are destinations in `modes` order.
     // 0 forbids the pair, 1 permits equal/newer slots, 2 requires a newer slot.
     let rules = [
-        (Placeholder, [2, 1, 1, 1, 1, 0, 1]),
+        (Uninit, [2, 1, 1, 1, 1, 0, 1]),
         (ReadOnly, [2, 2, 0, 1, 1, 0, 1]),
         (System, [0, 0, 2, 0, 0, 0, 0]),
         (Delegated, [0, 0, 0, 0, 0, 1, 0]),
-        (Ephemeral, [0, 0, 0, 0, 0, 0, 1]),
+        (Magic, [0, 0, 0, 1, 0, 0, 1]),
         (Transient, [1, 1, 0, 2, 0, 0, 0]),
         (Closed, [0, 0, 0, 0, 0, 0, 0]),
     ];

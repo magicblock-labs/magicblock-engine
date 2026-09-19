@@ -56,6 +56,13 @@ without changing lamports. Actions immediately follow finalization. Accepted
 mode/slot combinations follow the [account lifecycle table](../solana/account/README.md).
 A newer slot alone does not permit replacement of authoritative state.
 
+`Magic` is mutable, authoritative state that exists only inside the ER, including
+locally created ATAs. Privileged materialization may create it from `Uninit` or
+`ReadOnly`, replace it with `Delegated` at the same or a newer slot, or explicitly
+close it. The host must validate creation and replacement eligibility; for ATAs,
+MBV must prevent funded accounts from being replaced. Engine does not parse token
+data or enforce transaction-end token balances.
+
 `materialize` and `delete` consume the accessor and return `Result<()>`. After
 submission, Engine retains the lease through request completion and
 success bookkeeping, even if the caller stops waiting. Dropping an idle accessor

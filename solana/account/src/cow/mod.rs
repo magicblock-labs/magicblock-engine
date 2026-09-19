@@ -576,15 +576,15 @@ impl CoWAccount {
 pub enum AccountMode {
     /// Empty account (not found on chain) used to avoid frequent chain syncs.
     #[default]
-    Placeholder = 0,
+    Uninit = 0,
     /// Not writable by users (exists on chain, but not delegated)
     ReadOnly,
     /// Internal account used for sysvars, features, and precompiles.
     System,
     /// Account delegated to the current ER node instance.
     Delegated,
-    /// Account that exists only inside the ER.
-    Ephemeral,
+    /// Account that exists only inside the ER, such as a locally created ATA.
+    Magic,
     /// Temporary state during mode transitions (e.g. delegated -> readonly).
     Transient,
     /// Closed account that should be removed from storage.
@@ -595,7 +595,7 @@ impl AccountMode {
     /// Returns whether a privileged lifecycle operation may apply `to` at
     /// `to_slot`, including same-mode refreshes and slot ordering.
     ///
-    /// Only placeholder, read-only, and system accounts permit same-mode
+    /// Only uninitialized, read-only, and system accounts permit same-mode
     /// refreshes, and those require a newer slot. Slots may never regress.
     pub fn allows_transition(self, to: Self, from_slot: Slot, to_slot: Slot) -> bool {
         self.validate_transition(to, from_slot, to_slot).is_ok()
@@ -609,14 +609,14 @@ impl AccountMode {
     ) -> Result<(), AccountPatchError> {
         use AccountMode::*;
         let valid_slot = match (self, to) {
-            (Placeholder, ReadOnly | System | Delegated | Ephemeral | Closed)
-            | (ReadOnly, Delegated | Ephemeral | Closed)
+            (Uninit, ReadOnly | System | Delegated | Magic | Closed)
+            | (ReadOnly, Delegated | Magic | Closed)
             | (Delegated, Transient)
-            | (Transient, ReadOnly | Placeholder)
-            | (Ephemeral, Closed) => to_slot >= from_slot,
+            | (Transient, ReadOnly | Uninit)
+            | (Magic, Delegated | Closed) => to_slot >= from_slot,
             // Refreshes, observed disappearance, and redelegation need newer evidence.
-            (Placeholder, Placeholder)
-            | (ReadOnly, ReadOnly | Placeholder)
+            (Uninit, Uninit)
+            | (ReadOnly, ReadOnly | Uninit)
             | (System, System)
             | (Transient, Delegated) => to_slot > from_slot,
             _ => return Err(AccountPatchError::InvalidModeTransition { from: self, to }),
@@ -630,13 +630,13 @@ impl AccountMode {
     /// Returns `true` for modes that may be mutated by user programs.
     pub fn mutable(&self) -> bool {
         use AccountMode::*;
-        matches!(self, Delegated | Ephemeral)
+        matches!(self, Delegated | Magic)
     }
 
     /// Returns `true` for modes whose state is authoritative in this engine.
     pub fn authoritative(&self) -> bool {
         use AccountMode::*;
-        matches!(self, Delegated | Ephemeral | Transient)
+        matches!(self, Delegated | Magic | Transient)
     }
 }
 

@@ -13,7 +13,7 @@ part of this port.
 | Memory aliasing fixes (`9e77c42e5d`), syscall output `MaybeUninit` (`527b534509`), optimized memcmp (`be8588816f`) | Port the runtime slice-translation macro's raw-pointer contract and unsafe mutable CPI helper. The syscall implementation comes from `solana-syscalls` 4.2.2. Keep direct mapping and canonical CPI pointer checks. |
 | Shared C/Rust signer translation (`95864a0002`) | One `VmSlice` implementation; preserve old free-function names as aliases. Remove the trait method no longer implemented by upstream syscalls. Retain Engine's validation of untrusted instruction metadata. |
 | Invocation push ordering (`2e6926904a`) | Push the transaction frame before both the memory stack and Engine's additional syscall-context stack. |
-| SIMD-0392 rent adaptations (`dfb9c2d576`) | Port pre/post balance, size, and owner checks under the supplied feature gate. Preserve ephemeral rent exemption, zero-lamport classification, incinerator exemption, and existing feature activation. Validator fee-payer/nonce rent policy remains absent. |
+| SIMD-0392 rent adaptations (`dfb9c2d576`) | Port pre/post balance, size, and owner checks under the supplied feature gate. Preserve Magic rent exemption, zero-lamport classification, incinerator exemption, and existing feature activation. Validator fee-payer/nonce rent policy remains absent. |
 | Fallible instruction-sysvar encoding (`e58a412cdb`) | Return `MaxLoadedAccountsDataSizeExceeded` from loading rather than replacing an encoding failure with empty data. Private transaction framing does not expand this sysvar's encoding. |
 | SlotHashes wincode decoding (`4e523f2a7e`) | Decode the cached object with wincode; retain the original complete account bytes. Keeper's compatible persisted encoding is unchanged. |
 | Callback separation (`5f356cd550`) | Consume the independent upstream traits; remove Engine's now-unnecessary load-callback invoke implementation. Preserve the existing early loader drop and separate invocation callback. |
@@ -22,7 +22,7 @@ part of this port.
 | Configurable sanitization (`d392b1b105`) | Omit the API-only refactor; preserve Engine's sanitizer API, heap limits, account limits, disabled address lookups, and private trace policy. |
 | Per-account touched flags (`7f70cf81eb`) | Omit validator writeback plumbing. Engine keeps its execution-record interface, account dirty markers, touched accounting, and higher-layer commit ownership. |
 | CPI accounts scratchpad (`9c6b418c2b`) | Omit unused ABI-v2 frame expansion. Engine retains ABI v0/v1 mapping and its existing top-level/CPI trace accounting. |
-| Redundant resize owner check (`1662ba8396`) | Retain the check: Engine adds an ephemeral resize restriction here and preserves its existing error ordering. |
+| Redundant resize owner check (`1662ba8396`) | Retain the check: Engine adds an Magic resize restriction here and preserves its existing error ordering. |
 | Program owner/cache lookup, pruning, and epoch preparation (`302704480f`, `ac2392c100`, `0efe8bfc8c`, `2832b413b1`, `b8df5e67ce`) | Omit validator cache machinery absent from Engine's cache. Programs remain caller-normalized raw ELF accounts; no fork graph, deployment-slot lookup, or upcoming-epoch preparation is introduced. |
 | Conformance harnesses, validator nonce filtering, upstream-only tests, edition/lint/docs changes, mock-helper and memory-pool API cleanup | Omit unrelated infrastructure and API-only churn. Preserve local crate documentation, compatibility features, existing tests, and workspace conventions. |
 

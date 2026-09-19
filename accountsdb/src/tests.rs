@@ -278,17 +278,24 @@ fn test_store_kind_migration_invariants() {
     assert_eq!(program(&db, &reuse_owner), vec![reuse]);
 }
 
-// Persisted state and metadata survive a close/reopen, and validate() accepts
-// the synced checksum.
+/// Proves delegated and Magic state survive reopen and compaction with their
+/// modes intact, and validate() accepts the synced checksum.
 #[test]
 fn test_persistence_reopen_and_validate() {
     let dir = tempdir();
-    let keys: Vec<Pubkey> = (0..8).map(|_| Pubkey::new_unique()).collect();
+    let accounts: [_; 8] = std::array::from_fn(|i| {
+        let mode = if i % 2 == 0 { AccountMode::Magic } else { AccountMode::Delegated };
+        (Pubkey::new_unique(), mode, 100 + i as u64)
+    });
 
     let (checksum, before) = {
         let db = AccountsDB::new(dir.path()).unwrap();
-        for (i, k) in keys.iter().enumerate() {
-            store(&db, *k, delegated(100 + i as u64));
+        for (key, mode, balance) in accounts {
+            store(
+                &db,
+                key,
+                delegated_account(balance, vec![], Pubkey::default()).mode(mode).build(),
+            );
         }
         let discarded = Pubkey::new_unique();
         store(&db, discarded, delegated(0));
@@ -305,8 +312,9 @@ fn test_persistence_reopen_and_validate() {
     let reclaimed = db.compact().unwrap();
     assert_eq!(reclaimed, before - cursor(&db));
     assert!(reclaimed > 0);
-    for (i, k) in keys.iter().enumerate() {
-        assert_eq!(lamports(&db, k), 100 + i as u64);
+    for (key, mode, balance) in accounts {
+        assert_eq!(lamports(&db, &key), balance);
+        assert_eq!(db.loader().mode(&key).unwrap(), Some(mode));
     }
     assert_eq!(db.slot(), 42);
     assert_eq!(db.checksum(), checksum);

@@ -4,7 +4,7 @@ Accountsdb routes account state between two backends according to
 `AccountMode::authoritative()`:
 
 - `PersistedStore` is an mmap-backed account file with LMDB indexes. It holds
-  delegated, ephemeral, and transient accounts controlled by the engine.
+  delegated, Magic, and transient accounts controlled by the engine.
 - `VolatileStore` is an in-memory map for externally owned state that can be
   fetched again.
 

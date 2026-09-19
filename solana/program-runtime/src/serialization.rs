@@ -1332,7 +1332,7 @@ mod tests {
         for loader in [bpf_loader::id(), bpf_loader_deprecated::id()] {
             for (from, to) in [
                 (AccountMode::Delegated, AccountMode::Transient),
-                (AccountMode::Ephemeral, AccountMode::Closed),
+                (AccountMode::Magic, AccountMode::Closed),
             ] {
                 let program = Pubkey::new_unique();
                 let accounts = vec![
