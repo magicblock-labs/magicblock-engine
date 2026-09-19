@@ -63,7 +63,7 @@ impl TransactionAccountStateInfo {
         pre_state_infos: &[Self],
         relax_post_exec_min_balance_check: bool,
     ) -> Vec<Self> {
-        // Start with the normal classification, including Engine's ephemeral exemption.
+        // Start with the normal classification, including Engine's Magic exemption.
         let mut post_state_infos = Self::new(transaction_context, message, rent, false);
         debug_assert_eq!(pre_state_infos.len(), post_state_infos.len());
         if !relax_post_exec_min_balance_check {

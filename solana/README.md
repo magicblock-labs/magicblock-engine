@@ -24,8 +24,8 @@ representation, transaction context, serialization, VM mapping, and CPI.
   retain native-loader ownership.
 - Rent-state and lamport-balance checks remain part of execution.
 - SIMD-0392 rent-transition relaxation follows the supplied runtime feature set;
-  it does not activate new Engine features. Nonzero ephemeral accounts retain
-  their rent exemption. Ephemeral resizing remains restricted to the builtin.
+  it does not activate new Engine features. Nonzero Magic accounts are rent-exempt.
+  Magic resizing remains restricted to the builtin.
 - If a requested instruction sysvar cannot represent the transaction,
   account loading fails with `MaxLoadedAccountsDataSizeExceeded`; it never
   substitutes an empty instruction sysvar. Private transaction size limits do
@@ -39,7 +39,7 @@ it, reset abandons it, and rollback is valid only after commit. Growth beyond
 borrowed capacity promotes to owned storage; shared owned data uses
 `Arc::make_mut`. See [layout and lifecycle rules](account/README.md).
 
-Only delegated and ephemeral accounts are user-mutable. Transient and closed
+Only delegated and Magic accounts are user-mutable. Transient and closed
 revoke mutation immediately, including across CPI. The transaction-final guard
 accepts dirty transitions into those modes for writeback, not further writes.
 Transient remains authoritative and persisted; the caller removes closed state.

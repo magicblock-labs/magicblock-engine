@@ -12,11 +12,11 @@ The `testkit` feature exposes borrowed-buffer fixtures and
 `testkit::delegated_account(lamports, data, owner)`, which returns a customizable
 builder for an explicitly user-mutable test account.
 
-`AccountMode::mutable()` permits user mutation only in delegated and ephemeral
+`AccountMode::mutable()` permits user mutation only in delegated and Magic
 modes. `AccountSharedData::mutable()` is a transaction-final acceptance check:
 it also permits transient and closed accounts whose mode changed in the current
 transaction. This allows lifecycle writeback, never another program write.
-`AccountMode::authoritative()` separately identifies delegated, ephemeral, and
+`AccountMode::authoritative()` separately identifies delegated, Magic, and
 transient state that the engine owns and higher layers retain in persistent
 storage.
 
@@ -25,18 +25,29 @@ one mode-and-slot rule:
 
 | From | Same or newer slot | Strictly newer slot |
 | --- | --- | --- |
-| Placeholder | ReadOnly, System, Delegated, Ephemeral, Closed | Placeholder |
-| ReadOnly | Delegated, Ephemeral, Closed | ReadOnly, Placeholder |
+| Uninit | ReadOnly, System, Delegated, Magic, Closed | Uninit |
+| ReadOnly | Delegated, Magic, Closed | ReadOnly, Uninit |
 | System | — | System |
 | Delegated | Transient | — |
-| Ephemeral | Closed | — |
-| Transient | ReadOnly, Placeholder | Delegated |
+| Magic | Delegated, Closed | — |
+| Transient | ReadOnly, Uninit | Delegated |
 | Closed | — | — |
 
 Unlisted pairs and slot regressions are rejected. Authoritative accounts cannot
 be rematerialized in the same mode, even at a newer slot; ordinary transaction
 mutations are unaffected. Errors leave account state and dirty markers unchanged
 and identify the invalid mode or slot pair through `AccountPatchError`.
+
+Magic represents state that exists only inside the ER, including locally created
+ATAs. A privileged operation may close it or replace it with delegated state.
+The host owns creation and replacement eligibility; for ATAs, this includes
+preventing replacement while funded. Engine does not parse token data or require
+a positive token balance at transaction end.
+
+Uninit and Magic retain the numeric discriminants and binary variant indices of
+the former Placeholder and Ephemeral modes (0 and 4). Rust variant names and
+name-based serialization change. Replication peers must agree on the new lifecycle
+semantics before using Magic-to-Delegated replacement.
 
 Full-account patch sequences cover non-flag fields, establish the exact data
 length, and then write data in bounded chunks. MagicRoot finalization installs

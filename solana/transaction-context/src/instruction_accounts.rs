@@ -365,8 +365,8 @@ impl BorrowedInstructionAccount<'_, '_> {
             if !self.is_owned_by_current_program() {
                 // Only the owner can change the length of the data
                 return Err(InstructionError::AccountDataSizeChanged);
-            } else if self.account.is(AccountMode::Ephemeral) {
-                // Ephemeral accounts can only be resized with special builtin instruction
+            } else if self.account.is(AccountMode::Magic) {
+                // Magic accounts can only be resized with special builtin instruction
                 return Err(InstructionError::InvalidRealloc);
             }
         }
@@ -411,11 +411,11 @@ mod tests {
     #[test]
     fn immutable_modes_reject_mutations() {
         use AccountMode::*;
-        for mode in [Placeholder, ReadOnly, System, Transient, Closed] {
+        for mode in [Uninit, ReadOnly, System, Transient, Closed] {
             let owner = Pubkey::new_unique();
             let initial = match mode {
                 Transient => Delegated,
-                Closed => Ephemeral,
+                Closed => Magic,
                 _ => mode,
             };
             let mut account = AccountBuilder::default()

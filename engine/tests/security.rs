@@ -25,7 +25,7 @@ async fn lifecycle_transition_blocks_later_credits() {
     let te = TestEngine::new().await;
     for (from, to) in [
         (AccountMode::Delegated, AccountMode::Transient),
-        (AccountMode::Ephemeral, AccountMode::Closed),
+        (AccountMode::Magic, AccountMode::Closed),
     ] {
         let target = store_v42(&te, 5, from);
         let before = te.get_account(target).unwrap();

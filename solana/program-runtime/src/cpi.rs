@@ -1265,7 +1265,7 @@ mod tests {
         let (key, account, writable) = accounts.pop().unwrap();
         let account = AccountBuilder::from(account)
             .owner(Pubkey::new_unique())
-            .mode(AccountMode::Placeholder)
+            .mode(AccountMode::Uninit)
             .build();
         accounts.push((key, account, writable));
         accounts
@@ -1490,7 +1490,7 @@ mod tests {
             let mut transaction_accounts = transaction_with_owned_account(vec![0]);
             if mode == AccountMode::Closed {
                 transaction_accounts[1].1 = AccountBuilder::from(transaction_accounts[1].1.clone())
-                    .mode(AccountMode::Ephemeral)
+                    .mode(AccountMode::Magic)
                     .build();
             }
             let account = transaction_accounts[1].1.clone();

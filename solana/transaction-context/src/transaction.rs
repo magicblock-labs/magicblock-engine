@@ -501,7 +501,7 @@ impl<'ix_data> TransactionContext<'ix_data> {
                     let new_len = requested_length;
                     if new_len > MAX_ACCOUNT_DATA_LEN as usize
                         || accounts.can_data_be_resized(old_len, new_len).is_err()
-                        || account.is(AccountMode::Ephemeral)
+                        || account.is(AccountMode::Magic)
                     {
                         return;
                     }

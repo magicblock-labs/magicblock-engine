@@ -109,7 +109,7 @@ fn expiring_cache_lazy_eviction() {
 #[tokio::test]
 async fn account_lease_coordinates_recency_and_waiters() {
     use AccountMode::*;
-    let modes = [ReadOnly, Placeholder, Delegated, Ephemeral, Transient, System];
+    let modes = [ReadOnly, Uninit, Delegated, Magic, Transient, System];
     for mode in modes {
         let cache = Arc::new(AccountCache::new(256));
         let pk = Pubkey::new_unique();
@@ -131,7 +131,7 @@ async fn account_lease_coordinates_recency_and_waiters() {
         drop(lease);
         drop(waiter.await);
 
-        let tracked = matches!(mode, ReadOnly | Placeholder | System);
+        let tracked = matches!(mode, ReadOnly | Uninit | System);
         assert_eq!(cache.lru.get_sync(&pk).is_some(), tracked);
     }
 
