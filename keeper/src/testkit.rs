@@ -91,6 +91,7 @@ pub fn keeper_builder(dirs: &Dirs) -> KeeperBuilder {
         blockstore: BlockstoreParams {
             blocktime: Duration::from_millis(100),
             superblock: SUPERBLOCK,
+            checkpoint: 0,
         },
         builtins: Default::default(),
         programs,

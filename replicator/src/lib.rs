@@ -6,6 +6,9 @@ mod metrics;
 mod protocol;
 mod server;
 
+#[cfg(test)]
+mod tests;
+
 use std::time::Duration;
 
 pub use client::ReplicationClient;

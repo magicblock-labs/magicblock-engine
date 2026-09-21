@@ -1,45 +1,31 @@
 # `magicblock-processor`
 
-The processor schedules transactions across a fixed pool of SVM executors and
-commits their results through keeper.
+Ordered parallel transaction execution for the engine. The processor schedules
+work across SVM executors and commits results through Keeper, preserving input
+order for conflicting accounts while allowing independent work to run in parallel.
 
-The sequencer preserves canonical order for account conflicts while executing
-disjoint transactions and read/read access in parallel. Dependency tracking does
-not depend on executor completion order. Lookahead is bounded at 16 pending
-transactions per executor; full drains reset ordering state and block tickets.
+Request completion distinguishes admission rejection from committed execution.
+Fire-and-forget submission does not provide an execution result. Live observers
+are separate from request completion and cannot delay its acknowledgment.
 
-Execution requests carry an optional, request-owned reply through admission and
-ordering to commit. Admission rejection replies only to that request; accepted
-work replies after commit. Fire-and-forget requests carry no completion channel.
-Replies are not persisted, replicated, or included in transaction notifications;
-local replay uses requests without replies.
-
-Block hashes chain the prior hash with ordered transaction signatures. Boundaries
-drain executor work before publication, ensuring execution metadata precedes its
-block. Produced blocks are signed; replication and recovery recompute and
-validate the hash chain without replacing signatures. Acknowledgment follows
-validation and application.
-
-Local replay commits account state and caches terminal results, but neither
-appends ledger records nor publishes live transaction notifications.
+Block boundaries drain preceding execution before publication. Replication and
+recovery validate the same ordered transaction history rather than replacing
+upstream signatures. Local replay restores account state and cached results
+without appending duplicate history or publishing live transaction notifications.
 
 ## Quiescence
 
-The sequencer barrier drains all executor work, acknowledges the caller, and
-holds new execution until its guard is released. Engine uses the barrier for
-coherent superblock snapshots, replay seal checks, replication handshakes, and
-shutdown. A superblock checkpoint finalizes its block and enters that pause as
-one sequencer message, so later transactions cannot enter the sealed snapshot.
+An execution barrier drains in-flight work and holds later execution until the
+caller releases it. This gives snapshots, state checks, and shutdown a coherent
+boundary. A block-boundary checkpoint must pause execution before later
+transactions can change the sampled state.
 
-Transaction execution uses an unguarded AccountsDB loader: the sequencer already
-excludes compaction through execution, commit, and owned subscription fanout.
-This avoids reader registration, slot updates, and admission fences on the
-transaction-loading path. Simulation retains guarded reads because it runs
-independently of the sequencer barrier.
+The execution path relies on this exclusion when using borrowed account storage.
+Simulation runs independently and must retain its own protection against storage
+relocation.
 
 ## Simulation
 
-Simulation has a separate worker and SVM context. It resolves a transaction,
-loads owned account copies, executes against the current block environment, and
-returns an `ExecutionRecord` without appending to the ledger or storing account
-changes.
+Simulation executes against account copies and returns an execution record
+without committing account changes or appending history. It shares the engine's
+runtime environment but is not a substitute for admission and committed execution.

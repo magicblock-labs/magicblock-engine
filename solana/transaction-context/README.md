@@ -1,23 +1,17 @@
 # `solana-transaction-context`
 
-This Agave fork defines the account and instruction state used by one executing
-transaction. Workspace `[patch.crates-io]` entries force the dependency graph to
-use this copy.
+Account and instruction state for a single executing transaction. This Engine
+fork of Agave enforces runtime borrowing while tracking account changes, return
+data, and execution limits across direct calls and CPI.
 
-`TransactionAccounts` stores account cells behind runtime borrow counters.
-`AccountRef` and `AccountRefMut` enforce those counters while VM access handlers
-can resize and remap an account's directly mapped data. The context also tracks
-touched accounts, resize and lamport deltas, return data, instruction state, and
-execution limits.
+Instruction writes require a currently mutable account mode in addition to
+Solana ownership and writability checks. Transitions to transient or closed take
+effect immediately, including across CPI. Dirty lifecycle markers permit
+writeback of the transition, not further program writes. Setting an unchanged
+lamport, owner, or executable value does not require mode permission after the
+usual Solana checks pass; privileged raw operations have a separate boundary.
 
-Ordinary instruction mutations require a currently mutable account mode, in
-addition to Solana ownership and instruction-writability checks. A transition to
-transient or closed takes effect immediately, including across CPI. Unchanged
-lamport, owner, and executable values do not require mode permission after their
-existing Solana checks pass. Dirty lifecycle markers remain intact for writeback;
-they never authorize further program writes. Privileged raw account operations
-remain outside this instruction-level boundary.
-
-The direct-mapping and access-violation contracts are documented in
-[`../README.md`](../README.md). All account references must be released before a
-`TransactionContext` is deconstructed.
+Account data may grow or be remapped during execution, so runtime references must
+respect borrow lifetimes. Release all account references before deconstructing
+the context. See the [runtime-fork contracts](../README.md) for the direct-mapping
+and cross-crate safety requirements.

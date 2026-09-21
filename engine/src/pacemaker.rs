@@ -33,6 +33,8 @@ pub(crate) struct PaceMaker {
     pacer: Pacer,
     /// Number of slots sealed into each superblock.
     superblock: u64,
+    /// Independent checksum interval; zero disables checkpoint production.
+    checkpoint: u64,
     /// Completion of the last queued seal, awaited before taking its successor.
     sealed: Option<oneshot::Receiver<()>>,
 }
@@ -114,6 +116,7 @@ impl PaceMaker {
             engine,
             pacer,
             superblock,
+            checkpoint: blockstore.checkpoint,
             sealed: None,
         };
         tokio::spawn(pacemaker.run(shutdown));
@@ -168,8 +171,7 @@ impl PaceMaker {
         }
     }
 
-    /// Advances the execution and simulation environments to `block`, sealing a
-    /// superblock when the slot lands on the configured interval.
+    /// Advances to `block`, sealing a superblock or sampling a checksum when due.
     ///
     /// The snapshot and seal submission run behind a barrier because the
     /// accountsdb export is only coherent while no store operation can race it.
@@ -178,7 +180,9 @@ impl PaceMaker {
     async fn handle(&mut self, input: BlockInput, tx: Option<oneshot::Sender<()>>) -> Result<()> {
         let block = input.payload();
         self.sequencer.simulation.send(SimulatorMessage::Block(block)).await?;
-        if matches!(input, BlockInput::Replay(_)) || !block.slot.is_multiple_of(self.superblock) {
+        let seal = block.slot.is_multiple_of(self.superblock);
+        let checkpoint = self.checkpoint != 0 && block.slot.is_multiple_of(self.checkpoint);
+        if matches!(input, BlockInput::Replay(_)) || !(seal || checkpoint) {
             self.sequencer.send(SequencerMessage::Block { block: input, tx }).await?;
             return Ok(());
         }
@@ -187,6 +191,11 @@ impl PaceMaker {
         let msg = SequencerMessage::Checkpoint { block, tx, guard };
         self.sequencer.send(msg).await?;
         controller.acknowledged.await?;
+        if !seal {
+            // SAFETY: the checkpoint barrier holds execution until this scope ends.
+            unsafe { self.checkpoint(None) }?;
+            return Ok(());
+        }
         if let Some(sealed) = self.sealed.take() {
             sealed.await?;
         }

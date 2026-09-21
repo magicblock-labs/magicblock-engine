@@ -37,6 +37,9 @@ pub enum KeeperError {
     /// Reconstructed state does not match the authenticated upstream seal.
     #[error("reconstructed state does not match superblock {0}")]
     SealMismatch(u64),
+    /// Reconstructed state does not match the authenticated upstream checkpoint.
+    #[error("reconstructed state does not match checkpoint")]
+    CheckpointMismatch,
 }
 
 impl From<SendError<Event>> for KeeperError {

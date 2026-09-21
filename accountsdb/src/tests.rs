@@ -712,19 +712,28 @@ fn test_variable_sizes_and_exact_freelist() {
     }
 }
 
-// The checksum hashes accounts in pubkey order, so it depends only on content —
-// not on insertion order or the resulting on-disk offsets.
+/// Proves fresh checksums ignore insertion order, detect unsynced writes, and
+/// leave the cached checksum unchanged until synchronous flush.
 #[test]
 fn test_checksum_order_independent() {
     let keys: Vec<Pubkey> = (0..8).map(|_| Pubkey::new_unique()).collect();
 
     let checksum = |order: &[usize]| {
         let (_dir, db) = db();
+        let cached = db.checksum();
         for &i in order {
             store(&db, keys[i], delegated(100 + i as u64));
         }
+        // SAFETY: this test owns the database and has no concurrent writers.
+        let fresh = unsafe { db.compute_checksum() }.unwrap();
+        assert_ne!(
+            fresh, cached,
+            "unsynced account writes affect the fresh hash"
+        );
+        assert_eq!(db.checksum(), cached, "sampling does not publish the hash");
         db.persisted.flush(true).unwrap();
-        db.checksum()
+        assert_eq!(db.checksum(), fresh);
+        fresh
     };
 
     let forward: Vec<usize> = (0..keys.len()).collect();

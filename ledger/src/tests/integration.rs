@@ -537,12 +537,8 @@ async fn test_block_read_across_superblocks() {
     assert!(read_block(&ledger, 9, BlockDetails::None).await.is_none());
 }
 
-// Replay streams superblocks in on-disk order after the last applied seal through
-// the active head, so nothing committed after the snapshot is lost on recovery.
-// Entries come back exactly as written:
-// transactions, their block delimiter, then the seal — and the unsealed head's
-// entries have no trailing seal. The read is bounded by each superblock's write
-// cursor, so the active head's preallocated tail is not decoded.
+/// Proves replay preserves seals and checkpoints in stream order through the
+/// active head, while block queries skip intervening checkpoint records.
 #[tokio::test]
 async fn test_replay_streams_superblocks_through_active_head() {
     let (_dir, ledger) = ledger(u64::MAX);
@@ -555,6 +551,20 @@ async fn test_replay_streams_superblocks_through_active_head() {
     append(&ledger, events);
     block_of(&ledger, 3, 1);
 
+    let checkpoint = Signed {
+        payload: nucleus::ledger::Checkpoint(42),
+        signature: Signature::default(),
+    };
+    append(&ledger, vec![Event::Checkpoint(checkpoint)]);
+    let signatures = block_of(&ledger, 4, 1);
+    assert_eq!(block_signatures(&ledger, 4).await, signatures);
+    let blocks = block_range(&ledger, 3..5).await;
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(
+        blocks[1].signatures,
+        signatures.iter().map(signature_prefix).collect::<Vec<_>>()
+    );
+
     let entries = replay(&ledger, 0).await;
     use crate::schema::BlockstoreEntry::*;
     let shape: Vec<&str> = entries
@@ -564,14 +574,27 @@ async fn test_replay_streams_superblocks_through_active_head() {
             Block(_) => "block",
             Superblock { .. } => "seal",
             Reset(_) => "reset",
+            Checkpoint(_) => "checkpoint",
         })
         .collect();
     // Superblock 1 (two txns) and superblock 2 (one txn), each ending in its
-    // block and seal, followed by the active head (superblock 3: one txn and its
-    // block, no seal).
+    // block and seal, followed by two blocks separated by a checkpoint.
     assert_eq!(
         shape,
-        ["tx", "tx", "block", "seal", "tx", "block", "seal", "tx", "block"]
+        [
+            "tx",
+            "tx",
+            "block",
+            "seal",
+            "tx",
+            "block",
+            "seal",
+            "tx",
+            "block",
+            "checkpoint",
+            "tx",
+            "block"
+        ]
     );
 }
 

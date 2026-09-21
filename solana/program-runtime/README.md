@@ -1,26 +1,23 @@
 # `solana-program-runtime`
 
-This Agave fork implements invocation state, CPI translation, SBF VM setup,
-sysvar access, logging, serialization, and program-cache primitives. Workspace
-dependencies that select `solana-program-runtime` use this workspace copy.
+The Engine fork of Agave's program execution runtime: invocation state, SBF VM
+setup, cross-program invocation, sysvars, logging, and program-cache support.
+Transaction-level account loading and execution policy remain in the SVM.
 
-Account loading and transaction-level policy belong to `solana-svm`. The
-engine-specific direct account mapping, access-violation growth, and CPI
-synchronization contracts are documented in [`../README.md`](../README.md).
+## Direct account access
 
-Keep `serialization`, CPI account-region replacement, `vm` error mapping, and
-the transaction-context access-violation handler synchronized. C and Rust signer
-translation share `VmSlice`; mutable slice translation is unsafe and requires
-unique references and live backing storage.
+Programs access account data through direct VM mappings. Serialization, account
+growth, and CPI must preserve compatible regions and enforce canonical account
+pointers; changes to these paths must be coordinated with transaction context.
+Unsafe mutable translation requires unique references and live backing storage.
+See the [runtime-fork contracts](../README.md) for ABI and mapping constraints.
 
-`InvokeContext::native_invoke_magic_root` explicitly authorizes only its exact
-child instruction to enter MagicRoot. Builtins must construct or validate the
-privileged operation; this method is not for forwarding untrusted instructions.
-It reuses normal CPI preparation and execution without granting additional
-signers. A private instruction-trace index scopes authorization and is restored
-on success or error. Nested CPI, later siblings, and `PostFinalize` actions do
-not inherit it. Ordinary native calls, including provenance-attributed calls,
-do not grant MagicRoot authorization.
+## Privileged invocation
 
-The `frozen-abi` feature is retained as a no-op compatibility stub; this fork
-does not derive or consume frozen ABI metadata.
+Builtins may explicitly authorize a MagicRoot child invocation after constructing
+or validating the operation. This authorization is not a mechanism for forwarding
+untrusted instructions, grants no extra signers, and is not inherited by nested
+calls, later siblings, or follow-up actions. Ordinary native CPI and caller
+provenance do not grant MagicRoot access.
+
+The `frozen-abi` feature is a compatibility stub, not frozen-ABI validation.

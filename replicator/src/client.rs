@@ -14,7 +14,7 @@ use engine::{
 use flume::{Receiver, Sender, TrySendError};
 use ledger::{
     Superblock,
-    schema::{Block, OwnedBlockstoreEntry, Reset, Signed, SuperblockSeal, blockstore},
+    schema::{Block, Checkpoint, OwnedBlockstoreEntry, Reset, Signed, SuperblockSeal, blockstore},
 };
 use nucleus::{
     KB,
@@ -60,7 +60,7 @@ impl TransactionsBatch {
 }
 
 /// Ordered handoff from blocking Ingest to asynchronous Control.
-enum ReplicationMessage {
+pub(crate) enum ReplicationMessage {
     /// Raw transactions awaiting authority and signature verification.
     Unverified(Vec<Vec<u8>>),
     /// Transactions verified by Ingest while Control was occupied.
@@ -71,10 +71,12 @@ enum ReplicationMessage {
     Superblock(Signed<SuperblockSeal>),
     /// Volatile-state reset fenced behind every preceding batch.
     Reset(Signed<Reset>),
+    /// Checksum checkpoint fenced behind every preceding batch.
+    Checkpoint(Signed<Checkpoint>),
 }
 
 /// Why connection-scoped Ingest stopped without a terminal replication error.
-enum IngestExit {
+pub(crate) enum IngestExit {
     /// Control dropped its receiver after reaching a boundary or terminal error.
     Stopped,
     /// The transport failed after all preceding entries were handed to Control.
@@ -90,7 +92,7 @@ enum ControlExit {
 }
 
 /// Decodes one connection and opportunistically verifies bounded transaction batches.
-struct Ingest {
+pub(crate) struct Ingest {
     /// Blocking stream for one authenticated connection.
     stream: ReplicationStream,
     /// Transactions accumulated until a size or entry fence.
@@ -222,6 +224,11 @@ impl ReplicationClient {
                     let _guard = self.engine.barrier().await?;
                     self.engine.append_reset(reset)?;
                 }
+                ReplicationMessage::Checkpoint(checkpoint) => {
+                    let _guard = self.engine.barrier().await?;
+                    // SAFETY: the execution barrier excludes writes and metadata updates.
+                    unsafe { self.engine.checkpoint(Some(checkpoint)) }?;
+                }
             }
         }
     }
@@ -325,7 +332,7 @@ impl ReplicationClient {
 
 impl Ingest {
     /// Starts one blocking decoder for an authenticated connection.
-    fn spawn(
+    pub(crate) fn spawn(
         stream: ReplicationStream,
         verifier: TransactionVerifier,
         authority: Pubkey,
@@ -388,6 +395,12 @@ impl Ingest {
                     }
                     ReplicationMessage::Reset(reset)
                 }
+                OwnedBlockstoreEntry::Checkpoint(checkpoint) => {
+                    if !checkpoint.verify(&self.authority) {
+                        return Err(ReplicationError::InvalidSignature("checkpoint"));
+                    }
+                    ReplicationMessage::Checkpoint(checkpoint)
+                }
             };
             if !self.flush()? || self.tx.send(message).is_err() {
                 return Ok(IngestExit::Stopped);
@@ -409,110 +422,5 @@ impl Ingest {
             }
             Err(_) => Ok(false),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{io::Write, net::TcpListener, time::Duration};
-
-    use engine::testkit::TestEngine;
-    use solana_keypair::Keypair;
-
-    use super::*;
-
-    /// Sends one encoded record through real ingestion and waits for its outcome.
-    fn ingest(
-        engine: &Engine,
-        bytes: &[u8],
-        case: &str,
-    ) -> (Option<ReplicationMessage>, Result<IngestExit>) {
-        let timeout = Duration::from_secs(4);
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let mut writer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (reader, _) = listener.accept().unwrap();
-        reader.set_read_timeout(Some(timeout)).unwrap();
-        writer.set_write_timeout(Some(timeout)).unwrap();
-        let (rx, worker) = Ingest::spawn(
-            BufReader::new(reader),
-            engine.verifier(),
-            engine.authority(),
-        )
-        .unwrap();
-        writer.write_all(bytes).unwrap();
-        drop(writer);
-        let message = match rx.recv_timeout(timeout) {
-            Ok(message) => Some(message),
-            Err(flume::RecvTimeoutError::Disconnected) => None,
-            Err(flume::RecvTimeoutError::Timeout) => panic!("{case}: ingestion timed out"),
-        };
-        drop(rx);
-        (
-            message,
-            worker.join().unwrap_or_else(|_| panic!("{case}: ingestion panicked")),
-        )
-    }
-
-    /// Proves ingestion preserves valid boundary records and rejects tampered
-    /// payloads and wrong-key signatures for blocks, seals, and resets.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn authenticates_boundary_records() {
-        let engine = TestEngine::new().await;
-        let other = Keypair::new();
-        for (scenario, signer, tamper) in [
-            ("valid", engine.signer(), 0),
-            ("tampered", engine.signer(), 1),
-            ("wrong signer", &other, 0),
-        ] {
-            let mut block = Signed::new(Block::new(1, 100), signer);
-            let mut seal = Signed::new(
-                SuperblockSeal {
-                    id: 1,
-                    checksum: 2,
-                    transactions: 3,
-                },
-                signer,
-            );
-            let mut reset = Signed::new(Reset(1), signer);
-            // Change payloads after signing, independently for each scenario.
-            block.payload.slot += tamper;
-            seal.payload.checksum += tamper;
-            reset.payload.0 += tamper;
-            for (kind, record) in [
-                ("block", OwnedBlockstoreEntry::Block(block)),
-                ("superblock", OwnedBlockstoreEntry::Superblock(seal)),
-                ("reset", OwnedBlockstoreEntry::Reset(reset)),
-            ] {
-                let case = format!("{kind}, {scenario}");
-                let bytes = wincode::serialize(&record).unwrap();
-                let (message, result) = ingest(&engine, &bytes, &case);
-                if scenario == "valid" {
-                    let accepted = match message {
-                        Some(ReplicationMessage::Block(block)) => {
-                            OwnedBlockstoreEntry::Block(block)
-                        }
-                        Some(ReplicationMessage::Superblock(seal)) => {
-                            OwnedBlockstoreEntry::Superblock(seal)
-                        }
-                        Some(ReplicationMessage::Reset(reset)) => {
-                            OwnedBlockstoreEntry::Reset(reset)
-                        }
-                        _ => panic!("{case}: expected a boundary record"),
-                    };
-                    // Compare the whole encoded record, including the original signature.
-                    assert_eq!(wincode::serialize(&accepted).unwrap(), bytes, "{case}");
-                    assert!(matches!(result, Ok(IngestExit::Disconnected(_))), "{case}");
-                } else {
-                    assert!(message.is_none(), "{case}: invalid record reached Control");
-                    assert!(
-                        matches!(result,
-                            Err(ReplicationError::InvalidSignature(actual)) if actual == kind
-                        ),
-                        "{case}: expected signature rejection"
-                    );
-                }
-            }
-        }
-        engine.close().await;
     }
 }

@@ -24,7 +24,7 @@ use ledger::{
 use nucleus::{
     Slot,
     config::Authority,
-    ledger::{ACCOUNTSDB_SNAPSHOT_FILE, Reset, Signed, SuperblockSeal},
+    ledger::{ACCOUNTSDB_SNAPSHOT_FILE, Checkpoint, Reset, Signed, SuperblockSeal},
 };
 use solana_sysvar::rent::Rent;
 
@@ -178,6 +178,28 @@ impl Keeper {
         self.archive(snapshot, dir)?;
         info!(head, "queued superblock seal");
         Ok(completion)
+    }
+
+    /// Samples and enqueues a checksum checkpoint without snapshotting or syncing.
+    ///
+    /// An upstream record must already be authenticated; its signature is retained.
+    ///
+    /// # Safety
+    /// The caller must exclude account writes and metadata changes through sampling
+    /// and append submission, normally by holding the execution barrier.
+    pub unsafe fn checkpoint(&self, expected: Option<Signed<Checkpoint>>) -> Result<()> {
+        // SAFETY: the caller holds the execution barrier through append submission.
+        let observed = Checkpoint(unsafe { self.accountsdb.compute_checksum() }?);
+        let checkpoint = match expected {
+            None => Signed::new(observed, self.signer()),
+            Some(checkpoint) if checkpoint.payload == observed => checkpoint,
+            Some(expected) => {
+                error!(?expected, ?observed, "checkpoint state mismatch");
+                return Err(error::KeeperError::CheckpointMismatch);
+            }
+        };
+        self.ledger.appender.send(Event::Checkpoint(checkpoint))?;
+        Ok(())
     }
 
     /// Resolved once from the seeded feature accounts at startup and fixed for

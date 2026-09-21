@@ -266,7 +266,7 @@ impl PersistedStore {
     }
 
     /// Computes a deterministic checksum over persisted accounts in pubkey order.
-    fn checksum(&self) -> heed::Result<u64> {
+    pub(crate) fn checksum(&self) -> heed::Result<u64> {
         let _timer = metrics::time(Operation::Checksum);
         let mut hasher = XxHash3_64::new();
         let mut iter = self.index.accounts()?;

@@ -79,7 +79,7 @@ pub enum ReplayError {
     /// A retained transaction could not be sanitized into a transaction view.
     #[error("transaction sanitization: {0:?}")]
     Sanitization(TransactionViewError),
-    /// The replayed account state checksum diverged from the sealed superblock.
+    /// Replayed state diverged from a superblock seal, checkpoint, or final count.
     #[error("replayed state checksum mismatch")]
     StateMismatch,
     /// Waiting for the ledger reader's replay response failed.

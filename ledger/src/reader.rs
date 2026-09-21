@@ -253,14 +253,15 @@ impl LedgerReader {
             // slot, so only the current block's prefixes need buffering.
             let mut signatures = Vec::new();
             let complete = visit_blockstore(&superblock, |entry| {
+                use BlockstoreEntry::*;
                 if request.cancelled() || tx.is_closed() {
                     return Ok(false);
                 }
                 match entry {
-                    BlockstoreEntry::Transaction(transaction) => {
+                    Transaction(transaction) => {
                         signatures.push(signature_prefix(&signature(&transaction)?));
                     }
-                    BlockstoreEntry::Block(block) => {
+                    Block(block) => {
                         if block.slot >= range.end {
                             return Ok(false);
                         }
@@ -271,7 +272,7 @@ impl LedgerReader {
                         }
                         signatures.clear();
                     }
-                    BlockstoreEntry::Superblock(_) | BlockstoreEntry::Reset(_) => {}
+                    Superblock(_) | Reset(_) | Checkpoint(_) => {}
                 }
                 Ok(true)
             })?;
@@ -422,10 +423,11 @@ impl LedgerReader {
         let mut cursor = Cursor::new(blockstore);
         let mut transactions = Vec::new();
         while cursor.position() < blockstore.len() && request.is_none_or(|r| !r.cancelled()) {
+            use BlockstoreEntry::*;
             let entry = blockstore::decode(&mut cursor).map_err(Into::<Error>::into)?;
             let transaction = match entry {
-                BlockstoreEntry::Transaction(transaction) => transaction,
-                BlockstoreEntry::Reset(_) => continue,
+                Transaction(transaction) => transaction,
+                Reset(_) | Checkpoint(_) => continue,
                 _ => {
                     error!(slot, "ledger blockstore includes invalid block entries");
                     return Err(LedgerError::Corruption(

@@ -1,36 +1,34 @@
 # `magicblock-engine-nucleus`
 
-Shared engine types, without storage or execution policy. No default features.
+Shared vocabulary and utilities for Engine crates: configuration, execution
+requests, signed ledger records, service lifecycle, and observability. This crate
+does not execute transactions or decide how account state is persisted.
 
 ## Features
 
-- `config`: serializable authority, accountsdb, blockstore, and ledger
-  configuration types. Authority serialization includes the complete local
-  keypair; consumers must redact it before exposing serialized output.
-- `shutdown`: ordered cancellation, service handles, and termination reporting.
-  The pacemaker quiesces execution and terminally syncs the ledger before the
-  sequencer and appender tier; remaining backing services stop afterward.
-  Termination returns the strongest reason observed while draining so a later
-  service failure cannot be hidden by an earlier clean report.
-  Dropping the manager cancels every tier without waiting for services to stop.
-- `notifier`: the one-shot, non-resetting `EventNotifier` latch.
-- `ledger`: shared block-boundary metadata, including each block's locally
-  computed hash and parent, snapshot checksum/transaction seals, signed resets,
-  and blockstore positions. `Signed<T>` signs and verifies domain-separated
-  padding-free payload bytes in a bounded stack buffer, excluding the signature.
-  Signing requires little-endian targets; `NoUninit` derives reject padding.
-  Wincode remains the storage codec, with the same payload layout.
-- `metrics`: Prometheus metric construction, `engine_`-namespaced registration,
-  labels, and timers.
-- `service`: the `metrics` and `shutdown` feature bundle.
-- `runtime`: transaction views, resolved-transaction execution requests with
-  optional request-owned replies (never serialized),
-  sequencer handles, and quiescence barriers, including atomic block-checkpoint
-  pauses; it also enables `ledger`, `service`, and `tls`.
-- `tls`: thread-local MagicRoot authority and encoded service-message state.
-- `testkit`: engine-independent fixtures, temporary directories, Legacy/V0/V1
-  transaction encoding, v42 instructions, transaction views, and tracing setup
-  used by downstream test targets. It enables `runtime` because `signed_view`
-  returns the runtime transaction view.
+No features are enabled by default. Enable the capabilities your crate needs:
 
-Keeper-specific harnesses remain in `keeper::testkit`.
+| Feature | Purpose |
+| :-- | :-- |
+| `config` | Authority and storage configuration. |
+| `ledger` | Signed records and replication positions. |
+| `runtime` | Transaction requests, execution results, and quiescence barriers. |
+| `shutdown` | Coordinated service cancellation and termination reporting. |
+| `notifier` | One-shot event notification. |
+| `metrics` | Shared metric conventions and timing helpers. |
+| `service` | Metrics and shutdown support together. |
+| `tls` | Thread-local context for privileged runtime operations. |
+| `testkit` | Shared transaction and account fixtures. |
+
+## Contracts
+
+Authority configuration contains the local private key; redact it before exposing
+serialized configuration. Signed records authenticate their kind and payload,
+and their encoding must agree across storage and replication participants.
+The signing representation requires little-endian targets and padding-free
+payloads.
+
+Coordinated shutdown waits for service completion and retains failures reported
+during draining. Dropping the manager requests cancellation but does not wait for
+durable completion. Request-owned execution replies are local observations, not
+part of persisted or replicated transaction data.

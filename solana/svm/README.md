@@ -1,20 +1,18 @@
 # `solana-svm`
 
-This Agave fork is the transaction-level execution entry point. Workspace
-`[patch.crates-io]` entries force the dependency graph to use this copy.
+The Engine fork of Agave's transaction execution layer. It loads required
+accounts through caller callbacks, executes programs, and returns results and
+changed accounts. Callers provide normalized executable program data and the
+runtime feature configuration.
 
-The SVM loads required accounts through the caller's
-`transaction_processing_callback`, loads required programs, executes through
-`solana-program-runtime`, and returns processing results and mutated accounts.
-It owns no account storage.
+This crate does not store accounts or decide which results to commit. Persistence,
+deployment policy, consensus, fork choice, and validator batch policy remain
+outside the runtime.
 
-Rent-transition relaxation follows the caller's SIMD-0392 feature gate, while
-preserving Engine's Magic-account exemption. Instruction-sysvar encoding
-failures propagate as `MaxLoadedAccountsDataSizeExceeded` during account loading.
+Execution retains account access, rent, and balance checks. Rent-transition
+relaxation follows the supplied features while preserving the Engine's Magic
+account rules. Transactions whose requested instruction sysvar cannot be encoded
+fail account loading; the runtime never substitutes an empty sysvar.
 
-Persistence, commit decisions, deployment policy, and validator batch behavior
-remain above this crate. Engine-specific runtime differences are documented in
-[`../README.md`](../README.md).
-
-The `frozen-abi` feature is retained as a no-op compatibility stub and forwards
-to the corresponding program-runtime feature.
+See the [runtime-fork contracts](../README.md) for Engine-specific account, ABI,
+and execution constraints. The `frozen-abi` feature remains a compatibility stub.

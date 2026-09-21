@@ -1,21 +1,15 @@
 # `magic-root-interface`
 
-This crate defines the MagicRoot program id and `MagicRootInstruction` wire
-schema shared by `magic-root-program` and `engine`. Instruction builders can
-depend on the interface without linking the native program runtime.
+Instruction definitions and builders for MagicRoot, the engine's privileged
+account-management program. Callers can construct account replacement, deletion,
+and follow-up operations without depending on the native runtime implementation.
 
-`MagicRootInstruction::compose` prepends the writable target account and
-serializes the instruction with wincode. `PostFinalize` also appends each
-follow-up program id and its account metas. Signer bits are cleared in the outer
-instruction; the native program supplies the declared follow-up signers when it
-invokes each action.
+Complete-account replacement composes patches and finalization into one ordered
+operation. Finalization installs the supplied flags without changing lamports;
+follow-up actions belong immediately after it. Mode and slot must satisfy the
+[account lifecycle](../../solana/account/README.md).
 
-`MagicRootInstruction::compose_account` builds the ordered patch sequence for a
-complete account's non-flag fields and appends a finalization instruction that
-installs its complete flag value without changing lamports. The underlying
-patch sequence validates mode and slot together through one lifecycle patch.
-Callers are responsible for composing current account state under the
-[lifecycle rules](../../solana/account/README.md). Engine appends `PostFinalize`
-immediately after finalization; MagicRoot relies on this ordering. Actions and
-`source_program` must come from caller-verified provenance: the program supplies
-the declared signers and attributes CPI to that source.
+The interface does not establish authority or freshness. Callers must verify the
+source account state and the provenance of follow-up actions: MagicRoot supplies
+the declared action signers and attributes invocation to the declared source.
+Only trusted, validated operations may use that privilege.
