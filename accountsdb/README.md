@@ -34,8 +34,8 @@ the store; initialization failures propagate to the caller.
 
 Checksums cover persisted account state and its slot and superblock identity,
 not volatile accounts or the transaction counter. A cached checksum describes a
-previously published state. Fresh sampling requires quiesced writes and metadata
-updates, but does not flush storage or refresh the cached value.
+previously published state. Fresh sampling requires writes and metadata updates
+to be quiesced, but does not flush storage or refresh the cached value.
 
 Volatile state can be saved for snapshot recovery and clean follower restart.
 It is not made durable by ordinary account writes.
