@@ -1,20 +1,14 @@
 # `v42-calculator-interface`
 
-This crate defines the v42 calculator program id, instruction wire constants,
-and optional off-chain builders. The SBF program depends on the wire definitions
-with the default `builder` feature disabled.
+Shared instructions and optional off-chain builders for the v42 calculator test
+program. The interface lets Engine tests construct arithmetic, account-read,
+clock, recursive-CPI, and transfer scenarios without depending on the SBF program.
 
-`Expr` produces postfix instruction data from signed `i64` literals, account
-operands, the `Clock` sysvar, arithmetic operators, and recursive self-CPI
-subexpressions. Expression composition concatenates existing postfix byte
-streams.
+Enable the `builder` feature for expression composition and instruction helpers;
+program-side consumers can use the wire definitions alone. Expressions address
+the full instruction account list: account zero is the output, and read operands
+start after it, including in nested calls.
 
-`Expr::compose` builds an instruction with the writable output at account zero,
-read-only operands after it, and the calculator program id last for recursive
-CPI. `Expr::acc` indexes the full instruction account list, so operand indexes
-start at one and remain stable across nested calls.
-
-`builder::transfer` applies a signed delta between distinct writable v42 accounts
-at indexes 0 and 1. Its data is `TRANSFER` followed by a little-endian `i64`;
-positive values move lamports and calculator value from account 0 to account 1,
-while negative values reverse the direction.
+Transfer instructions apply a signed delta to two distinct writable calculator
+accounts, changing both lamports and stored values. Negative deltas reverse the
+direction. These are test fixtures, not a production token-transfer interface.

@@ -1,136 +1,82 @@
 # `magicblock-engine`
 
 Embed `Engine` to execute Solana transactions, simulate them without committing,
-and work with local account state. Start with the [workspace guide](../README.md)
-for startup and submission examples; this page covers the
-integration contracts behind those examples.
+and manage local account state. It combines ordered execution, storage, live
+subscriptions, and recovery without introducing validator consensus or fork choice.
+Start with the [workspace guide](../README.md) for integration examples.
 
 ## Opening an engine
 
-Pass a `KeeperBuilder` and a retained `ShutdownManager` to `Engine::new`.
-Use `None` for internal block pacing or an `ExternalPacer` for caller-supplied
-boundaries. Startup opens and recovers state before starting live execution.
-MagicRoot, the System Program, and the Compute Budget Program are registered as
-native builtins before keeper opens startup state.
+Configure initial state and storage with `KeeperBuilder`, retain a
+`ShutdownManager`, and choose internal or externally supplied block pacing.
+Startup validates and recovers state before accepting live execution.
 
-`Engine::signer` is always the local keypair. `Engine::authority` returns the
-configured remote authority for a replica, or the local identity when no
-override is configured. Replication uses that distinction to sign locally while
-authenticating its immediate upstream.
+Keep local signing identity distinct from effective authority: followers sign
+local messages with their own key but authenticate replicated records against
+the configured upstream authority.
 
 ## Submitting transactions
 
-Choose whether you need a committed result, queueing acknowledgment, or a dry run:
+Choose the completion boundary your application needs:
 
 | Method | Result |
 | :-- | :-- |
-| `execute` | Waits for admission rejection or committed execution through a request-specific reply channel. |
-| `schedule` | Acknowledges queueing, not admission or execution; duplicates and invalid blockhashes are silently dropped. No completion channel is allocated. |
-| `simulate` | Executes against account copies without committing changes. |
+| `execute` | Admission rejection or committed execution result. |
+| `schedule` | Queueing acknowledgment, not admission or execution success. |
+| `simulate` | Execution against account copies, without committing changes. |
 
-Signature subscriptions are observers, not request-completion channels. They and
-status reads report execution results only, including retained results.
-There is no execution deadline, and cancelling a wait does not cancel submitted
-work. Accepted work must publish a terminal result or the host must fail-stop on
-an execution infrastructure failure; Engine cannot recover a missing result in
-a live process. Keep Tokio running until Engine services stop.
+Signature subscriptions observe execution results, not admission rejections.
+Scheduling can therefore discard rejected work without notifying a signature
+observer. Retained status and duplicate protection are bounded, not permanent.
 
-Normal submission sanitizes and verifies each transaction. Replication instead
-uses `Engine::verifier` to sanitize, authority-check, and batch-verify payloads,
-then passes the opaque results to `TransactionAccessor::verified` without
-repeating crypto. Only use verified values from that Engine's verifier.
-Retained local-ledger replay has a separate private verification bypass.
+Cancelling a wait does not cancel submitted work, and Engine imposes no internal
+execution deadline. A lost completion or infrastructure failure is not evidence
+of rollback; the host must stop on execution infrastructure failure rather than
+continue with an unknown outcome. Keep the async runtime alive through shutdown.
+
+Replication uses authority-verified transaction inputs. Values verified for one
+Engine must not be reused as proof of authorization for another.
 
 ## Account replacement
 
-Use `Engine::account(pubkey).await` when importing or replacing an account image.
-It acquires an exclusive materialization lease so another accessor cannot replace
-the same account while your operation is pending. The lease does not serialize
-ordinary transactions. Materialization and deletion require the local signer to
-match the engine's authority.
+Account accessors serialize competing materialization operations for the same
+account, but do not serialize ordinary transactions. Materialization and deletion
+require the local signer to match the engine authority.
 
-`AccountAccessor::materialize` composes complete-account MagicRoot patches,
-finalization, and optional `PostFinalize` actions in one transaction. Patches
-cover non-flag fields; finalization installs the complete caller-supplied flags
-without changing lamports. Actions immediately follow finalization. Accepted
-mode/slot combinations follow the [account lifecycle table](../solana/account/README.md).
-A newer slot alone does not permit replacement of authoritative state.
+Replacement and its follow-up actions execute atomically. The host must validate
+source freshness, creation or replacement eligibility, and action provenance;
+Engine enforces the [account lifecycle](../solana/account/README.md), not base-chain
+confirmation or application-specific token rules.
 
-`Magic` is mutable, authoritative state that exists only inside the ER, including
-locally created ATAs. Privileged materialization may create it from `Uninit` or
-`ReadOnly`, replace it with `Delegated` at the same or a newer slot, or explicitly
-close it. The host must validate creation and replacement eligibility; for ATAs,
-MBV must prevent funded accounts from being replaced. Engine does not parse token
-data or enforce transaction-end token balances.
+In particular, redelegating transient state requires a genuinely new delegation
+at a strictly newer slot, not just a newer observation of the old delegation.
+Already-delegated accounts cannot be replaced in the same mode. Magic accounts
+remain authoritative until explicitly closed or replaced through a permitted
+transition; an empty token balance is not grounds for removing that protection.
 
-`materialize` and `delete` consume the accessor and return `Result<()>`. After
-submission, Engine retains the lease through request completion and
-success bookkeeping, even if the caller stops waiting. Dropping an idle accessor
-or cancelling before submission releases it without submitting work.
-
-There is no internal execution deadline. A timeout does not cancel execution;
-`EngineError::Task` preserves a completion task's Tokio `JoinError` and does not
-prove rollback. Reacquire the accessor and reread before retrying or recovering.
-
-### Confirmed redelegation
-
-Materialization permits `Transient(S) -> Delegated(T)` only with `T > S`. Do not
-synthesize an intermediate `ReadOnly` update. Already-delegated accounts cannot
-be rematerialized as delegated, preventing repeated activation through this API.
-
-The caller (Chainlink) must establish a new delegation, not merely a newer
-observation of the old one:
-
-- Obtain a coherent confirmed account/delegation-record pair targeting this
-  engine's authority, with `delegation_slot > S`.
-- Derive actions and `PostFinalize::source_program` from that verified record.
-- After acquiring the accessor, reread local state and reconcile the request.
-  Execution checks lifecycle rules against the state it actually loads.
-
-Engine neither verifies chain confirmation nor classifies delegation generations.
-A definitive execution failure rolls back replacement and action account changes.
-The caller must retain undelegation tracking until success or reconciled recovery;
-a timeout alone is not grounds for rescue.
+Once submitted, replacement retains its materialization lease through completion,
+even if the caller stops waiting. After a timeout or uncertain result, reacquire
+the accessor and reread state before retrying. A definitive execution failure
+rolls back replacement and follow-up account changes.
 
 ## Startup and recovery
 
-[Keeper](../keeper/README.md#startup-and-recovery) validates and, when necessary,
-restores accountsdb. If state still trails the ledger, `Engine::new` replays
-retained entries after its sealed snapshot through a temporary sequencer, without
-re-appending records or publishing live subscriptions. Replayed terminal results
-are cached. Seal mismatches or unequal final transaction counts return
-`ReplayError::StateMismatch`.
+[Keeper](../keeper/README.md#startup-and-recovery) restores usable account state;
+Engine replays retained history when needed, without duplicating ledger records
+or live notifications. State mismatches refuse startup rather than silently
+accepting divergence. Recovery depends on retained snapshots and history, not
+an arbitrary-crash recovery guarantee.
 
-Current state opens without replay when its slot and transaction count are each
-at least the ledger values. Accountsdb's count is a checkpoint high-water mark
-and may exceed locally retained history after snapshot bootstrap.
-
-On a current-state restart, a leader restores only the latest blockhash and
-starts with an empty processed-signature cache. Transactions signed with older
-hashes are therefore rejected before execution. A replica restores the bounded
-blockhash and signature window from raw blockstore data; recovered signatures
-deduplicate replicated input without retaining historical statuses.
-
-Internal pacing appends one reset marker at the current slot and clears
-chain-mirrored volatile accounts before the pacemaker task starts. Internal
-system accounts remain available. Replicas use external pacing and retain
-restored volatile state. The public pacing interface is `ExternalPacer` carrying
-`ExternalBlock` values with `BlockInput::Production` or `BlockInput::Replay`.
-Produced blocks are signed; replayed blocks retain their signatures and undergo
-hash-chain validation. Completion acknowledges validation and application.
-Followers apply upstream seals under an execution barrier.
+Full superblocks provide snapshot and recovery boundaries. Optional checksum
+checkpoints detect persisted-state divergence between them, without snapshotting
+or forcing disk synchronization. Their interval is independent of superblocks;
+full superblocks take precedence when both are due. Followers consume upstream
+boundaries rather than generating their own.
 
 ## Shutdown
 
-Stop external ingress, then call `terminate` on the `ShutdownManager` retained
-from startup. Keep the engine handle and Tokio runtime alive while it drains.
-The manager stops the replication client, pacemaker, sequencer, and backing
-services in order.
-
-Shutdown behavior follows the pacing source. Internal pacing publishes a final
-block. External pacing also writes `CURRENT/volatile.db` so the next open can
-restore volatile state. Both paths hold the sequencer barrier while issuing a
-terminal ledger sync, which closes the appender and reader workers and flushes
-account storage without waiting for every engine handle to be dropped. During
-normal follower shutdown, the replication client first flushes its applied cursor;
-see the [follower recovery contract](../replicator/README.md#follower-recovery).
+Stop external ingress and terminate the retained shutdown manager while the
+runtime is still running. Coordinated shutdown drains work and synchronizes
+storage. Internally paced producers publish a final block; followers also preserve
+volatile state for restart. See the [follower recovery contract](../replicator/README.md#follower-recovery)
+for the boundary at which replication stops.

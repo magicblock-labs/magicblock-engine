@@ -1,27 +1,22 @@
 # `solana-account`
 
-This fork defines the engine's account representation. `Account` is the
-fully-owned compatibility form. `AccountSharedData` uses either a heap-owned
-`Arc<Vec<u8>>` or a borrowed view into aligned external storage and records
-field-level dirty markers.
+Engine account values, lifecycle rules, and copy-on-write access to owned or
+borrowed data. This fork lets execution work directly with external storage while
+tracking changes for transactional writeback. It does not decide how state is
+persisted or whether an external account image is trustworthy.
 
-Equality compares core state and data bytes, ignoring storage form and dirty
-markers.
+Equality compares account state and data, not storage representation or dirty
+markers. The `testkit` feature provides account and borrowed-storage fixtures.
 
-The `testkit` feature exposes borrowed-buffer fixtures and
-`testkit::delegated_account(lamports, data, owner)`, which returns a customizable
-builder for an explicitly user-mutable test account.
+## Account lifecycle
 
-`AccountMode::mutable()` permits user mutation only in delegated and Magic
-modes. `AccountSharedData::mutable()` is a transaction-final acceptance check:
-it also permits transient and closed accounts whose mode changed in the current
-transaction. This allows lifecycle writeback, never another program write.
-`AccountMode::authoritative()` separately identifies delegated, Magic, and
-transient state that the engine owns and higher layers retain in persistent
-storage.
+Delegated and Magic accounts permit user mutation. Transient state remains
+engine-authoritative but immutable; closed state is removed by the storage layer.
+A transition to transient or closed revokes mutation immediately, including
+across CPI. Transaction-final writeback may accept that transition without
+authorizing further writes.
 
-`AccountSharedData::set_lifecycle()` and `AccountMode::allows_transition()` share
-one mode-and-slot rule:
+Mode and slot are validated together:
 
 | From | Same or newer slot | Strictly newer slot |
 | --- | --- | --- |
@@ -33,41 +28,28 @@ one mode-and-slot rule:
 | Transient | ReadOnly, Uninit | Delegated |
 | Closed | — | — |
 
-Unlisted pairs and slot regressions are rejected. Authoritative accounts cannot
-be rematerialized in the same mode, even at a newer slot; ordinary transaction
-mutations are unaffected. Errors leave account state and dirty markers unchanged
-and identify the invalid mode or slot pair through `AccountPatchError`.
+Unlisted transitions and slot regressions are rejected without changing state or
+dirty markers. Authoritative accounts cannot be replaced in the same mode, even
+at a newer slot; ordinary transaction mutations are unaffected.
 
-Magic represents state that exists only inside the ER, including locally created
-ATAs. A privileged operation may close it or replace it with delegated state.
-The host owns creation and replacement eligibility; for ATAs, this includes
-preventing replacement while funded. Engine does not parse token data or require
-a positive token balance at transaction end.
+Magic represents authoritative state created inside the ER. Closing it or
+replacing it with delegated state requires a privileged operation. The host
+validates creation and replacement eligibility, including protection of funded
+Magic ATAs. Empty token balances do not invalidate Magic accounts, and this crate
+does not interpret token data.
 
-Uninit and Magic retain the numeric discriminants and binary variant indices of
-the former Placeholder and Ephemeral modes (0 and 4). Rust variant names and
-name-based serialization change. Replication peers must agree on the new lifecycle
-semantics before using Magic-to-Delegated replacement.
+Flags are supplied as a complete value during privileged finalization, which
+does not change lamports. They are not evidence of source freshness. Producers
+and consumers must agree on lifecycle semantics as well as binary encoding.
 
-Full-account patch sequences cover non-flag fields, establish the exact data
-length, and then write data in bounded chunks. MagicRoot finalization installs
-the caller-supplied complete flag value without changing lamports. `StateFlags`
-currently contains only `EXECUTABLE`; replacement freshness is enforced by the
-caller rather than an account flag.
+## Borrowed storage
 
-## Borrowed layout
+Borrowed buffers must satisfy the account layout and alignment requirements,
+remain live, and provide unique mutable access for the borrow's duration. Mutation
+uses a shadow image; commit publishes it, reset abandons it, and rollback is valid
+only after commit. Growth beyond borrowed capacity promotes data to owned storage.
 
-| Part | Position | Contents |
-| --- | --- | --- |
-| header | start | sequence and image size |
-| pubkey | after header | shared account pubkey |
-| image A | after pubkey | core state and data |
-| image B | after image A | core state and data |
-
-Borrowed buffers must be 8-byte aligned, match this layout, remain live, and have
-unique mutable access for the duration of the borrow. The source may be an mmap,
-arena, or test buffer.
-
-The sequence counter selects the active image. Mutation translates active state
-into the shadow image; commit advances the sequence to publish it. Writes that
-exceed borrowed capacity promote the account to owned storage.
+Changes to this representation must remain compatible with transaction context,
+VM mapping, and persistence. See the [runtime-fork contracts](../README.md) for
+cross-crate maintenance constraints; follow individual unsafe APIs for exact
+buffer and lifetime requirements.

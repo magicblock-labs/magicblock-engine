@@ -1,47 +1,34 @@
 # `magic-root-program`
 
-MagicRoot is the engine's privileged native program for patching, finalizing,
-and closing accounts. Its wire schema and program id are defined by
-`magic-root-interface`.
+MagicRoot is the engine's privileged native program for replacing, finalizing,
+and closing accounts. It also supports atomic follow-up actions after replacement.
+Use [the interface crate](../magic-root-interface/README.md) to construct its
+instructions.
 
-Every invocation must use the engine `AUTHORITY` as transaction payer/signer.
-Direct transaction instructions are accepted. CPI is accepted only when the
-immediate caller is registered in the transaction program cache as a builtin
-and invokes through `InvokeContext::native_invoke_magic_root`; MagicRoot itself
-cannot be the caller. The authorization is private to that exact child invocation,
-not inherited by nested CPI or `PostFinalize` actions. Builtins must construct or
-validate privileged operations rather than forward arbitrary user payloads.
-Ordinary native invocation, authority sponsorship, and native-loader account
-metadata do not grant CPI access. Caller authorization and decoding complete
-before target-state authorization. The SVM's separate top-level-only privilege
-rule is unchanged.
+## Authorization
 
-## Instructions
+Every invocation requires the engine authority as transaction payer and signer.
+Direct authority instructions are accepted. CPI additionally requires a builtin
+caller using the runtime's explicit MagicRoot authorization; sponsorship or
+native-loader ownership alone is insufficient.
 
-- `Patch` applies one `AccountFieldPatch`. Lamport changes are balanced against
-  the authority account, including no-op patches. `Lifecycle` validates mode and
-  slot together using the [account lifecycle table](../../solana/account/README.md);
-  stale slots and unlisted transitions are rejected. Data patches are limited
-  to 10 MiB; larger lengths return `InvalidRealloc`.
-- `Finalize` atomically installs the caller-supplied complete flag value and
-  loads an executable target into the transaction program cache. It does not
-  change lamports; failed executable loading rolls back the installed flags.
-- `Delete` transitions ReadOnly, Uninit, or Magic targets to
-  `AccountMode::Closed`, immediately hides any transaction-local cached program,
-  and removes its shared cache entry after successful execution and access
-  validation. Accountsdb removes closed accounts during writeback. Modes that
-  cannot transition to closed are rejected.
-- `PostFinalize` invokes follow-up instructions through native CPI and is
-  placed immediately after the target's `Finalize` by internal composers. It
-  rejects any immutable instruction account marked writable and any action that
-  targets MagicRoot itself.
+Authorization applies only to the exact child invocation. Nested calls, later
+siblings, and follow-up actions do not inherit it, and MagicRoot cannot authorize
+itself recursively. Builtins must construct or validate privileged operations,
+not forward arbitrary user payloads. The separate SVM top-level-only privilege
+rule still applies.
 
-After authority and caller checks pass, MagicRoot does not determine whether a
-complete account image is stale. Callers must supply current state; slot and
-lifecycle validation still apply.
+## Account operations
 
-Complete-account patch sequences validate mode and slot together through one
-lifecycle patch, following the [account lifecycle table](../../solana/account/README.md).
-Rejection aborts the transaction and rolls back every earlier field patch in
-that sequence. Post-finalize action failures also roll back replacement and
-action account changes.
+Patches obey the [account lifecycle](../../solana/account/README.md), reject stale
+slots and unsupported transitions, and balance lamport changes against the
+authority account. Finalization installs the complete supplied flags and makes
+executable state available to execution without changing lamports. Closing an
+account revokes its availability, including cached executable state.
+
+Replacement and follow-up account changes are transactional: rejected patches,
+failed executable loading, or failed actions roll them back. Follow-up actions
+cannot target MagicRoot or mark immutable accounts writable.
+
+Authority is not proof that an account image is current. The host remains
+responsible for freshness, replacement eligibility, and action provenance.
