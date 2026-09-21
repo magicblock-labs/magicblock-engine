@@ -11,7 +11,7 @@ use std::sync::Arc;
 use bitcode::{Decode, Encode};
 use derive_more::Deref;
 use nucleus::Slot;
-pub use nucleus::ledger::{Block, Reset, Signed, SuperblockSeal};
+pub use nucleus::ledger::{Block, Checkpoint, Reset, Signed, SuperblockSeal};
 
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
@@ -99,6 +99,8 @@ pub enum Event {
     },
     /// Volatile accounts were discarded at `Slot` after upstream synchronization was lost.
     Reset(Signed<Reset>),
+    /// Publish a checksum checkpoint without rotating or forcing durability.
+    Checkpoint(Signed<Checkpoint>),
     /// Flush pending appends and optionally stop the appender after acknowledging.
     Sync {
         /// Receives an acknowledgement after the append state is durable.
@@ -141,6 +143,8 @@ pub enum BlockstoreEntry<T> {
     Superblock(Signed<SuperblockSeal>),
     /// Marks a volatile-state reset in the durable replay stream.
     Reset(Signed<Reset>),
+    /// Fresh persisted-state checksum at this stream position.
+    Checkpoint(Signed<Checkpoint>),
 }
 
 /// Fixed execution prefix stored before the compressed bitcode payload.

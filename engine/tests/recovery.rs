@@ -61,7 +61,8 @@ async fn assert_rejected_transaction(
     );
 }
 
-/// Proves snapshot-tail replay rebuilds state and refreshes processed signatures.
+/// Proves snapshot-tail replay verifies fresh checkpoints, rebuilds state, and
+/// refreshes processed signatures.
 ///
 /// Dropping superblock 2's archive forces the restore back onto snapshot 1, so
 /// re-executing B crosses superblock 2's sealed checksum before C is rebuilt
@@ -85,6 +86,11 @@ async fn replay_rebuilds_state_after_counter_lag() {
         signed_view(&te, None, (E::acc(0) + E::lit(1)).compose(key, &[]));
     let transaction = transaction.inner_data().as_ref().clone();
     te.execute(transaction.clone()).await.expect("C commits");
+    {
+        let _guard = te.barrier().await.unwrap();
+        // SAFETY: the execution barrier is held through sampling and append.
+        unsafe { te.checkpoint(None) }.unwrap();
+    }
     te.advance(2).await;
     let (dirs, authority) = te.close().await;
 
@@ -119,34 +125,46 @@ async fn replay_rebuilds_state_after_counter_lag() {
     te2.close().await;
 }
 
-// A mutation that bypasses the ledger is sealed into superblock 2's checksum but
-// can never be rebuilt by replay, so the reopen must refuse to come up with
-// `StateMismatch` rather than run on quietly diverged state.
+/// Proves an unlogged mutation fails replay at either a full seal or a lightweight
+/// checkpoint, including a checkpoint in the unsealed tail after the last snapshot.
 #[tokio::test(flavor = "multi_thread")]
 async fn replay_aborts_on_checksum_mismatch() {
-    let mut te = TestEngine::new().await;
-    let key = store_v42(&te, 0, AccountMode::Delegated);
-    commit_and_seal(&mut te, key, 10).await;
-    // Direct store: lands in persisted state (and superblock 2's checksum)
-    // without a ledger entry.
-    store_v42(&te, 7, AccountMode::Delegated);
-    let s2 = commit_and_seal(&mut te, key, 20).await;
-    let (dirs, authority) = te.close().await;
+    for checkpoint in [false, true] {
+        let mut te = TestEngine::new().await;
+        let key = store_v42(&te, 0, AccountMode::Delegated);
+        commit_and_seal(&mut te, key, 10).await;
+        // Direct store: lands in persisted state (and superblock 2's checksum)
+        // without a ledger entry.
+        store_v42(&te, 7, AccountMode::Delegated);
+        let s2 = if checkpoint {
+            let _guard = te.barrier().await.unwrap();
+            // SAFETY: the execution barrier is held through sampling and append.
+            unsafe { te.checkpoint(None) }.unwrap();
+            None
+        } else {
+            Some(commit_and_seal(&mut te, key, 20).await)
+        };
+        te.execute(&[E::lit(30).compose(key, &[])]).await.unwrap();
+        te.advance(1).await;
+        let (dirs, authority) = te.close().await;
 
-    corrupt(dirs.accounts.path(), 8, 0xABAB_ABAB_ABAB_ABAB);
-    std::fs::remove_file(&s2).unwrap();
+        corrupt(dirs.accounts.path(), 8, 0xABAB_ABAB_ABAB_ABAB);
+        if let Some(s2) = s2 {
+            std::fs::remove_file(s2).unwrap();
+        }
 
-    let result = time::timeout(
-        Duration::from_secs(4),
-        TestEngine::try_with(dirs, authority),
-    )
-    .await
-    .expect("replay aborts in time");
-    let error = result.err().expect("diverged checksum refuses startup");
-    assert!(
-        matches!(error, EngineError::Replay(ReplayError::StateMismatch)),
-        "unexpected startup error: {error:?}"
-    );
+        let result = time::timeout(
+            Duration::from_secs(4),
+            TestEngine::try_with(dirs, authority),
+        )
+        .await
+        .expect("replay aborts in time");
+        let error = result.err().expect("diverged checksum refuses startup");
+        assert!(
+            matches!(error, EngineError::Replay(ReplayError::StateMismatch)),
+            "unexpected startup error: {error:?}"
+        );
+    }
 }
 
 /// Proves a clean restart restores processed signatures without re-execution.

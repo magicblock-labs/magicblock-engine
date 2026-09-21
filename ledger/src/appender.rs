@@ -23,7 +23,7 @@ use crate::{
     indexer::{IndexMessage, IndexerHandle},
     metrics::{self, Operation},
     schema::{
-        AccountIndex, Block, BlockstoreEntry, Event, Execution, ExecutionDetails,
+        AccountIndex, Block, BlockstoreEntry, Checkpoint, Event, Execution, ExecutionDetails,
         MAX_EXECUTION_DETAILS_SIZE, Reset, Signed, SuperblockSeal, TransactionEntry, blockstore,
     },
     storage::{AppendFile, Durability},
@@ -97,6 +97,7 @@ impl LedgerAppender {
                 Event::Block(block) => appender.write_block(block),
                 Event::Superblock { seal, response } => acknowledge(appender.seal(seal), response),
                 Event::Reset(reset) => appender.write_reset(reset),
+                Event::Checkpoint(checkpoint) => appender.write_checkpoint(checkpoint),
                 Event::Sync { response, is_final } => {
                     let result = acknowledge(appender.sync(), response);
                     if is_final {
@@ -203,6 +204,12 @@ impl LedgerAppender {
         info!(superblock = seal.payload.id, "sealed superblock");
         self.ledger.meta.transactions.store(seal.payload.transactions, Release);
         self.rotate(seal)
+    }
+
+    /// Publishes a state checkpoint without adding a synchronous durability fence.
+    fn write_checkpoint(&mut self, checkpoint: Signed<Checkpoint>) -> Result<()> {
+        self.writer.write_blockstore(&BlockstoreEntry::Checkpoint(checkpoint))?;
+        self.publish(None, Durability::Buffer)
     }
 
     /// Writes and publishes a volatile-state reset marker.

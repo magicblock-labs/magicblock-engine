@@ -151,8 +151,8 @@ impl Engine {
 
     /// Applies one retained ledger entry through the engine's ordered paths.
     ///
-    /// Seal and reset entries quiesce execution before touching shared state;
-    /// a reconstructed seal whose checksum differs returns
+    /// Seals, checkpoints, and resets quiesce execution before touching shared state;
+    /// a reconstructed state whose checksum differs returns
     /// [`ReplayError::StateMismatch`].
     /// Entries come from trusted local storage and are never appended again.
     async fn replay(&self, entry: OwnedBlockstoreEntry) -> Result<()> {
@@ -181,6 +181,16 @@ impl Engine {
             OwnedBlockstoreEntry::Reset(reset) => {
                 let _guard = self.barrier().await?;
                 self.apply_reset(*reset)?;
+            }
+            OwnedBlockstoreEntry::Checkpoint(expected) => {
+                let _guard = self.barrier().await?;
+                // SAFETY: the barrier excludes account writes and metadata updates.
+                let observed =
+                    unsafe { self.accounts().compute_checksum() }.map_err(KeeperError::from)?;
+                if observed != expected.payload.0 {
+                    error!(observed, ?expected, "checkpoint mismatch; aborting replay");
+                    return Err(ReplayError::StateMismatch.into());
+                }
             }
         };
         Ok(())

@@ -65,6 +65,11 @@ pub struct SuperblockSeal {
 #[repr(transparent)]
 pub struct Reset(pub Slot);
 
+/// Fresh persisted-state checksum at an ordered ledger boundary.
+#[derive(SchemaRead, SchemaWrite, Clone, Copy, Debug, PartialEq, Eq, Deref, NoUninit)]
+#[repr(transparent)]
+pub struct Checkpoint(pub u64);
+
 /// A ledger payload and its producer signature, preserved by storage and replay.
 #[derive(SchemaRead, SchemaWrite, Clone, Copy, Debug, PartialEq, Eq, Deref)]
 pub struct Signed<T> {
@@ -93,6 +98,9 @@ impl Record for SuperblockSeal {
 }
 impl Record for Reset {
     const DOMAIN: &'static [u8; DOMAIN_SIZE] = b"MB:reset";
+}
+impl Record for Checkpoint {
+    const DOMAIN: &'static [u8; DOMAIN_SIZE] = b"MB:check";
 }
 
 impl<T: Record> Signed<T> {

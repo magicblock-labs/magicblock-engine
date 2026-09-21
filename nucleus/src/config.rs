@@ -59,6 +59,10 @@ pub struct BlockstoreParams {
     /// Slots per superblock; zero disables periodic sealing of nonzero slots.
     /// Replication followers apply upstream seals independently of this interval.
     pub superblock: u64,
+    /// Slots between checksum checkpoints; zero disables them. Full superblocks
+    /// replace checkpoints at shared boundaries; followers use upstream records.
+    #[serde(default)]
+    pub checkpoint: u64,
 }
 
 /// Ledger storage parameters.

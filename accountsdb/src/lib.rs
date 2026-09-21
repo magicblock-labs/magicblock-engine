@@ -207,6 +207,17 @@ impl AccountsDB {
         self.persisted.meta().checksum.load(Acquire)
     }
 
+    /// Computes the current persisted-state checksum without flushing storage or
+    /// updating the cached checksum. Volatile accounts are not included.
+    ///
+    /// # Safety
+    /// The caller must exclude account writes and metadata changes for the scan.
+    /// The reader scope excludes relocation while indexed images are borrowed.
+    pub unsafe fn compute_checksum(&self) -> Result<u64> {
+        let _reader = self.readers.enter();
+        self.persisted.checksum().map_err(Into::into)
+    }
+
     /// Drops chain-mirrored volatile state while retaining system accounts;
     /// persisted state is left untouched.
     ///

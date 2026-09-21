@@ -44,11 +44,13 @@ fn truncate(ledger: &ledger::LedgerHandle) {
     }
 }
 
-/// Starts an engine over throwaway directories seeded with `accounts`.
+/// Starts a seeded engine with frequent checkpoints, exercising their ordering
+/// through catch-up, live replication, reconnects, and snapshot recovery.
 async fn engine(authority: Authority, accounts: &[AccountSeed], pacing: Pacing) -> TestEngine {
     let dirs = Dirs::default();
     let mut builder = keeper_builder(&dirs);
     builder.authority = authority;
+    builder.blockstore.checkpoint = 2;
     for &(key, value, mode) in accounts {
         builder.accounts.insert(key, v42_builder(value, mode).build());
     }
@@ -121,6 +123,57 @@ async fn close_follower(follower: TestEngine, producer: &mut TestEngine) -> (Dir
 async fn increment(engine: &TestEngine, state: Pubkey) {
     let ix = (E::acc(1) + E::lit(1)).compose(state, &[state]);
     engine.execute(&[ix]).await.expect("increment commits");
+}
+
+/// Proves an authenticated checkpoint mismatch stops the follower before later
+/// transactions and leaves the rejected record out of its ledger.
+#[tokio::test(flavor = "multi_thread")]
+async fn checkpoint_mismatch_stops_replication() {
+    let state = Pubkey::new_unique();
+    let seed = [(state, 0, AccountMode::Delegated)];
+    let (mut leader, mut follower) = engines(&seed, &seed).await;
+    leader.advance(1).await;
+    let expected = leader.sync().await;
+    let addr = loopback_addr();
+    let mut dispatcher = dispatcher(addr, &leader, &[follower.signer().pubkey()]).await;
+    let mut positions = stream(addr, &mut follower);
+
+    await_replication(&mut positions, &follower, expected, state, 0).await;
+
+    // A leader-only write is absent from the follower's execution stream.
+    {
+        let _guard = leader.barrier().await.unwrap();
+        keeper::testkit::store_v42(&leader, 7, AccountMode::Delegated);
+        // SAFETY: the execution barrier is held through sampling and append.
+        unsafe { leader.checkpoint(None) }.unwrap();
+    }
+    leader.execute(&[E::lit(99).compose(state, &[])]).await.unwrap();
+    leader.advance(1).await;
+    leader.sync().await;
+    let reason = time::timeout(TIMEOUT, follower.shutdown().wait()).await.unwrap();
+    let nucleus::shutdown::ShutdownReason::Error(error) = reason else {
+        panic!("checkpoint mismatch must stop replication: {reason:?}");
+    };
+    assert!(matches!(
+        error.downcast_ref::<replicator::ReplicationError>(),
+        Some(replicator::ReplicationError::State(
+            keeper::error::KeeperError::CheckpointMismatch
+        ))
+    ));
+    assert_eq!(
+        load_v42_data(&follower, state),
+        Some(0),
+        "later work is not applied"
+    );
+    assert_eq!(
+        follower.superblocks().position(),
+        expected,
+        "bad checkpoint is not appended"
+    );
+
+    follower.close().await;
+    dispatcher.terminate().await;
+    leader.close().await;
 }
 
 /// Commits one increment and publishes its enclosing block cursor.
@@ -551,7 +604,8 @@ async fn resumes_after_leader_restart() {
     leader.close().await;
 }
 
-/// Proves shutdown reconnects, drains to a durable boundary, and reopens from it.
+/// Proves shutdown drains through the next block, leaving its trailing checkpoint
+/// for reconnect, and reopens from that exact durable cursor.
 #[tokio::test(flavor = "multi_thread")]
 async fn graceful_shutdown_drains_to_next_block_and_reopens() {
     let (mut leader, mut follower) = engines(&[], &[]).await;
@@ -571,8 +625,12 @@ async fn graceful_shutdown_drains_to_next_block_and_reopens() {
 
     first_dispatcher.terminate().await;
     let mut second_dispatcher = dispatcher(addr, &leader, &[follower_identity]).await;
+    let mut leader_positions = leader.ledger().position.subscribe();
     leader.advance(1).await;
-    let expected = leader.sync().await;
+    let expected = time::timeout(TIMEOUT, leader_positions.recv()).await.unwrap().unwrap();
+    let checkpoint = leader.sync().await;
+    // The first publication ends at the block; the checkpoint follows it.
+    assert!(expected < checkpoint);
     // The next operational heartbeat lets Ingest observe the closed handoff
     // without out-of-band socket interruption.
     leader.advance(1).await;
