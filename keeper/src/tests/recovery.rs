@@ -112,9 +112,10 @@ async fn seeds_features_programs_and_sysvars() {
     }
 }
 
-/// Proves snapshot recovery preserves the schedule, repeated seals do not advance
-/// epochs, and volatile resets leave the schedule intact. The newest archived
-/// account state wins, and the saved corrupt tree is removed after validation.
+/// Proves recovery derives the same schedule with unchanged configuration;
+/// repeated seals do not advance epochs, and volatile resets leave the schedule
+/// intact. The newest archived account state wins, and the saved corrupt tree
+/// is removed after validation.
 //
 // The marker takes a distinct value in each state the reopen could land on, so
 // the assertion separates all three: 1 is the older snapshot, 2 the newest, and
