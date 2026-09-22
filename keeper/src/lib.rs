@@ -26,7 +26,7 @@ use nucleus::{
     config::Authority,
     ledger::{ACCOUNTSDB_SNAPSHOT_FILE, Checkpoint, Reset, Signed, SuperblockSeal},
 };
-use solana_sysvar::rent::Rent;
+use solana_sysvar::{clock::Clock, epoch_schedule::EpochSchedule, rent::Rent};
 
 use crate::{
     accessor::{AccountsAccessor, BlocksAccessor, SuperblockAccessor, TransactionsAccessor},
@@ -69,6 +69,8 @@ pub struct Keeper {
     featureset: FeatureSet,
     /// Rent parameters applied during execution.
     rent: Rent,
+    /// Local slot-based schedule shared by sysvars and execution.
+    epoch_schedule: EpochSchedule,
     /// Account state store.
     accountsdb: AccountsDB,
     /// Ledger worker handles and append path.
@@ -214,6 +216,16 @@ impl Keeper {
         &self.rent
     }
 
+    /// Returns the informational epoch schedule derived from local superblock configuration.
+    pub fn epoch_schedule(&self) -> &EpochSchedule {
+        &self.epoch_schedule
+    }
+
+    /// Clock for the slot executing after `block`. Epoch-start timestamps are unsupported.
+    pub fn clock(&self, block: nucleus::ledger::Block) -> Clock {
+        clock(&self.epoch_schedule, block)
+    }
+
     /// Waits for queued ledger work to become durable, then synchronously
     /// flushes persisted account storage. Volatile accounts are not serialized.
     ///
@@ -287,5 +299,18 @@ impl Keeper {
             .inspect_err(|error| error!(?error, "snapshot archival failed"))
         })?;
         Ok(())
+    }
+}
+
+/// Shared by startup seeding and live transitions; seals never enter this calculation.
+fn clock(schedule: &EpochSchedule, block: nucleus::ledger::Block) -> Clock {
+    let slot = block.slot + 1;
+    Clock {
+        slot,
+        epoch: schedule.get_epoch(slot),
+        leader_schedule_epoch: schedule.get_leader_schedule_epoch(slot),
+        unix_timestamp: block.time,
+        // Engine does not track epoch-start timestamps.
+        epoch_start_timestamp: 0,
     }
 }

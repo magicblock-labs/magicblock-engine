@@ -232,34 +232,107 @@ async fn seeded_program_and_recursive_cpi_return_data_work() {
     harness.close().await;
 }
 
-// A block transition updates the Clock sysvar for both simulation and execution,
-// while committed execution lands in the next slot.
+/// Proves stored and runtime-cached sysvars agree in execution and simulation at
+/// startup, around epoch boundaries, and after skipped epochs, including zero fallback.
 #[tokio::test(flavor = "current_thread")]
 async fn block_transition_updates_execution_and_simulation_sysvars() {
-    let harness = Harness::new(false).await;
-    let block = Block::new(7, 1234);
-    harness.set_block(block).await;
+    use keeper::testkit::{Dirs, keeper_builder};
+    use solana_program_runtime::solana_sbpf::program::BuiltinFunctionDefinition;
+    use solana_program_runtime::{declare_process_instruction, loaded_programs::ProgramCacheEntry};
+    use solana_sysvar::{clock::Clock, epoch_schedule::EpochSchedule, slot_hashes::SysvarId};
 
-    let output = store_v42(&harness, 0, AccountMode::Delegated);
-    let ix = E::clock().compose(output, &[]);
-    let (_, sim_tx) = signed_view(&harness, None, ix.clone());
-    assert_success(&harness.simulate(sim_tx).await);
+    // Read the actual runtime caches in both workers, not a second Clock calculation.
+    declare_process_instruction!(ObserveEpoch, 1, |ctx| {
+        let clock = ctx.get_sysvar_cache().get_clock()?;
+        let mut observed: Vec<u8> = [
+            clock.slot,
+            clock.epoch,
+            clock.leader_schedule_epoch,
+            clock.unix_timestamp as u64,
+            clock.epoch_start_timestamp as u64,
+        ]
+        .into_iter()
+        .flat_map(u64::to_le_bytes)
+        .collect();
+        // This fork exposes EpochSchedule through the generic serialized cache.
+        observed.extend_from_slice(
+            ctx.get_sysvar_cache()
+                .sysvar_id_to_buffer(&EpochSchedule::id())
+                .as_ref()
+                .expect("epoch schedule cached"),
+        );
+        let ix = ctx.transaction_context.get_current_instruction_context()?;
+        assert_eq!(observed, ix.get_instruction_data());
+        Ok(())
+    });
 
-    let (signature, tx) = signed_view(&harness, None, ix);
-    harness.execute(tx).await;
-    harness.barrier().await;
-
-    assert_eq!(
-        load_v42_data(&harness, output),
-        Some(1234),
-        "both paths see the block's clock"
-    );
-    assert_eq!(
-        harness.status(signature).await.slot,
-        8,
-        "committed execution lands in the slot after the block"
-    );
-    harness.close().await;
+    for interval in [1, 7, 0] {
+        let dirs = Dirs::default();
+        let mut builder = keeper_builder(&dirs);
+        builder.blockstore.superblock = interval;
+        let program = Pubkey::new_unique();
+        builder.builtins.insert(program, (ObserveEpoch::vm, ObserveEpoch::codegen));
+        let mut keeper = TestKeeper::from_builder(dirs, builder).await;
+        let cache = Arc::new(ProgramCache::default());
+        cache.assign_program(
+            program,
+            ProgramCacheEntry::new_builtin((ObserveEpoch::vm, ObserveEpoch::codegen)).into(),
+        );
+        let (sequencer, handle) =
+            Sequencer::new(2, keeper.clone(), cache, &mut keeper.shutdown, false).unwrap();
+        sequencer.spawn().unwrap();
+        let harness = Harness { keeper, handle };
+        let schedule = harness.epoch_schedule();
+        let n = schedule.slots_per_epoch;
+        let mut slots = vec![1, n.saturating_sub(1).max(1), n, n + 1, 4 * n + 1];
+        slots.dedup();
+        for slot in slots {
+            let block = Block::new(slot - 1, 1234 + slot as i64);
+            if slot != 1 {
+                harness.set_block(block).await;
+                harness.barrier().await;
+            }
+            let expected = harness.clock(harness.blocks().latest());
+            assert_eq!(expected.slot, slot);
+            assert_eq!(expected.epoch, slot / n);
+            assert_eq!(expected.leader_schedule_epoch, slot / n + 1);
+            let accounts = harness.accounts();
+            let loader = accounts.loader();
+            let stored: Clock = loader
+                .read(&Clock::id(), Clone::clone)
+                .unwrap()
+                .unwrap()
+                .deserialize_data()
+                .unwrap();
+            let schedule_account =
+                loader.read(&EpochSchedule::id(), Clone::clone).unwrap().unwrap();
+            let stored_schedule: EpochSchedule = schedule_account.deserialize_data().unwrap();
+            assert_eq!(stored, expected);
+            assert_eq!(&stored_schedule, schedule);
+            drop(loader);
+            let mut data: Vec<u8> = [
+                expected.slot,
+                schedule.get_epoch(slot),
+                schedule.get_leader_schedule_epoch(slot),
+                expected.unix_timestamp as u64,
+                0,
+            ]
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect();
+            data.extend_from_slice(schedule_account.data());
+            let ix = Instruction::new_with_bytes(program, &data, vec![]);
+            let (_, sim_tx) = signed_view(&harness, None, ix.clone());
+            assert_success(&harness.simulate(sim_tx).await);
+            let (signature, tx) = signed_view(&harness, None, ix);
+            harness.execute(tx).await;
+            harness.barrier().await;
+            let status = harness.status(signature).await;
+            assert!(status.result.is_ok());
+            assert_eq!(status.slot, slot);
+        }
+        harness.close().await;
+    }
 }
 
 /// Proves replay caches its re-executed status without publishing ledger records.

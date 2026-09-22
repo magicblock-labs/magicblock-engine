@@ -155,7 +155,9 @@ impl TransactionExecutor {
                         break None;
                     }
                 }
-                ExecutorMessage::Block(block) => self.svm.transition(block),
+                ExecutorMessage::Block(block) => {
+                    self.svm.transition(block.hash, self.state.clock(block))
+                }
             };
         };
         let reason = if let Some(error) = error {

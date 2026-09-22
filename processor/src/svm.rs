@@ -8,8 +8,9 @@ use agave_transaction_view::{
     MAGICBLOCK_INSTRUCTION_TRACE_LENGTH, transaction_version::TransactionVersion,
 };
 use keeper::{Keeper, ResolvedTransaction};
-use nucleus::{Slot, ledger::Block};
+use nucleus::Slot;
 use solana_compute_budget_instruction::instructions_processor::process_compute_budget_instructions;
+use solana_hash::Hash;
 use solana_program_runtime::loaded_programs::{ProgramCache, ProgramRuntimeEnvironments};
 use solana_svm::{
     account_loader::CheckedTransactionDetails,
@@ -58,7 +59,7 @@ impl SvmContext {
             blockhash_lamports_per_signature: 0,
             epoch_total_stake: 0,
         };
-        let mut processor = TransactionBatchProcessor::new(block.slot + 1, cache);
+        let mut processor = TransactionBatchProcessor::new(state.clock(block).slot, cache);
         let accessor = state.accounts();
         let callback = LoadCallback::<false> { loader: accessor.loader() };
         processor.fill_missing_sysvar_cache_entries(&callback);
@@ -99,16 +100,9 @@ impl SvmContext {
 
     /// Advances the context to a new block: bumps the slot and blockhash and
     /// refreshes the cached clock sysvar.
-    pub(crate) fn transition(&mut self, block: Block) {
-        let slot = block.slot + 1;
-        let hash = block.hash;
-        self.processor.slot = slot;
-        self.env.blockhash = hash;
-        let clock = Clock {
-            slot,
-            unix_timestamp: block.time,
-            ..Default::default()
-        };
+    pub(crate) fn transition(&mut self, blockhash: Hash, clock: Clock) {
+        self.processor.slot = clock.slot;
+        self.env.blockhash = blockhash;
         self.processor.sysvar_cache_mut().set_clock(&clock);
     }
 
