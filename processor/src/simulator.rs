@@ -78,7 +78,9 @@ impl TransactionSimulator {
             SimulatorMessage::Transaction(simulation) => {
                 self.process(simulation);
             }
-            SimulatorMessage::Block(block) => self.svm.transition(block),
+            SimulatorMessage::Block(block) => {
+                self.svm.transition(block.hash, self.state.clock(block))
+            }
             SimulatorMessage::Barrier(guard) => {
                 let _ = guard.acknowledged.send(());
                 let _ = guard.released.recv();

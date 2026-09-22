@@ -92,9 +92,7 @@ impl<'a> AccountsAccessor<'a> {
         let Some(mut cacc) = loader.read(&Clock::id(), Clone::clone)? else {
             return Ok(());
         };
-        let mut clock: Clock = cacc.deserialize_data().map_err(AccountsDBError::from)?;
-        clock.slot = block.slot;
-        clock.unix_timestamp = block.time;
+        let clock = self.keeper.clock(block);
         cacc.serialize_data(&clock).map_err(AccountsDBError::from)?;
         drop(loader);
         self.store(&[(SlotHashes::id(), hacc), (Clock::id(), cacc)]).map_err(Into::into)

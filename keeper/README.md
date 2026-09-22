@@ -50,6 +50,17 @@ bounded duplicate protection from retained history. Recovered signatures do not
 necessarily have retained execution results. Snapshot bootstrap may also leave
 account-state transaction counts ahead of locally retained history.
 
+## Epochs and Clock
+
+Use `Keeper::epoch_schedule()` to interpret slots as informational epochs. Each
+epoch spans `blockstore.superblock` slots without warmup; zero disables periodic
+sealing and uses 432,000-slot epochs. The schedule follows local configuration,
+so it can differ between peers or change on restart. Sealing does not advance it.
+
+Execution and simulation see Clock at the slot after the latest completed block,
+with epochs derived from that slot and the Unix timestamp from the block.
+`epoch_start_timestamp` is unsupported and remains zero.
+
 ## State boundaries
 
 Full superblocks capture recoverable state and rotate history. Checksum-only

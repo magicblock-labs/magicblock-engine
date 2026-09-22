@@ -56,8 +56,9 @@ pub struct AccountsDBParams {
 pub struct BlockstoreParams {
     /// Expected wall-clock interval between produced slots.
     pub blocktime: Duration,
-    /// Slots per superblock; zero disables periodic sealing of nonzero slots.
-    /// Replication followers apply upstream seals independently of this interval.
+    /// Slots per periodic superblock and informational epoch; zero disables
+    /// periodic sealing and selects 432,000-slot epochs. Followers apply upstream
+    /// seals independently and need not use the source's interval.
     pub superblock: u64,
     /// Slots between checksum checkpoints; zero disables them. Full superblocks
     /// replace checkpoints at shared boundaries; followers use upstream records.

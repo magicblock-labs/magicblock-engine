@@ -62,7 +62,7 @@ async fn assert_rejected_transaction(
 }
 
 /// Proves snapshot-tail replay verifies fresh checkpoints, rebuilds state, and
-/// refreshes processed signatures.
+/// refreshes processed signatures and preserves epochs at the recovered slot.
 ///
 /// Dropping superblock 2's archive forces the restore back onto snapshot 1, so
 /// re-executing B crosses superblock 2's sealed checksum before C is rebuilt
@@ -92,6 +92,8 @@ async fn replay_rebuilds_state_after_counter_lag() {
         unsafe { te.checkpoint(None) }.unwrap();
     }
     te.advance(2).await;
+    let expected_clock = te.clock(te.blocks().latest());
+    assert!(expected_clock.epoch > 0);
     let (dirs, authority) = te.close().await;
 
     // Lag only accountsdb's durable checkpoint in the closed store, preserving
@@ -103,6 +105,13 @@ async fn replay_rebuilds_state_after_counter_lag() {
     std::fs::remove_file(&s2).unwrap();
 
     let te2 = TestEngine::with(dirs, authority).await;
+    assert_eq!(te2.clock(te2.blocks().latest()), expected_clock);
+    let stored: solana_sysvar::clock::Clock = te2
+        .get_account(solana_sdk_ids::sysvar::clock::ID)
+        .unwrap()
+        .deserialize_data()
+        .unwrap();
+    assert_eq!(stored, expected_clock);
     assert_eq!(
         load_v42_data(&te2, key),
         Some(21),
@@ -167,7 +176,8 @@ async fn replay_aborts_on_checksum_mismatch() {
     }
 }
 
-/// Proves a clean restart restores processed signatures without re-execution.
+/// Proves a clean restart restores processed signatures and the same slot-based
+/// epoch without re-execution.
 ///
 /// Persisted state reopens as-is with the clean-shutdown volatile dump. A failed
 /// execution still counts on both durable sides without writing accounts. The
@@ -195,9 +205,24 @@ async fn clean_restart_reopens_persisted_and_volatile_state() {
     te.advance(1).await;
     let direct = store_v42(&te, 7, AccountMode::Delegated);
     let volatile = store_v42(&te, 8, AccountMode::ReadOnly);
+    let expected_clock = te.clock(te.blocks().latest());
+    assert!(expected_clock.epoch > 0);
     let (dirs, authority) = te.close().await;
 
     let te2 = TestEngine::with(dirs, authority).await;
+    // Leader startup reconstructs the block timestamp as zero; epoch semantics
+    // depend only on the recovered slot, not on that existing timestamp policy.
+    let expected_clock = solana_sysvar::clock::Clock {
+        unix_timestamp: 0,
+        ..expected_clock
+    };
+    assert_eq!(te2.clock(te2.blocks().latest()), expected_clock);
+    let stored: solana_sysvar::clock::Clock = te2
+        .get_account(solana_sdk_ids::sysvar::clock::ID)
+        .unwrap()
+        .deserialize_data()
+        .unwrap();
+    assert_eq!(stored, expected_clock);
     assert_eq!(
         load_v42_data(&te2, key),
         Some(21),

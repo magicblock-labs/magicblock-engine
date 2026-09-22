@@ -79,10 +79,12 @@ impl KeeperBuilder {
         let accountsdb = self.accountsdb(&ledger)?;
         let (caches, featureset) = self.prepopulate(&accountsdb, &ledger).await?;
         metrics::init();
+        let epoch_schedule = self.epoch_schedule();
         Ok(Keeper {
             authority: self.authority,
             featureset,
             rent: self.rent,
+            epoch_schedule,
             accountsdb,
             ledger,
             caches,
@@ -110,6 +112,17 @@ impl KeeperBuilder {
         accounts.extend(self.accounts.drain());
         accountsdb.store(&accounts)?;
         Ok((caches, featureset))
+    }
+
+    /// Epochs follow the local sealing interval; zero uses Solana's no-warmup default.
+    fn epoch_schedule(&self) -> EpochSchedule {
+        let mut schedule = EpochSchedule::without_warmup();
+        // Direct assignment supports intervals below Solana's 32-slot minimum.
+        if self.blockstore.superblock != 0 {
+            schedule.slots_per_epoch = self.blockstore.superblock;
+            schedule.leader_schedule_slot_offset = self.blockstore.superblock;
+        }
+        schedule
     }
 
     /// Builds read-side caches using blocktime-derived slot TTLs.
@@ -225,13 +238,8 @@ impl KeeperBuilder {
             self.leader_caches(&slothashes)
         };
 
-        // Set the clock slot one ahead from the last
-        let latest = caches.latest();
-        let clock = Clock {
-            slot: latest.slot + 1,
-            unix_timestamp: latest.time,
-            ..Default::default()
-        };
+        let epoch_schedule = self.epoch_schedule();
+        let clock = crate::clock(&epoch_schedule, caches.latest());
         accounts.push((Clock::id(), self.account(&clock, &sysvar::ID)?.build()));
         accounts.push((Rent::id(), self.account(&self.rent, &sysvar::ID)?.build()));
         #[allow(deprecated)]
@@ -249,7 +257,7 @@ impl KeeperBuilder {
         ));
         accounts.push((
             EpochSchedule::id(),
-            self.account(&EpochSchedule::default(), &sysvar::ID)?.build(),
+            self.account(&epoch_schedule, &sysvar::ID)?.build(),
         ));
         accounts.push((
             EpochRewards::id(),
