@@ -32,6 +32,9 @@ storage. Both require quiesced account writes, and relocation must wait for
 borrowed readers. Platforms must support the reader synchronization required by
 the store; initialization failures propagate to the caller.
 
+Snapshot export directories are temporary. Keeper removes orphaned exports at
+startup; retained snapshots live in the ledger.
+
 Checksums cover persisted account state and its slot and superblock identity,
 not volatile accounts or the transaction counter. A cached checksum describes a
 previously published state. Fresh sampling requires writes and metadata updates
