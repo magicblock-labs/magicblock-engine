@@ -52,6 +52,20 @@ pub enum BackupOp {
 }
 
 impl AccountsDB {
+    /// Removes temporary snapshot exports left by a previous process.
+    ///
+    /// Call during startup, before any snapshot archiver can use these paths.
+    /// The root must contain no unrelated `snapshot-*` entries.
+    pub fn cleanup_snapshots(&self) -> SnapshotResult<()> {
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            if entry.file_name().to_str().is_some_and(|name| name.starts_with(PREFIX)) {
+                fs::remove_dir_all(entry.path())?;
+            }
+        }
+        Ok(())
+    }
+
     /// Writes a superblock snapshot under `root`.
     ///
     /// # Safety

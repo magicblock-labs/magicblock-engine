@@ -77,6 +77,7 @@ impl KeeperBuilder {
     pub async fn build(mut self, shutdown: &mut ShutdownManager) -> Result<Keeper> {
         let ledger = Ledger::init(&self.ledger.directory, self.ledger.size_limit, shutdown)?;
         let accountsdb = self.accountsdb(&ledger)?;
+        accountsdb.cleanup_snapshots()?;
         let (caches, featureset) = self.prepopulate(&accountsdb, &ledger).await?;
         metrics::init();
         let epoch_schedule = self.epoch_schedule();
