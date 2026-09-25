@@ -317,16 +317,16 @@ impl<'a> AccountLoader<'a> {
         Ok(account.map(|account| AccountSeqLock::new(account).read(reader)))
     }
 
-    /// Reads only the mode, without cloning volatile data or copying persisted data.
-    /// Uses the same backend precedence and cached index snapshot as [`Self::read`].
-    /// Persisted mode reads retry if a concurrent publish changes the image.
-    pub fn mode(&self, pubkey: &Pubkey) -> Result<Option<AccountMode>> {
-        if let Some(mode) = self.db.volatile.mode(pubkey) {
-            return Ok(Some(mode));
+    /// Reads account mode and slot from one image without cloning volatile data.
+    /// Uses the same backend precedence and cached index snapshot as [`Self::read`];
+    /// persisted reads retry if a concurrent publish changes the image.
+    pub fn lifecycle(&self, pubkey: &Pubkey) -> Result<Option<(AccountMode, Slot)>> {
+        if let Some(lifecycle) = self.db.volatile.lifecycle(pubkey) {
+            return Ok(Some(lifecycle));
         }
-        Ok(self
-            .persisted(pubkey)?
-            .map(|account| AccountSeqLock::new(account).read(AccountSharedData::mode)))
+        Ok(self.persisted(pubkey)?.map(|account| {
+            AccountSeqLock::new(account).read(|account| (account.mode(), account.slot()))
+        }))
     }
 
     /// Returns whether an account exists in either backend.

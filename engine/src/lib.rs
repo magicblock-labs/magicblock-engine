@@ -121,9 +121,41 @@ impl Engine {
 
     /// Waits for exclusive account-mutation ownership. An idle accessor releases
     /// it on drop; a submitted mutation owns it independently of its waiter.
-    pub async fn account(&self, pubkey: Pubkey) -> AccountAccessor<'_> {
-        let lease = self.accounts().lock(pubkey).await;
-        AccountAccessor { engine: self, lease }
+    /// The accessor reports presence observed after acquisition.
+    pub async fn account(&self, pubkey: Pubkey) -> Result<AccountAccessor<'_>> {
+        let lease = self.accounts().lock(pubkey).await?;
+        Ok(AccountAccessor { engine: self, lease })
+    }
+
+    /// Returns exclusive accessors for accounts that remain absent after locking.
+    ///
+    /// A single loader scans the requested keys before any lock wait. Missing
+    /// keys are deduplicated and locked in pubkey order so overlapping scans
+    /// cannot deadlock each other. Presence is checked again under each lease;
+    /// callers must still avoid acquiring these keys recursively.
+    pub async fn missing_accounts(&self, pubkeys: &[Pubkey]) -> Result<Vec<AccountAccessor<'_>>> {
+        let mut missing = {
+            let accounts = self.accounts();
+            let loader = accounts.loader();
+            let mut missing = Vec::new();
+            for &pubkey in pubkeys {
+                if !loader.contains(&pubkey).map_err(KeeperError::from)? {
+                    missing.push(pubkey);
+                }
+            }
+            missing
+        };
+        missing.sort_unstable();
+        missing.dedup();
+
+        let mut accessors = Vec::with_capacity(missing.len());
+        for pubkey in missing {
+            let accessor = self.account(pubkey).await?;
+            if !accessor.exists() {
+                accessors.push(accessor);
+            }
+        }
+        Ok(accessors)
     }
 
     /// Returns an accessor for signing and submitting transactions.

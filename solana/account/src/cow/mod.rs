@@ -601,6 +601,8 @@ impl AccountMode {
         self.validate_transition(to, from_slot, to_slot).is_ok()
     }
 
+    /// Validates mode and slot together, preserving distinct errors for a
+    /// forbidden transition and an insufficiently fresh slot.
     fn validate_transition(
         self,
         to: Self,
@@ -608,21 +610,47 @@ impl AccountMode {
         to_slot: Slot,
     ) -> Result<(), AccountPatchError> {
         use AccountMode::*;
-        let valid_slot = match (self, to) {
-            (Uninit, ReadOnly | System | Delegated | Magic | Closed)
-            | (ReadOnly, Delegated | Magic | Closed)
-            | (Delegated, Transient)
-            | (Transient, ReadOnly | Uninit)
-            | (Magic, Delegated | Closed) => to_slot >= from_slot,
-            // Refreshes, observed disappearance, and redelegation need newer evidence.
-            (Uninit, Uninit)
-            | (ReadOnly, ReadOnly | Uninit)
-            | (System, System)
-            | (Transient, Delegated) => to_slot > from_slot,
+
+        /// Slot freshness required by an otherwise permitted mode transition.
+        enum SlotRequirement {
+            AllowSameSlot,    // to_slot >= from_slot
+            RequireNewerSlot, // to_slot > from_slot
+        }
+
+        let requirement = match (self, to) {
+            // --- Uninit ---
+            (Uninit, Uninit) => SlotRequirement::RequireNewerSlot,
+            (Uninit, ReadOnly | System | Delegated | Magic | Closed) => {
+                SlotRequirement::AllowSameSlot
+            }
+
+            // --- ReadOnly ---
+            (ReadOnly, ReadOnly | Uninit) => SlotRequirement::RequireNewerSlot,
+            (ReadOnly, Delegated | Magic | Closed) => SlotRequirement::AllowSameSlot,
+
+            // --- System ---
+            (System, System) => SlotRequirement::RequireNewerSlot,
+
+            // --- Delegated ---
+            (Delegated, Transient) => SlotRequirement::AllowSameSlot,
+
+            // --- Transient ---
+            (Transient, Delegated) => SlotRequirement::RequireNewerSlot,
+            (Transient, ReadOnly | Uninit) => SlotRequirement::AllowSameSlot,
+
+            // --- Magic ---
+            (Magic, Closed) => SlotRequirement::AllowSameSlot,
+
             _ => return Err(AccountPatchError::InvalidModeTransition { from: self, to }),
         };
-        if !valid_slot {
-            return Err(AccountPatchError::InvalidSlotTransition { from: from_slot, to: to_slot });
+
+        let valid = match requirement {
+            SlotRequirement::AllowSameSlot => to_slot >= from_slot,
+            SlotRequirement::RequireNewerSlot => to_slot > from_slot,
+        };
+
+        if !valid {
+            Err(AccountPatchError::InvalidSlotTransition { from: from_slot, to: to_slot })?;
         }
         Ok(())
     }

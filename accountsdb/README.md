@@ -15,6 +15,7 @@ Scoped reads let callers inspect account data without retaining references into
 storage. Read callbacks may retry, so they must be side-effect-free. Keep reader
 scopes short: they prevent relocation, not concurrent account writes, and must
 not span asynchronous work or invoke compaction.
+Lifecycle lookups avoid cloning volatile account data.
 
 Raw borrowed access is reserved for callers that can uphold its lifetime and
 exclusion requirements. Unguarded readers must also exclude compaction. Follow

@@ -98,6 +98,9 @@ pub struct AccountLease {
     pubkey: Pubkey,
     cache: Arc<AccountCache>,
     released: Arc<EventNotifier>,
+    /// Filled once under the lease by `AccountsAccessor::lock`. Ordinary
+    /// transactions may change the account after this snapshot.
+    pub(crate) observed: Option<(AccountMode, Slot)>,
 }
 
 /// Per-account mutation ownership state.
@@ -112,8 +115,33 @@ impl AccountLease {
         self.pubkey
     }
 
+    /// Returns whether the account existed when this lease was acquired.
+    pub fn exists(&self) -> bool {
+        self.observed.is_some()
+    }
+
+    /// Returns the mode and slot captured after acquiring this lease, or
+    /// `None` if the account was absent. Ordinary transaction writes are not
+    /// serialized by the lease and can change the current image afterward.
+    pub fn observed(&self) -> Option<(AccountMode, Slot)> {
+        self.observed
+    }
+
+    /// Returns whether the observed account may be removed as a remote mirror.
+    pub fn evictable(&self) -> bool {
+        self.observed.is_some_and(|(mode, _)| !mode.authoritative())
+    }
+
+    /// Returns the local mode when the incoming image is older or duplicates
+    /// the observed lifecycle. The caller can use it for recency bookkeeping.
+    pub fn skipped(&self, mode: AccountMode, slot: Slot) -> Option<AccountMode> {
+        self.observed.and_then(|(local_mode, local_slot)| {
+            (slot < local_slot || (slot == local_slot && mode == local_mode)).then_some(local_mode)
+        })
+    }
+
     /// Updates recency after materializing the account in `mode`.
-    pub async fn materialized(&self, mode: AccountMode) {
+    pub async fn materialized(&mut self, mode: AccountMode) {
         let evicted = self.cache.track(self.pubkey, mode);
         if let Some(pubkey) = evicted {
             self.cache.evictions.send(pubkey).await;
@@ -121,17 +149,14 @@ impl AccountLease {
     }
 
     /// Removes a deleted account from recency.
-    pub fn deleted(&self) {
+    pub fn deleted(&mut self) {
         self.cache.remove_recency(&self.pubkey);
     }
 
     /// Returns whether an earlier recency eviction still applies to the
-    /// account's current mode and cache entry.
-    pub fn cached_eviction_applies(&self, mode: AccountMode) -> bool {
-        if mode.authoritative() {
-            return false;
-        }
-        !self.cache.lru.contains_sync(&self.pubkey)
+    /// observed account and cache entry.
+    pub fn cached_eviction_applies(&self) -> bool {
+        self.evictable() && !self.cache.lru.contains_sync(&self.pubkey)
     }
 }
 
@@ -139,7 +164,7 @@ impl Drop for AccountLease {
     /// Releases mutation ownership and wakes callers waiting to re-evaluate.
     fn drop(&mut self) {
         self.cache.reservations.remove_sync(&self.pubkey);
-        self.released.notify(true);
+        self.released.notify();
     }
 }
 
@@ -197,6 +222,7 @@ impl AccountCache {
                     pubkey,
                     cache: self.clone(),
                     released: notifier,
+                    observed: None,
                 })
             }
         }

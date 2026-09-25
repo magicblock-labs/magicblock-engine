@@ -113,7 +113,7 @@ async fn account_lease_coordinates_recency_and_waiters() {
     for mode in modes {
         let cache = Arc::new(AccountCache::new(256));
         let pk = Pubkey::new_unique();
-        let lease = cache.lock(pk).await;
+        let mut lease = cache.lock(pk).await;
         let mut waiter = Box::pin(cache.lock(pk));
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(1), &mut waiter)
@@ -137,13 +137,14 @@ async fn account_lease_coordinates_recency_and_waiters() {
 
     let cache = Arc::new(AccountCache::new(256));
     let pk = Pubkey::new_unique();
-    let lease = cache.lock(pk).await;
+    let mut lease = cache.lock(pk).await;
     lease.materialized(ReadOnly).await;
     drop(lease);
     assert!(cache.lru.get_sync(&pk).is_some(), "read-only is admitted");
-    let eviction = cache.lock(pk).await;
+    let mut eviction = cache.lock(pk).await;
+    eviction.observed = Some((ReadOnly, 0));
     assert!(
-        !eviction.cached_eviction_applies(ReadOnly),
+        !eviction.cached_eviction_applies(),
         "an older eviction is rejected after readmission"
     );
     drop(eviction);
@@ -152,7 +153,7 @@ async fn account_lease_coordinates_recency_and_waiters() {
         "rejecting stale eviction leaves recency unchanged"
     );
 
-    let lease = cache.lock(pk).await;
+    let mut lease = cache.lock(pk).await;
     lease.materialized(Delegated).await;
     drop(lease);
     assert!(
@@ -160,9 +161,10 @@ async fn account_lease_coordinates_recency_and_waiters() {
         "authoritative transition removes recency"
     );
 
-    let lease = cache.lock(pk).await;
+    let mut lease = cache.lock(pk).await;
+    lease.observed = Some((ReadOnly, 0));
     assert!(
-        lease.cached_eviction_applies(ReadOnly),
+        lease.cached_eviction_applies(),
         "an account absent from recency remains eligible for eviction"
     );
     lease.materialized(ReadOnly).await;

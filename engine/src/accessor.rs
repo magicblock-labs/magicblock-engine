@@ -2,13 +2,12 @@
 
 use std::sync::atomic::Ordering;
 
-use keeper::{
-    AccountLease, ExecutionRecord, ResolvedTransaction, TransactionView, error::KeeperError,
-};
+use derive_more::Deref;
+use keeper::{AccountLease, ExecutionRecord, ResolvedTransaction, TransactionView};
 use magic_root_interface::{MagicRootInstruction, PostFinalize};
 use nucleus::runtime::ExecutionRequest;
 use processor::{SequencerMessage, Simulation, SimulatorMessage};
-use solana_account::{AccountMode, AccountSharedData, OwnedAccount};
+use solana_account::{AccountMode, OwnedAccount};
 use solana_instruction::Instruction;
 use solana_transaction::TransactionResult;
 
@@ -23,7 +22,10 @@ use crate::{
 /// Mutations consume the accessor and release it after definitive completion.
 /// Cancelling a submitted mutation's wait leaves its lease with Engine until
 /// completion; dropping an idle accessor releases it immediately.
+#[derive(Deref)]
 pub struct AccountAccessor<'a> {
+    /// Exclusive account reservation and its post-acquisition lifecycle observation.
+    #[deref]
     pub(crate) lease: AccountLease,
     pub(crate) engine: &'a Engine,
 }
@@ -31,48 +33,48 @@ pub struct AccountAccessor<'a> {
 /// Transaction-submission operations bound to an engine instance.
 pub struct TransactionAccessor<'a> {
     pub(crate) engine: &'a Engine,
+    /// Transaction prepared by verified ingress or trusted replay.
     pub(crate) transaction: TransactionView,
 }
 
 impl AccountAccessor<'_> {
-    /// Reads the current account without copying its backing data.
-    /// `reader` may run more than once if a concurrent publish changes the image.
-    pub fn read<R>(&self, reader: impl Fn(&AccountSharedData) -> R) -> Result<Option<R>> {
-        self.engine
-            .accounts()
-            .loader()
-            .read(&self.lease.pubkey(), reader)
-            .map_err(|err| EngineError::from(KeeperError::from(err)))
-    }
-
     /// Materializes the account by patching in every field and finalizing it,
     /// optionally running follow-up actions once it is finalized.
     ///
-    /// Callers supplying `post_finalize` must verify its trusted provenance as
+    /// Callers supplying `actions` must verify its trusted provenance as
     /// required by [`PostFinalize`] before invoking this method.
     /// Confirmed redelegation replaces `Transient` directly with `Delegated`
     /// at a strictly newer remote slot. The caller must establish a new
     /// delegation generation, not merely a newer observation of the old one,
-    /// and recheck local state through [`Self::read`] after acquiring this accessor.
+    /// and reconcile local state after acquiring this accessor.
     /// See the crate's account replacement contract for caller evidence.
+    ///
+    /// Returns success without submitting an older image or one with the same
+    /// slot and mode as the lease observation. In that case follow-up actions
+    /// do not run, even if the image data differs. `Ok(())` therefore means
+    /// applied or skipped as already handled or superseded.
     ///
     /// Patches, finalization, and actions share one transaction; an execution
     /// failure rolls back their account changes. Retrying requires reacquiring
-    /// the account and rechecking its state.
+    /// the account and reconciling its state.
     /// There is no internal deadline. Cancelling this wait does not cancel
     /// submitted execution; Engine retains ownership through completion and
-    /// recency bookkeeping. Reacquire and reread before deciding on recovery.
+    /// recency bookkeeping. Reacquire and reconcile before deciding on recovery.
     pub async fn materialize(
-        self,
+        mut self,
         acc: impl Into<OwnedAccount>,
-        post_finalize: Option<PostFinalize>,
+        actions: Option<PostFinalize>,
     ) -> Result<()> {
-        let pubkey = self.lease.pubkey();
         let acc = acc.into();
         let mode = acc.mode();
+        if let Some(local_mode) = self.skipped(mode, acc.slot()) {
+            self.lease.materialized(local_mode).await;
+            return Ok(());
+        }
+        let pubkey = self.pubkey();
         let mut instructions = MagicRootInstruction::compose_account(pubkey, acc)?;
-        if let Some(post_finalize) = post_finalize {
-            let ix = MagicRootInstruction::PostFinalize(post_finalize);
+        if let Some(actions) = actions {
+            let ix = MagicRootInstruction::PostFinalize(actions);
             instructions.push(ix.compose(pubkey)?);
         }
         self.execute(&instructions, Some(mode)).await
@@ -81,22 +83,19 @@ impl AccountAccessor<'_> {
     /// Closes the account, releasing ownership after definitive completion.
     /// Cancellation has the same ownership contract as [`Self::materialize`].
     pub async fn delete(self) -> Result<()> {
-        let pubkey = self.lease.pubkey();
+        let pubkey = self.pubkey();
         let instruction = MagicRootInstruction::Delete.compose(pubkey)?;
         self.execute(&[instruction], None).await
     }
 
-    /// Releases a satisfied request, promoting non-authoritative state in
-    /// recency before this accessor is dropped.
-    pub async fn satisfy(self, mode: AccountMode) {
-        if !mode.authoritative() {
-            self.lease.materialized(mode).await;
-        }
+    /// Keeps this accessor only for a present, non-authoritative account.
+    pub fn into_eviction(self) -> Option<Self> {
+        self.evictable().then_some(self)
     }
 
     /// Returns this accessor only if an earlier cache eviction still applies.
-    pub fn into_cached_eviction(self, mode: AccountMode) -> Option<Self> {
-        self.lease.cached_eviction_applies(mode).then_some(self)
+    pub fn into_cached_eviction(self) -> Option<Self> {
+        self.cached_eviction_applies().then_some(self)
     }
 
     /// Before submission, cancellation releases the lease without submitting work.
@@ -105,7 +104,7 @@ impl AccountAccessor<'_> {
         let txn = transaction::magicblock(instructions, self.engine)?;
         let rx = self.engine.transaction(txn)?.submit().await?;
         // No await may separate successful submission from this lease handoff.
-        let lease = self.lease;
+        let mut lease = self.lease;
         // Dropping the join handle detaches this task; it must never be aborted.
         tokio::spawn(async move {
             rx.await??;

@@ -54,6 +54,7 @@ async fn materialize_with(engine: &Engine, key: Pubkey, owner: Pubkey, mode: Acc
     engine
         .account(key)
         .await
+        .unwrap()
         .materialize(initial, None)
         .await
         .expect("initial account is created");
@@ -61,6 +62,7 @@ async fn materialize_with(engine: &Engine, key: Pubkey, owner: Pubkey, mode: Acc
         engine
             .account(key)
             .await
+            .unwrap()
             .materialize(account(owner, vec![1], mode, SLOT), None)
             .await
             .expect("delegated account enters transient");
@@ -97,13 +99,21 @@ async fn account_crud_lifecycle() {
     );
     let authority_before = te.get_account(te.authority()).expect("sponsor exists").lamports();
 
-    te.account(key).await.materialize(created, None).await.unwrap();
+    let accessor = te.account(key).await.unwrap();
+    assert_eq!(accessor.pubkey(), key);
+    assert!(!accessor.exists());
+    assert_eq!(accessor.observed(), None);
+    accessor.materialize(created, None).await.unwrap();
 
     let acc = te.get_account(key).expect("created account exists");
     assert_eq!(acc.lamports(), LAMPORTS);
     assert_eq!(acc.owner(), &owner);
     assert_eq!(acc.data(), &[1, 2, 3, 4, 5, 6, 7, 8]);
     assert!(acc.is(AccountMode::ReadOnly));
+    let accessor = te.account(key).await.unwrap();
+    assert!(accessor.exists());
+    assert_eq!(accessor.observed(), Some((AccountMode::ReadOnly, 10)));
+    drop(accessor);
 
     let authority_after = te.get_account(te.authority()).expect("sponsor exists").lamports();
     assert_eq!(
@@ -117,6 +127,7 @@ async fn account_crud_lifecycle() {
     // Read-only accounts remain replaceable after finalization.
     te.account(key)
         .await
+        .unwrap()
         .materialize(account(owner, vec![5; 16], AccountMode::ReadOnly, 11), None)
         .await
         .unwrap();
@@ -126,13 +137,19 @@ async fn account_crud_lifecycle() {
     assert!(acc.is(AccountMode::ReadOnly));
 
     // delete: the account is gone from storage.
-    te.account(key).await.delete().await.unwrap();
+    te.account(key).await.unwrap().delete().await.unwrap();
     assert!(te.get_account(key).is_none(), "deleted account is removed");
+    let missing = te.missing_accounts(&[key, key]).await.unwrap();
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].pubkey(), key);
+    assert!(!missing[0].exists());
+    drop(missing);
 
     // The same operation also materializes a fresh account without actions.
     let key2 = Pubkey::new_unique();
     te.account(key2)
         .await
+        .unwrap()
         .materialize(delegated(owner, vec![3; 8], 10), None)
         .await
         .unwrap();
@@ -172,7 +189,7 @@ async fn account_clone_materialization_accepts_large_data() {
             .slot(SLOT + index as u64)
             .data(data.clone());
 
-        te.account(key).await.materialize(account, None).await.unwrap();
+        te.account(key).await.unwrap().materialize(account, None).await.unwrap();
 
         let stored = te.get_account(key).expect("large account exists");
         assert_eq!(stored.lamports(), lamports);
@@ -211,6 +228,7 @@ async fn account_materialization_accepts_max_data_with_post_finalize() {
     };
     te.account(key)
         .await
+        .unwrap()
         .materialize(account, Some(post))
         .await
         .expect("maximum-sized account and post-finalize action execute atomically");
@@ -238,6 +256,7 @@ async fn account_materialization_accepts_max_data_with_post_finalize() {
     let error = te
         .account(failed_key)
         .await
+        .unwrap()
         .materialize(failed_account, Some(post))
         .await
         .expect_err("257 V42 self-CPIs exceed the trace limit");
@@ -274,7 +293,7 @@ async fn account_program_cache_tracks_v42_lifecycle() {
     let closeable = AccountBuilder::from(seeded.clone())
         .mode(AccountMode::Magic)
         .slot(seeded.slot() + 1);
-    te.account(program).await.materialize(closeable, None).await.unwrap();
+    te.account(program).await.unwrap().materialize(closeable, None).await.unwrap();
 
     let output = Pubkey::new_unique();
     te.accounts()
@@ -314,7 +333,7 @@ async fn account_program_cache_tracks_v42_lifecycle() {
         .expect("rolled-back deletion preserves the shared cache entry");
     assert_eq!(load_v42_data(&te, output), Some(7));
 
-    te.account(program).await.delete().await.unwrap();
+    te.account(program).await.unwrap().delete().await.unwrap();
     assert!(
         te.get_account(program).is_none(),
         "committed deletion removes the account"
@@ -334,8 +353,8 @@ async fn account_program_cache_tracks_v42_lifecycle() {
     te.close().await;
 }
 
-/// Proves accepted replacements install the full image, while forbidden mode
-/// and slot pairs roll back funding and never execute their follow-up actions.
+/// Proves accepted replacements install the full image, stale images are skipped,
+/// and forbidden transitions roll back funding and follow-up actions.
 #[tokio::test(flavor = "multi_thread")]
 async fn account_replacement_slot_ordering() {
     let te = TestEngine::new().await;
@@ -346,13 +365,13 @@ async fn account_replacement_slot_ordering() {
         (AccountMode::Transient, AccountMode::Delegated, SLOT + 1),
         (AccountMode::Uninit, AccountMode::Magic, SLOT),
         (AccountMode::ReadOnly, AccountMode::Magic, SLOT),
-        (AccountMode::Magic, AccountMode::Delegated, SLOT),
     ] {
         let key = Pubkey::new_unique();
         materialize_with(&te, key, owner, from).await;
         let replacement = account(owner, vec![2; 8], to, slot);
         te.account(key)
             .await
+            .unwrap()
             .materialize(replacement.clone(), None)
             .await
             .expect("valid replacement commits without actions");
@@ -364,16 +383,41 @@ async fn account_replacement_slot_ordering() {
 
     let output = store_v42(&te, 0, AccountMode::Magic);
     for (from, to, slot) in [
+        (AccountMode::ReadOnly, AccountMode::ReadOnly, SLOT),
+        (AccountMode::ReadOnly, AccountMode::Delegated, SLOT - 1),
+        (AccountMode::Transient, AccountMode::Delegated, SLOT - 1),
+        (AccountMode::Magic, AccountMode::Delegated, SLOT - 1),
+    ] {
+        let key = Pubkey::new_unique();
+        te.accounts()
+            .store(&[(key, account(owner, vec![1], from, SLOT).build())])
+            .unwrap();
+        let state = || [key, output, te.authority()].map(|key| te.get_account(key));
+        let before = state();
+        let post = PostFinalize {
+            source_program: V42_ID,
+            actions: vec![E::lit(1).compose(output, &[])],
+        };
+        te.account(key)
+            .await
+            .unwrap()
+            .materialize(
+                account(owner, vec![2; 8], to, slot).lamports(LAMPORTS + 100),
+                Some(post),
+            )
+            .await
+            .expect("superseded or duplicate lifecycle is skipped");
+        assert_eq!(state(), before, "{from:?} -> {to:?} at {slot}");
+    }
+
+    for (from, to, slot) in [
         (AccountMode::Uninit, AccountMode::Transient, SLOT),
         (AccountMode::System, AccountMode::ReadOnly, SLOT),
         (AccountMode::Delegated, AccountMode::Delegated, SLOT + 1),
         (AccountMode::Magic, AccountMode::Magic, SLOT + 1),
         (AccountMode::Transient, AccountMode::Transient, SLOT + 1),
-        (AccountMode::ReadOnly, AccountMode::ReadOnly, SLOT),
-        (AccountMode::ReadOnly, AccountMode::Delegated, SLOT - 1),
         (AccountMode::Transient, AccountMode::Delegated, SLOT),
-        (AccountMode::Transient, AccountMode::Delegated, SLOT - 1),
-        (AccountMode::Magic, AccountMode::Delegated, SLOT - 1),
+        (AccountMode::Magic, AccountMode::Delegated, SLOT + 1),
         (AccountMode::Magic, AccountMode::ReadOnly, SLOT + 1),
     ] {
         let key = Pubkey::new_unique();
@@ -390,6 +434,7 @@ async fn account_replacement_slot_ordering() {
         let error = te
             .account(key)
             .await
+            .unwrap()
             .materialize(
                 account(owner, vec![2; 8], to, slot).lamports(LAMPORTS + 100),
                 Some(post),
@@ -405,13 +450,13 @@ async fn account_replacement_slot_ordering() {
     te.close().await;
 }
 
-/// Proves creation, redelegation, and Magic replacement roll back an earlier action on
+/// Proves creation and redelegation roll back an earlier action on
 /// failure, permit retry after reacquiring, and cannot replay actions once active.
 #[tokio::test(flavor = "multi_thread")]
 async fn account_activation_is_atomic() {
     let te = TestEngine::new().await;
 
-    for initial in [None, Some(AccountMode::Transient), Some(AccountMode::Magic)] {
+    for initial in [None, Some(AccountMode::Transient)] {
         let key = Pubkey::new_unique();
         if let Some(mode) = initial {
             materialize_with(&te, key, Pubkey::new_unique(), mode).await;
@@ -425,7 +470,7 @@ async fn account_activation_is_atomic() {
             source_program: V42_ID,
             actions: vec![transfer(key, output, 1)],
         };
-        let accessor = te.account(key).await;
+        let accessor = te.account(key).await.unwrap();
         let mut failing = actions();
         failing.actions.push((E::lit(i64::MIN) - E::lit(1)).compose(output, &[]));
         let error = accessor
@@ -450,16 +495,16 @@ async fn account_activation_is_atomic() {
             "replacement and earlier transfer roll back"
         );
 
-        let accessor = te.account(key).await;
+        let accessor = te.account(key).await.unwrap();
         assert_eq!(
-            accessor.read(Clone::clone).unwrap(),
+            te.get_account(key),
             before[0],
             "reacquired state still permits creation or redelegation"
         );
         accessor
             .materialize(replacement.clone(), Some(actions()))
             .await
-            .expect("retry commits after reacquiring and rereading");
+            .expect("retry commits after reacquiring and reconciling");
 
         let expected = replacement
             .clone()
@@ -480,16 +525,16 @@ async fn account_activation_is_atomic() {
 
         let activated = state();
         for slot in [SLOT + 1, SLOT + 2] {
-            // Distinct payloads avoid signature deduplication masking lifecycle
-            // rejection under the same recent blockhash.
+            // Distinct payloads prove equal lifecycle skips execution, while a
+            // newer duplicate still reaches transition validation.
             let duplicate = replacement.clone().slot(slot).lamports(LAMPORTS + 200);
-            let error = te
-                .account(key)
-                .await
-                .materialize(duplicate, Some(actions()))
-                .await
-                .expect_err("active delegation cannot be rematerialized");
-            assert_invalid_lifecycle(error);
+            let result =
+                te.account(key).await.unwrap().materialize(duplicate, Some(actions())).await;
+            if slot == SLOT + 1 {
+                result.expect("same lifecycle is already handled");
+            } else {
+                assert_invalid_lifecycle(result.expect_err("newer active delegation is invalid"));
+            }
             assert_eq!(
                 state(),
                 activated,
@@ -525,7 +570,7 @@ async fn cancelled_activation_retains_ownership() {
         }
         let mut processed = te.transactions().subscribe_processed().unwrap();
         let barrier = te.barrier().await.unwrap();
-        let accessor = te.account(key).await;
+        let accessor = te.account(key).await.unwrap();
         // The barrier prevents completion, not submission. Passing the future
         // by value makes this timeout drop the caller's mutation wait.
         assert!(
@@ -554,8 +599,9 @@ async fn cancelled_activation_retains_ownership() {
         let result = &execution.execution_details.status;
         let accessor = timeout(COMPLETION, waiting)
             .await
-            .expect("completion releases mutation ownership");
-        let current = accessor.read(Clone::clone).unwrap();
+            .expect("completion releases mutation ownership")
+            .unwrap();
+        let current = te.get_account(key);
         if fail {
             assert!(
                 matches!(
@@ -589,6 +635,7 @@ async fn cancelled_activation_retains_ownership() {
         let error = timeout(COMPLETION, async {
             te.account(key)
                 .await
+                .unwrap()
                 .materialize(replacement.slot(SLOT + 1), Some(actions()))
                 .await
         })

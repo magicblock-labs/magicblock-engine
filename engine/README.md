@@ -43,20 +43,33 @@ Account accessors serialize competing materialization operations for the same
 account, but do not serialize ordinary transactions. Materialization and deletion
 require the local signer to match the engine authority.
 
+Use `missing_accounts` to scan a batch for absent accounts and retain leases
+only for those still absent after acquisition. Each accessor exposes `pubkey()`
+to match it to a request and `exists()` to recheck presence under the lease.
+It does not select transient accounts for refresh. For direct updates, `account`
+returns an accessor whose `observed()` mode and slot can inform caller-owned
+eligibility policy. The observation is captured after lease acquisition; ordinary
+transactions can still change the account afterward. Engine handles mode-and-slot
+deduplication against that same observation.
+
 Replacement and its follow-up actions execute atomically. The host must validate
 source freshness, creation or replacement eligibility, and action provenance;
 Engine enforces the [account lifecycle](../solana/account/README.md), not base-chain
 confirmation or application-specific token rules.
+An older image or one matching the observed mode and slot is skipped without
+running follow-up actions. Thus `materialize` success means applied or skipped as
+already handled or superseded; a different-mode image at the same slot still
+reaches lifecycle validation.
 
 In particular, redelegating transient state requires a genuinely new delegation
 at a strictly newer slot, not just a newer observation of the old delegation.
 Already-delegated accounts cannot be replaced in the same mode. Magic accounts
-remain authoritative until explicitly closed or replaced through a permitted
-transition; an empty token balance is not grounds for removing that protection.
+remain authoritative until explicitly closed; an empty token balance is not
+grounds for removing that protection.
 
 Once submitted, replacement retains its materialization lease through completion,
 even if the caller stops waiting. After a timeout or uncertain result, reacquire
-the accessor and reread state before retrying. A definitive execution failure
+the accessor and reconcile state before retrying. A definitive execution failure
 rolls back replacement and follow-up account changes.
 
 ## Startup and recovery

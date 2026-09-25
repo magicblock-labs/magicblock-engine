@@ -24,7 +24,7 @@ Mode and slot are validated together:
 | ReadOnly | Delegated, Magic, Closed | ReadOnly, Uninit |
 | System | — | System |
 | Delegated | Transient | — |
-| Magic | Delegated, Closed | — |
+| Magic | Closed | — |
 | Transient | ReadOnly, Uninit | Delegated |
 | Closed | — | — |
 
@@ -32,11 +32,10 @@ Unlisted transitions and slot regressions are rejected without changing state or
 dirty markers. Authoritative accounts cannot be replaced in the same mode, even
 at a newer slot; ordinary transaction mutations are unaffected.
 
-Magic represents authoritative state created inside the ER. Closing it or
-replacing it with delegated state requires a privileged operation. The host
-validates creation and replacement eligibility, including protection of funded
-Magic ATAs. Empty token balances do not invalidate Magic accounts, and this crate
-does not interpret token data.
+Magic represents authoritative state created inside the ER. It must be closed
+before another account image can occupy its key. The host validates creation and
+closure eligibility. Empty token balances do not invalidate Magic accounts, and
+this crate does not interpret token data.
 
 Flags are supplied as a complete value during privileged finalization, which
 does not change lamports. They are not evidence of source freshness. Producers
