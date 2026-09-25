@@ -25,10 +25,6 @@ validator; consensus, fork choice, and confirmation policy remain with the host.
 
 ## ✨ Engine in practice
 
-The sketches below show how the features fit together. They omit imports,
-configuration details, and error handling to keep the focus on the workflow;
-they are not standalone, compilable examples.
-
 ### 🚀 Bring execution into your service
 
 Choose your programs, initial accounts, storage location, and block cadence.
@@ -71,13 +67,14 @@ transaction. This lets account activation and the work that depends on it succee
 or fail together.
 
 ```rust
-engine.account(key).await.materialize(account, actions).await;
+engine.account(key).await?.materialize(account, actions).await?;
 ```
 
 The host supplies and verifies external-chain state. Replacement respects
 delegation and lifecycle rules, not just which image is newer, and requires the
 local signer to match the engine authority. If a submitted operation times out,
-reacquire and reread the account before retrying. See [account replacement](engine/README.md#account-replacement).
+reacquire the accessor and reconcile the account state before retrying. See
+[account replacement](engine/README.md#account-replacement).
 
 ### 📡 React to changes instead of polling
 
