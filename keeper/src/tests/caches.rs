@@ -113,7 +113,7 @@ async fn account_lease_coordinates_recency_and_waiters() {
     for mode in modes {
         let cache = Arc::new(AccountCache::new(256));
         let pk = Pubkey::new_unique();
-        let lease = cache.lock(pk).await;
+        let mut lease = cache.lock(pk).await;
         let mut waiter = Box::pin(cache.lock(pk));
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(1), &mut waiter)
@@ -137,7 +137,7 @@ async fn account_lease_coordinates_recency_and_waiters() {
 
     let cache = Arc::new(AccountCache::new(256));
     let pk = Pubkey::new_unique();
-    let lease = cache.lock(pk).await;
+    let mut lease = cache.lock(pk).await;
     lease.materialized(ReadOnly).await;
     drop(lease);
     assert!(cache.lru.get_sync(&pk).is_some(), "read-only is admitted");
@@ -153,7 +153,7 @@ async fn account_lease_coordinates_recency_and_waiters() {
         "rejecting stale eviction leaves recency unchanged"
     );
 
-    let lease = cache.lock(pk).await;
+    let mut lease = cache.lock(pk).await;
     lease.materialized(Delegated).await;
     drop(lease);
     assert!(

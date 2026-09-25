@@ -141,7 +141,7 @@ impl AccountLease {
     }
 
     /// Updates recency after materializing the account in `mode`.
-    pub async fn materialized(&self, mode: AccountMode) {
+    pub async fn materialized(&mut self, mode: AccountMode) {
         let evicted = self.cache.track(self.pubkey, mode);
         if let Some(pubkey) = evicted {
             self.cache.evictions.send(pubkey).await;
@@ -149,7 +149,7 @@ impl AccountLease {
     }
 
     /// Removes a deleted account from recency.
-    pub fn deleted(&self) {
+    pub fn deleted(&mut self) {
         self.cache.remove_recency(&self.pubkey);
     }
 

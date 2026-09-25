@@ -37,6 +37,7 @@ not permanent transaction history. Account-cache eviction must not discard
 unresolved engine-authoritative state.
 Account mutation leases expose the mode and slot captured after acquisition for
 materialization decisions; ordinary transaction writes are outside that lease.
+Recency bookkeeping requires mutable access to the lease.
 
 ## Startup and recovery
 

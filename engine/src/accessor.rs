@@ -61,14 +61,14 @@ impl AccountAccessor<'_> {
     /// submitted execution; Engine retains ownership through completion and
     /// recency bookkeeping. Reacquire and reconcile before deciding on recovery.
     pub async fn materialize(
-        self,
+        mut self,
         acc: impl Into<OwnedAccount>,
         actions: Option<PostFinalize>,
     ) -> Result<()> {
         let acc = acc.into();
         let mode = acc.mode();
         if let Some(local_mode) = self.skipped(mode, acc.slot()) {
-            self.materialized(local_mode).await;
+            self.lease.materialized(local_mode).await;
             return Ok(());
         }
         let pubkey = self.pubkey();
@@ -104,7 +104,7 @@ impl AccountAccessor<'_> {
         let txn = transaction::magicblock(instructions, self.engine)?;
         let rx = self.engine.transaction(txn)?.submit().await?;
         // No await may separate successful submission from this lease handoff.
-        let lease = self.lease;
+        let mut lease = self.lease;
         // Dropping the join handle detaches this task; it must never be aborted.
         tokio::spawn(async move {
             rx.await??;
