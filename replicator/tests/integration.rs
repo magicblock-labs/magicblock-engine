@@ -278,6 +278,7 @@ async fn replays_large_transactions_during_catch_up_and_live_streaming() {
     leader
         .account(account)
         .await
+        .unwrap()
         .materialize(created, None)
         .await
         .expect("large account creation commits");
@@ -315,6 +316,7 @@ async fn replays_large_transactions_during_catch_up_and_live_streaming() {
     leader
         .account(account)
         .await
+        .unwrap()
         .materialize(updated, None)
         .await
         .expect("large account update commits");
@@ -510,6 +512,7 @@ async fn streams_and_resumes_without_duplicate_application() {
     leader
         .account(sponsored)
         .await
+        .unwrap()
         .materialize(v42_builder(0, AccountMode::Delegated), None)
         .await
         .expect("sponsored account creation commits");

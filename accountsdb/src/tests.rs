@@ -314,7 +314,10 @@ fn test_persistence_reopen_and_validate() {
     assert!(reclaimed > 0);
     for (key, mode, balance) in accounts {
         assert_eq!(lamports(&db, &key), balance);
-        assert_eq!(db.loader().mode(&key).unwrap(), Some(mode));
+        assert_eq!(
+            db.loader().lifecycle(&key).unwrap().map(|(mode, _)| mode),
+            Some(mode)
+        );
     }
     assert_eq!(db.slot(), 42);
     assert_eq!(db.checksum(), checksum);

@@ -35,6 +35,8 @@ updates delivered to subscribers do not retain borrowed storage views.
 Recent results and duplicate protection are bounded by slot-based retention,
 not permanent transaction history. Account-cache eviction must not discard
 unresolved engine-authoritative state.
+Account mutation leases expose the mode and slot captured after acquisition for
+materialization decisions; ordinary transaction writes are outside that lease.
 
 ## Startup and recovery
 

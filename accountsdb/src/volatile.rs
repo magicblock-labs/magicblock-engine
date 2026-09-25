@@ -8,6 +8,7 @@ use std::{
 };
 
 use ahash::RandomState;
+use nucleus::Slot;
 use scc::HashMap;
 use solana_account::{AccountMode, AccountSharedData, OwnedAccount, ReadableAccount};
 use solana_pubkey::Pubkey;
@@ -94,9 +95,9 @@ impl VolatileStore {
         self.accounts.read_sync(pubkey, |_, account| account.clone())
     }
 
-    /// Reads mode under the map guard without cloning the account's data.
-    pub(crate) fn mode(&self, pubkey: &Pubkey) -> Option<AccountMode> {
-        self.accounts.read_sync(pubkey, |_, account| account.mode())
+    /// Reads mode and slot from one guarded image without cloning account data.
+    pub(crate) fn lifecycle(&self, pubkey: &Pubkey) -> Option<(AccountMode, Slot)> {
+        self.accounts.read_sync(pubkey, |_, account| (account.mode(), account.slot()))
     }
 
     /// Returns whether a volatile account exists for `pubkey`.

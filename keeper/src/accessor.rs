@@ -42,9 +42,12 @@ pub struct AccountsAccessor<'a> {
 }
 
 impl<'a> AccountsAccessor<'a> {
-    /// Waits for exclusive mutation ownership of `pubkey`.
-    pub async fn lock(&self, pubkey: Pubkey) -> AccountLease {
-        self.keeper.caches.accounts.lock(pubkey).await
+    /// Waits for exclusive mutation ownership of `pubkey` and records the
+    /// account lifecycle observed after acquiring the lease.
+    pub async fn lock(&self, pubkey: Pubkey) -> Result<AccountLease> {
+        let mut lease = self.keeper.caches.accounts.lock(pubkey).await;
+        lease.observed = self.loader().lifecycle(&pubkey)?;
+        Ok(lease)
     }
 
     /// Returns recent transaction signatures that mention the account.
