@@ -25,7 +25,7 @@ Mode and slot are validated together:
 | System | — | System |
 | Delegated | Transient | — |
 | Magic | Closed | — |
-| Transient | ReadOnly, Uninit | Delegated |
+| Transient | ReadOnly, Uninit, Closed | Delegated |
 | Closed | — | — |
 
 Unlisted transitions and slot regressions are rejected without changing state or

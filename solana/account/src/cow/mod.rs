@@ -636,7 +636,7 @@ impl AccountMode {
 
             // --- Transient ---
             (Transient, Delegated) => SlotRequirement::RequireNewerSlot,
-            (Transient, ReadOnly | Uninit) => SlotRequirement::AllowSameSlot,
+            (Transient, ReadOnly | Uninit | Closed) => SlotRequirement::AllowSameSlot,
 
             // --- Magic ---
             (Magic, Closed) => SlotRequirement::AllowSameSlot,
