@@ -227,7 +227,7 @@ fn test_lifecycle_matrix() {
         (System, [0, 0, 2, 0, 0, 0, 0]),
         (Delegated, [0, 0, 0, 0, 0, 1, 0]),
         (Magic, [0, 0, 0, 0, 0, 0, 1]),
-        (Transient, [1, 1, 0, 2, 0, 0, 0]),
+        (Transient, [1, 1, 0, 2, 0, 0, 1]),
         (Closed, [0, 0, 0, 0, 0, 0, 0]),
     ];
     let owner = Pubkey::new_unique();
