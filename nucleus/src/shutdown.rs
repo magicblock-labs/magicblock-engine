@@ -27,6 +27,12 @@ type HandleFuture = BoxFuture<'static, (Service, ShutdownTier, ShutdownReason)>;
 /// Background service tracked by the shutdown manager.
 #[derive(Clone, Copy, Debug)]
 pub enum Service {
+    /// Base-chain account update and coverage worker.
+    ChainSyncWorker,
+    /// Base-chain WebSocket subscription pool and its socket tasks.
+    ChainSyncWebSocket,
+    /// One base-chain Yellowstone stream, identified by its configured index.
+    ChainSyncGrpc(usize),
     /// Leader JSON-RPC and WebSocket ingress.
     Rpc,
     /// Process metrics endpoint.
@@ -70,8 +76,9 @@ impl Service {
     fn tier(&self) -> ShutdownTier {
         use Service::*;
         match self {
-            Rpc | OnchainSetup | TaskScheduler | IntentExecution | UndelegationRequests
-            | FeeClaim | ReplicationClient => ShutdownTier::One,
+            Rpc | ChainSyncWorker | ChainSyncWebSocket | ChainSyncGrpc(_) | OnchainSetup
+            | TaskScheduler | IntentExecution | UndelegationRequests | FeeClaim
+            | ReplicationClient => ShutdownTier::One,
             PaceMaker => ShutdownTier::Two,
             // The pacemaker drains the sequencer and sends the appender's final
             // sync before either service reaches this tier.
