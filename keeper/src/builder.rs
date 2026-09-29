@@ -167,12 +167,17 @@ impl KeeperBuilder {
         Ok(featureset)
     }
 
-    /// Seeds builtin and upgradeable program accounts.
+    /// Seeds builtin, precompile, and upgradeable program accounts.
     fn seed_programs(&self, accounts: &mut Vec<AccountEntry>) -> Result<()> {
-        for &builtin in self.builtins.keys() {
+        let precompiles = [
+            solana_sdk_ids::ed25519_program::ID,
+            solana_sdk_ids::secp256k1_program::ID,
+            solana_sdk_ids::secp256r1_program::ID,
+        ];
+        for program in self.builtins.keys().copied().chain(precompiles) {
             let account = self.account(&(), &solana_sdk_ids::native_loader::ID)?;
             let account = account.executable(true).build();
-            accounts.push((builtin, account));
+            accounts.push((program, account));
         }
 
         for (&program, elf) in &self.programs {
