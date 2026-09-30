@@ -88,8 +88,12 @@ fn execution_details(
     execution: &ExecutedTransaction,
     balances: Option<BalanceCollector>,
 ) -> ExecutionDetails {
-    let (pre, post) = balances.map(|bc| bc.into_vecs()).unwrap_or_default();
+    let (pre, mut post) = balances.map(|bc| bc.into_vecs()).unwrap_or_default();
     let details = &execution.execution_details;
+    if details.status.is_err() {
+        // Failed executions commit no account changes; fees are zero on the ER.
+        post.clone_from(&pre);
+    }
 
     ExecutionDetails {
         fee: execution.loaded_transaction.fee_details.total_fee(),
