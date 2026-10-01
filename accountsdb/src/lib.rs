@@ -155,9 +155,9 @@ impl AccountsDB {
         self.persisted.meta().chain_slot.load(Acquire)
     }
 
-    /// Stores the external chain slot exactly, including lower values.
-    pub fn set_chain_slot(&self, slot: Slot) {
-        self.persisted.meta().chain_slot.store(slot, Release);
+    /// Advances the external chain slot without lowering concurrent observations.
+    pub fn advance_chain_slot(&self, slot: Slot) {
+        self.persisted.meta().chain_slot.fetch_max(slot, Release);
     }
 
     /// Returns the id of the last sealed superblock recorded in the database metadata.
