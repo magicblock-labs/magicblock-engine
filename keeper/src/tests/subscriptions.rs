@@ -1,7 +1,5 @@
 //! Subscription fanout primitives, transaction-append dedup
 
-use std::sync::Arc;
-
 use super::{TestKeeper, signed_tx};
 use crate::{
     ResolvedTransaction, TransactionStatus,
@@ -14,27 +12,19 @@ use solana_keypair::Keypair;
 use solana_signature::Signature;
 use solana_transaction_error::TransactionError;
 
-/// Proves unicast exclusivity, persistent fanout, terminal fanout, and slow-receiver removal.
+/// Proves unicast exclusivity and nonblocking delivery, persistent fanout,
+/// terminal fanout, and slow multicast receiver removal.
 #[tokio::test]
 async fn subscribers_send_semantics() {
-    let unicast = Arc::new(Unicast::new(1, Subscription::Transactions));
+    let unicast = Unicast::new(Subscription::Transactions);
     let mut unicast_rx = unicast.subscribe().unwrap();
     assert!(unicast.subscribe().is_err());
-    unicast.send(1).await;
-    let sender = unicast.clone();
-    let send = tokio::spawn(async move { sender.send(2).await });
-    tokio::task::yield_now().await;
-    assert!(!send.is_finished(), "async unicast send waits for capacity");
+    // Both sends complete before the consumer drains either notification.
+    unicast.send(|| 1);
+    unicast.send(|| 2);
     assert_eq!(unicast_rx.recv().await, Some(1));
-    send.await.unwrap();
     assert_eq!(unicast_rx.recv().await, Some(2));
 
-    unicast.send(3).await;
-    let sender = unicast.clone();
-    let send = std::thread::spawn(move || sender.blocking_send(|| 4));
-    assert_eq!(unicast_rx.recv().await, Some(3));
-    send.join().unwrap();
-    assert_eq!(unicast_rx.recv().await, Some(4));
     drop(unicast_rx);
     assert!(unicast.subscribe().is_err());
 

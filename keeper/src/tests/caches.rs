@@ -121,7 +121,7 @@ async fn account_lease_coordinates_recency_and_waiters() {
                 .is_err()
         );
 
-        lease.materialized(mode).await;
+        lease.materialized(mode);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(1), &mut waiter)
                 .await
@@ -138,7 +138,7 @@ async fn account_lease_coordinates_recency_and_waiters() {
     let cache = Arc::new(AccountCache::new(256));
     let pk = Pubkey::new_unique();
     let mut lease = cache.lock(pk).await;
-    lease.materialized(ReadOnly).await;
+    lease.materialized(ReadOnly);
     drop(lease);
     assert!(cache.lru.get_sync(&pk).is_some(), "read-only is admitted");
     let mut eviction = cache.lock(pk).await;
@@ -154,7 +154,7 @@ async fn account_lease_coordinates_recency_and_waiters() {
     );
 
     let mut lease = cache.lock(pk).await;
-    lease.materialized(Delegated).await;
+    lease.materialized(Delegated);
     drop(lease);
     assert!(
         cache.lru.get_sync(&pk).is_none(),
@@ -167,7 +167,7 @@ async fn account_lease_coordinates_recency_and_waiters() {
         lease.cached_eviction_applies(),
         "an account absent from recency remains eligible for eviction"
     );
-    lease.materialized(ReadOnly).await;
+    lease.materialized(ReadOnly);
     lease.deleted();
     drop(lease);
     assert!(

@@ -175,9 +175,9 @@ impl Subscriptions {
             signatures: Default::default(),
             logs: Multicast::new(8, Subscription::Logs),
             blocks: Multicast::new(32, Subscription::Blocks),
-            transactions: Unicast::new(1024, Subscription::Transactions),
+            transactions: Unicast::new(Subscription::Transactions),
             snapshots: Multicast::new(4, Subscription::Snapshots),
-            services: Unicast::new(64, Subscription::Services),
+            services: Unicast::new(Subscription::Services),
         });
         let shutdown = shutdown.handle(Service::SubscriptionsCleanup);
         tokio::spawn(cleanup(subscriptions.clone(), shutdown));
@@ -206,52 +206,41 @@ pub struct TransactionLogs {
     pub logs: Arc<Vec<String>>,
 }
 
-/// One process-lifetime bounded receiver.
+/// One process-lifetime unbounded receiver; producers never wait for consumption.
 pub(crate) struct Unicast<V> {
     /// Set once; receiver closure never permits re-registration.
-    sender: OnceLock<mpsc::Sender<V>>,
-    /// Queue bound before producers must wait.
-    capacity: usize,
+    sender: OnceLock<mpsc::UnboundedSender<V>>,
     /// Stream identity for registration errors.
     subscription: Subscription,
 }
 
 impl<V> Unicast<V> {
     /// Configures the stream without allocating a channel.
-    pub(crate) const fn new(capacity: usize, subscription: Subscription) -> Self {
+    pub(crate) const fn new(subscription: Subscription) -> Self {
         Self {
             sender: OnceLock::new(),
-            capacity,
             subscription,
         }
     }
 
     /// Creates the process-lifetime receiver, rejecting every later subscriber.
-    pub(crate) fn subscribe(&self) -> Result<mpsc::Receiver<V>> {
-        let (tx, rx) = mpsc::channel(self.capacity);
+    pub(crate) fn subscribe(&self) -> Result<mpsc::UnboundedReceiver<V>> {
+        let (tx, rx) = mpsc::unbounded_channel();
         self.sender
             .set(tx)
             .map_err(|_| KeeperError::SubscriptionRegistered(self.subscription.label()))?;
         Ok(rx)
     }
 
-    /// Sends asynchronously, waiting until the receiver has capacity.
-    pub(crate) async fn send(&self, value: V) {
-        let Some(sender) = self.sender.get() else {
-            return;
-        };
-        let _ = sender.send(value).await;
-    }
-
-    /// Prepares and sends a value, waiting for queue capacity.
+    /// Prepares and sends a value without waiting for consumption.
     ///
     /// Skips preparation if no sender exists or it is observed closed.
     /// The receiver may close after this check.
-    pub(crate) fn blocking_send(&self, prepare: impl FnOnce() -> V) {
+    pub(crate) fn send(&self, prepare: impl FnOnce() -> V) {
         if let Some(sender) = self.sender.get()
             && !sender.is_closed()
         {
-            let _ = sender.blocking_send(prepare());
+            let _ = sender.send(prepare());
         }
     }
 }
