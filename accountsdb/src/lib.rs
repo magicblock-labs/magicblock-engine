@@ -148,6 +148,18 @@ impl AccountsDB {
         self.flush(false)
     }
 
+    /// Returns the caller-managed external chain slot, initially zero.
+    ///
+    /// This is independent of the execution slot and is restored with snapshots.
+    pub fn chain_slot(&self) -> Slot {
+        self.persisted.meta().chain_slot.load(Acquire)
+    }
+
+    /// Stores the external chain slot exactly, including lower values.
+    pub fn set_chain_slot(&self, slot: Slot) {
+        self.persisted.meta().chain_slot.store(slot, Release);
+    }
+
     /// Returns the id of the last sealed superblock recorded in the database metadata.
     pub fn superblock(&self) -> Slot {
         self.persisted.meta().superblock.load(Acquire)
