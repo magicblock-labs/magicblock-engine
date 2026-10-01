@@ -9,7 +9,7 @@ use std::{
 
 use derive_more::From;
 use nucleus::Slot;
-use solana_account::{AccountMode, AccountSeqLock, AccountSharedData, CoWAccount};
+use solana_account::{AccountMode, AccountSeqLock, AccountSharedData, CoWAccount, DirtyMarkers};
 use solana_pubkey::Pubkey;
 use tracing::{info, warn};
 
@@ -409,7 +409,10 @@ pub type AccountEntry = (Pubkey, AccountSharedData);
 fn persisted(entry: &&AccountEntry) -> bool {
     match entry.1.cow() {
         CoWAccount::Borrowed(_) => true,
-        CoWAccount::Owned(_) => entry.1.mode().authoritative(),
+        CoWAccount::Owned(_) => {
+            // Mode changes still need persisted cleanup after borrowed data grows into owned data.
+            entry.1.mode().authoritative() || entry.1.markers().contains(DirtyMarkers::MODE)
+        }
     }
 }
 
