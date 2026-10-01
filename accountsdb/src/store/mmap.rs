@@ -148,6 +148,8 @@ pub(crate) struct DatabaseMeta {
     stats: Stats,
     /// Next allocation cursor.
     pub(super) cursor: AtomicU64,
+    /// Caller-managed external chain slot, independent of execution progress.
+    pub(crate) chain_slot: AtomicU64,
 }
 
 impl MappedStorage {
