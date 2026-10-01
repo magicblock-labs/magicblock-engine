@@ -88,7 +88,7 @@ impl AccountCache {
         Self {
             lru,
             reservations: Default::default(),
-            evictions: Unicast::new(32, Subscription::Evictions),
+            evictions: Unicast::new(Subscription::Evictions),
         }
     }
 }
@@ -141,10 +141,9 @@ impl AccountLease {
     }
 
     /// Updates recency after materializing the account in `mode`.
-    pub async fn materialized(&mut self, mode: AccountMode) {
-        let evicted = self.cache.track(self.pubkey, mode);
-        if let Some(pubkey) = evicted {
-            self.cache.evictions.send(pubkey).await;
+    pub fn materialized(&mut self, mode: AccountMode) {
+        if let Some(pubkey) = self.cache.track(self.pubkey, mode) {
+            self.cache.evictions.send(|| pubkey);
         }
     }
 

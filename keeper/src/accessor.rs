@@ -27,7 +27,7 @@ use solana_sysvar::{
     slot_hashes::{SlotHashes, SysvarId},
 };
 use solana_transaction_error::{TransactionError, TransactionResult};
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 
 use crate::{
     AccountLease, ExecutionRecord, FullTransaction, Keeper, ResolvedTransaction,
@@ -71,7 +71,8 @@ impl<'a> AccountsAccessor<'a> {
     /// Subscribes as the sole receiver of account pubkeys evicted from the recency cache.
     ///
     /// Returns an error if the process-lifetime eviction receiver was already registered.
-    pub fn subscribe_evictions(&self) -> Result<Receiver<Pubkey>> {
+    /// Notifications are unbounded so consumption cannot block materialization leases.
+    pub fn subscribe_evictions(&self) -> Result<UnboundedReceiver<Pubkey>> {
         self.keeper.caches.accounts.evictions.subscribe()
     }
 
@@ -132,7 +133,7 @@ impl<'a> TransactionsAccessor<'a> {
     /// Subscribes as the sole receiver of all processed transactions, including failures.
     ///
     /// Returns an error if the process-lifetime transaction receiver was already registered.
-    pub fn subscribe_processed(&self) -> Result<Receiver<FullTransaction>> {
+    pub fn subscribe_processed(&self) -> Result<UnboundedReceiver<FullTransaction>> {
         self.keeper.subscriptions.transactions.subscribe()
     }
 
@@ -160,7 +161,7 @@ impl<'a> TransactionsAccessor<'a> {
     /// Subscribes as the sole receiver of encoded service messages.
     ///
     /// Returns an error if the process-lifetime service receiver was already registered.
-    pub fn subscribe_service_messages(&self) -> Result<Receiver<EncodedMessage>> {
+    pub fn subscribe_service_messages(&self) -> Result<UnboundedReceiver<EncodedMessage>> {
         self.keeper.subscriptions.services.subscribe()
     }
 
@@ -222,10 +223,10 @@ impl<'a> TransactionsAccessor<'a> {
                 }
             }
             while let Some(msg) = TlsManager::dequeue() {
-                subs.services.blocking_send(|| msg);
+                subs.services.send(|| msg);
             }
         }
-        subs.transactions.blocking_send(|| {
+        subs.transactions.send(|| {
             // Subscriber queues outlive the execution barrier. Materialize
             // borrowed accounts before handing off, while their mmap images
             // are still protected by execution's account ownership.

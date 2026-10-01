@@ -26,7 +26,7 @@ contracts differ, so consumers must handle backpressure appropriately:
 | :-- | :-- |
 | Signature results | One terminal result, including an already retained execution result. |
 | Accounts, programs, logs, blocks, completed snapshots | Multicast; slow receivers are disconnected. |
-| Processed transactions, service messages, cache evictions | One receiver per process lifetime; slow consumption backpressures the producer. |
+| Processed transactions, service messages, cache evictions | One receiver per process lifetime; unbounded queues never block producers. |
 
 Signature observers report execution results, not admission rejections. Request
 completion does not depend on observers consuming their notifications. Account

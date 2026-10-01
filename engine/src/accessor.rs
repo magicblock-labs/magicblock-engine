@@ -68,7 +68,7 @@ impl AccountAccessor<'_> {
         let acc = acc.into();
         let mode = acc.mode();
         if let Some(local_mode) = self.skipped(mode, acc.slot()) {
-            self.lease.materialized(local_mode).await;
+            self.lease.materialized(local_mode);
             return Ok(());
         }
         let pubkey = self.pubkey();
@@ -109,7 +109,7 @@ impl AccountAccessor<'_> {
         tokio::spawn(async move {
             rx.await??;
             match mode {
-                Some(mode) => lease.materialized(mode).await,
+                Some(mode) => lease.materialized(mode),
                 None => lease.deleted(),
             }
             Ok(())
