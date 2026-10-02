@@ -63,10 +63,9 @@ fn lamports(db: &AccountsDB, pubkey: &Pubkey) -> u64 {
 
 /// Loads the account currently stored for `pubkey`.
 ///
-/// A persisted account comes back as a *borrowed* image and a volatile one as
-/// *owned*; storing the loaded value back is how the engine drives mode changes
-/// through the routing layer (a freshly built owned account with a
-/// non-authoritative mode is filtered out of the persisted backend entirely).
+/// Persisted accounts return borrowed images; volatile accounts return owned
+/// copies. Mutating the loaded value preserves the dirty markers that route
+/// lifecycle changes through both backends.
 fn reload(db: &AccountsDB, pubkey: &Pubkey) -> AccountSharedData {
     // SAFETY: these synchronous tests exclusively own the database and finish
     // using borrowed results before relocation, deletion, or storage reuse.
@@ -75,8 +74,8 @@ fn reload(db: &AccountsDB, pubkey: &Pubkey) -> AccountSharedData {
 
 /// Closes `pubkey`, deleting it from whichever backend currently holds it.
 ///
-/// Goes through the load→mutate→store path so the account is a *borrowed* image
-/// the routing layer will actually evict (see [`reload`]).
+/// Loading before mutation preserves the mode-change marker needed to remove
+/// the previous stored image, whether the result is borrowed or owned.
 fn close(db: &AccountsDB, pubkey: &Pubkey) {
     let mut acc = reload(db, pubkey);
     if acc.is(AccountMode::Delegated) {
@@ -129,9 +128,8 @@ fn mutable_at_least(lamports: u64, units: u64, owner: &Pubkey) -> AccountSharedD
         .unwrap()
 }
 
-// Routing, both eviction directions, owner remap and Closed/reset handling in
-// one flow — the persisted-vs-volatile invariant is what this whole crate
-// exists to enforce.
+// Lifecycle changes move accounts between backends, update owner indexes, and
+// remove closed accounts. Reset must preserve authoritative state.
 #[test]
 fn test_routing_and_persistence_flips() {
     let (_dir, db) = db();
@@ -596,7 +594,7 @@ fn test_snapshot_export_and_volatile_restore() {
     assert_eq!(lamports(&db, &b), 20);
     assert!(in_persisted(&db, &a));
     assert!(in_volatile(&db, &b));
-    // The volatile payload is single-sourced back into memory on open.
+    // Opening consumes the volatile snapshot file after loading it into memory.
     assert!(!active.join(VOLATILE_DB_FILE).exists());
 
     // Backup renames the active tree out and back.
@@ -621,9 +619,8 @@ fn test_corruption_detection() {
     assert_matches!(db.validate(), Err(AccountsDBError::Corruption));
 }
 
-// Several freed spans of one size accumulate as duplicates under a single
-// freelist key and are all reissued before the file grows — the N>1 duplicate
-// case a broken DUP config silently loses.
+// The freelist must retain multiple spans of the same size under one key and
+// reuse all of them before allocating more storage.
 #[test]
 fn test_freelist_multi_duplicate_reuse() {
     let (_dir, db) = db();

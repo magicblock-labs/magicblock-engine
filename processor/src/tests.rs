@@ -40,8 +40,8 @@ struct Harness {
 impl Harness {
     /// Builds a seeded keeper and wires a sequencer/simulator onto its lifecycle.
     ///
-    /// `replay` selects whether the sequencer records transaction status while
-    /// still committing account state, matching the processor replay mode.
+    /// `replay` suppresses ledger appends and live notifications, while still
+    /// committing account state and caching execution status.
     async fn new(replay: bool) -> Self {
         let (harness, sequencer) = Self::unspawned(replay).await;
         sequencer.spawn().unwrap();

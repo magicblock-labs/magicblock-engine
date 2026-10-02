@@ -1,11 +1,6 @@
-//! Full-engine replay recovery — the engine's most distinctive orchestration.
-//! After an accountsdb inconsistency the keeper restores an older archived snapshot,
-//! leaving durable state behind the ledger tip; the engine then spins a temporary
-//! replay sequencer to re-execute the retained ledger entries and rebuild the
-//! missing state, checksum-verified at each sealed superblock. Nothing below the
-//! engine wires this end to end. Covered here: the healthy restart that must not
-//! recover, the replay that crosses a sealed checksum and succeeds, and the
-//! replay that diverges from one and must refuse to start.
+//! Startup recovery through Keeper snapshot restoration and Engine ledger replay.
+//! Covers clean restart without re-execution, reconstruction from an older snapshot,
+//! and refusal to start when replay diverges at a seal or checksum checkpoint.
 #![cfg(test)]
 
 use std::{path::PathBuf, time::Duration};

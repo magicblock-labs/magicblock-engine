@@ -32,8 +32,15 @@ Engine opens the stores, handles recovery, and starts execution behind one async
 handle. Use its own clock for a standalone deployment, or supply block boundaries
 from your application.
 
+With a configured `keeper::builder::KeeperBuilder` named `builder`, start an
+internally paced engine inside your async service:
+
 ```rust
-engine = Engine::new(config, pacing, shutdown).await;
+use engine::Engine;
+use nucleus::shutdown::ShutdownManager;
+
+let mut shutdown = ShutdownManager::default();
+let engine = Engine::new(builder, None, &mut shutdown).await?;
 ```
 
 Keep the engine and its shutdown manager alive while serving requests. Reuse the
@@ -45,16 +52,20 @@ See [startup configuration](keeper/README.md#startup-and-recovery).
 Submit instructions or an already signed transaction. Independent transactions
 run in parallel, while conflicting account accesses retain their canonical
 order. Your application does not have to schedule those dependencies itself.
+Choose one of these submission modes:
 
 ```rust
-engine.transaction(transaction).simulate().await; // Inspect without committing.
-engine.transaction(transaction).execute().await;  // Wait for the execution result.
-engine.transaction(transaction).schedule().await; // Queue without waiting for execution.
+let simulation = engine.transaction(transaction)?.simulate().await?;
+let result = engine.transaction(transaction)?.execute().await?;
+engine.transaction(transaction)?.schedule().await?;
 ```
 
-These are alternative ways to submit work. `execute` reports admission rejection
-or the committed result; `schedule` acknowledges queueing only. Cancelling a
-wait does not cancel submitted execution. See [transaction semantics](engine/README.md#submitting-transactions).
+`execute` reports admission rejection or the committed result; `simulate` returns
+a simulation result without committing.
+The `?` operators handle Engine errors; `simulation` and `result` still need to be
+checked for transaction-level failures. `schedule` acknowledges queueing only.
+Cancelling a wait does not cancel submitted execution. See
+[transaction semantics](engine/README.md#submitting-transactions).
 
 ### 📦 Keep local state durable and mirrored state lightweight
 
@@ -83,11 +94,11 @@ Use live events to drive application updates, and retained transaction and block
 history for later inspection.
 
 ```rust
-account_updates = engine.accounts().subscribe(key);
-blocks = engine.blocks().subscribe();
+let mut account_updates = engine.accounts().subscribe(key);
+let mut blocks = engine.blocks().subscribe();
 
-update = account_updates.recv().await;
-block = blocks.recv().await;
+let update = account_updates.recv().await;
+let block = blocks.recv().await;
 ```
 
 Account and block streams have bounded queues; a subscriber that falls behind is
@@ -117,9 +128,9 @@ Reopening the same deployment checks account state against retained history,
 restores a snapshot when needed, and verifies replay before serving new work.
 
 ```rust
-shutdown.wait().await;
+let reason = shutdown.wait().await;
 // Stop accepting new requests.
-shutdown.terminate().await;
+let reason = reason.combine(shutdown.terminate().await);
 ```
 
 Keep the engine and Tokio runtime alive during draining, and inspect shutdown

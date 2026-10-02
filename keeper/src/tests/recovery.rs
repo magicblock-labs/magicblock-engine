@@ -60,7 +60,7 @@ async fn seeds_features_programs_and_sysvars() {
             assert!(acc.lamports() >= rent.minimum_balance(acc.data().len()));
         }
 
-        // The upgradeable program account carries its ELF verbatim, is executable,
+        // The SBF program account carries its ELF verbatim, is executable,
         // owned by loader_v4 (not the BPF upgradeable loader), and rent-exempt.
         // Builtins are seeded through the same path with an executable native-loader
         // account, so they share this shape.

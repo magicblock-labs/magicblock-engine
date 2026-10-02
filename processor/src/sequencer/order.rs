@@ -18,14 +18,12 @@
 //! Tickets are append-only node indices within one drain epoch. Every
 //! predecessor ticket is lower than its dependents, nodes never move, and a
 //! completed sentinel keeps frontier cleanup independent of payload storage.
-//! This requires each sanitized transaction's static account keys to be unique,
-//! as guaranteed by [#66]; otherwise one registration could create a self-edge.
+//! Sanitization must reject duplicate static account keys; otherwise one
+//! registration could create a dependency on itself.
 //!
 //! A full drain leaves no outstanding, blocked, or ready work. The sequencer
 //! then resets the arena and account frontiers at a block boundary, barrier, or
 //! orderly shutdown, allowing the next epoch's tickets to start at zero.
-//!
-//! [#66]: https://github.com/magicblock-labs/magicblock-engine/issues/66
 
 use std::{collections::VecDeque, mem};
 

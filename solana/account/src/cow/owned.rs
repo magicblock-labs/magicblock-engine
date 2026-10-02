@@ -28,13 +28,13 @@ impl OwnedAccount {
         (STATIC_SIZE + self.data.len()).div_ceil(ALIGNMENT) as u32
     }
 
-    /// Writes the account into a buffer sized by `units`.
+    /// Initializes the borrowed layout's shared prefix and first active image.
+    /// The shadow image is populated on the first borrowed mutation.
     ///
     /// # Safety
     ///
-    /// `buf` must be exactly `units()` storage units long.
-    /// `pubkey` is written into the image prefix so borrowed iteration can
-    /// recover the full account key without consulting the index.
+    /// `buf` must be exactly `units()` storage units long and 8-byte aligned.
+    /// Writing it must not alias any existing account view or source data.
     pub unsafe fn serialize(&self, buf: &mut [StorageUnit], pubkey: &Pubkey) {
         let ptr = NonNull::new_unchecked(buf.as_mut_ptr());
         debug_assert_eq!(self.units() as usize, buf.len());
@@ -77,7 +77,7 @@ impl OwnedAccount {
         self.core.mode
     }
 
-    /// Returns the account's on-chain slot.
+    /// Returns the source slot associated with the account image.
     pub fn slot(&self) -> u64 {
         self.core.slot
     }
@@ -118,7 +118,7 @@ impl AccountBuilder {
         self
     }
 
-    /// Sets the account persistence mode of the account
+    /// Sets the lifecycle mode; the storage layer decides where to persist it.
     pub fn mode(mut self, mode: AccountMode) -> Self {
         self.0.core.mode = mode;
         self
@@ -130,7 +130,7 @@ impl AccountBuilder {
         self
     }
 
-    /// Sets the on chain slot.
+    /// Sets the source slot associated with the account image.
     pub fn slot(mut self, slot: Slot) -> Self {
         self.0.core.slot = slot;
         self

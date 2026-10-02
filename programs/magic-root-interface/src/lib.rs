@@ -47,7 +47,6 @@ impl MagicRootInstruction {
     pub fn compose(&self, account: Pubkey) -> Result<Instruction, InstructionError> {
         let mut accounts = vec![AccountMeta::new(account, false)];
         self.extend_metas(&mut accounts);
-        // NOTE this code can never error, wincode serialization for instruction is infallible
         let data = wincode::serialize(self).map_err(|_| InstructionError::BorshIoError)?;
         Ok(Instruction { program_id: ID, accounts, data })
     }
@@ -70,8 +69,8 @@ impl MagicRootInstruction {
     }
 
     /// Appends the extra account metas a variant requires. Only [`PostFinalize`]
-    /// contributes any: the program id and de-signed accounts of each follow-up
-    /// instruction.
+    /// contributes any: each action's program id and accounts with signer bits
+    /// cleared. MagicRoot supplies the declared signers during the action's CPI.
     ///
     /// [`PostFinalize`]: MagicRootInstruction::PostFinalize
     fn extend_metas(&self, accounts: &mut Vec<AccountMeta>) {

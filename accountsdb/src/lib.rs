@@ -70,12 +70,12 @@ impl AccountsDB {
         root.join(ACTIVE_DIR)
     }
 
-    /// Stores accounts in the backend that matches their current form.
+    /// Stores accounts according to their lifecycle mode, not their storage form.
     ///
     /// Persistent modes are kept in persisted storage. Other modes are kept in
-    /// volatile storage. Each batch also touches the opposite backend so stale
-    /// copies are removed after mode changes. Persisted failures roll back
-    /// borrowed images before the caller sees the error.
+    /// volatile storage. Mode changes also remove stale copies from the previous
+    /// backend, including when borrowed data has grown into owned storage.
+    /// Persisted failures roll back borrowed images before returning an error.
     pub fn store<'a, AC>(&self, accounts: AC) -> Result<()>
     where
         AC: IntoIterator<Item = &'a AccountEntry> + Clone,
@@ -189,7 +189,7 @@ impl AccountsDB {
         self.persisted.validate()
     }
 
-    /// Compacts persisted storage to a non-overlapping packing fixed point.
+    /// Repeatedly packs persisted accounts into earlier holes until no move is possible.
     ///
     /// This must run only after validation and before loaders or iterators are
     /// created. Vacated sources become eligible on the following pass, and all
@@ -214,7 +214,7 @@ impl AccountsDB {
         Ok(reclaimed)
     }
 
-    /// Returns the last checksum published on superblock boundary.
+    /// Returns the checksum cached by the last synchronous flush.
     pub fn checksum(&self) -> u64 {
         self.persisted.meta().checksum.load(Acquire)
     }
@@ -404,7 +404,7 @@ pub enum AccountsDBError {
     /// Opened database version is not supported by current implementation.
     #[error("unsupported database version: {0:?}")]
     UnsupportedVersion(DatabaseVersion),
-    /// Database was corrupted during the shutdown/crash.
+    /// The stored checksum does not match the current persisted state.
     #[error("database integrity check failed")]
     Corruption,
     /// Volatile snapshot serialization error.

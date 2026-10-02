@@ -104,7 +104,8 @@ async fn restart_from_snapshot(addr: SocketAddr, mut follower: TestEngine) -> Te
     TestEngine::with(dirs, authority).await
 }
 
-/// Closes a follower after its producer publishes the boundary and Ingest-stop heartbeat.
+/// Drives two producer blocks during follower shutdown: one lets the client stop
+/// at a boundary; the next wakes the decoder so it observes the closed handoff.
 async fn close_follower(follower: TestEngine, producer: &mut TestEngine) -> (Dirs, Authority) {
     let mut close = Box::pin(follower.close());
     assert!(

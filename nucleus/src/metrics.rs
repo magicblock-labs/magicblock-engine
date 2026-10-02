@@ -9,7 +9,7 @@ use tracing::{info, warn};
 /// Prometheus namespace shared by all engine metrics.
 const NAMESPACE: &str = "engine";
 
-/// Duration logger for the time elapsed between events and their total duration.
+/// Logs time between recorded events and total elapsed time when dropped.
 pub struct EventTimer {
     sequence: &'static str,
     start: Instant,
@@ -17,7 +17,7 @@ pub struct EventTimer {
 }
 
 impl EventTimer {
-    /// Initialize a new timer for the given sequence of events
+    /// Starts timing an event sequence identified by `sequence`.
     pub fn new(sequence: &'static str) -> Self {
         let start = Instant::now();
         let interval = start;

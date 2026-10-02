@@ -64,7 +64,7 @@ pub struct KeeperBuilder {
     pub blockstore: BlockstoreParams,
     /// Native builtin program ids to seed as executable accounts.
     pub builtins: HashMap<Pubkey, BuiltinFunctionWithContext>,
-    /// Upgradeable program accounts to seed, paired as `(program id, ELF bytes)`.
+    /// SBF programs to seed as executable loader-v4 accounts: `(program id, ELF bytes)`.
     pub programs: HashMap<Pubkey, Vec<u8>>,
     /// Plain accounts to seed into storage before startup completes.
     pub accounts: HashMap<Pubkey, AccountSharedData>,
@@ -167,7 +167,8 @@ impl KeeperBuilder {
         Ok(featureset)
     }
 
-    /// Seeds builtin, precompile, and upgradeable program accounts.
+    /// Seeds native-loader accounts for builtins and precompiles, and raw ELF
+    /// accounts owned by loader-v4 for configured SBF programs.
     fn seed_programs(&self, accounts: &mut Vec<AccountEntry>) -> Result<()> {
         let precompiles = [
             solana_sdk_ids::ed25519_program::ID,

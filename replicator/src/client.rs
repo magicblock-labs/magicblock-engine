@@ -36,12 +36,12 @@ use crate::{
 
 type ReplicationStream = BufReader<TcpStream>;
 
-/// Maximum transactions retained before offering a batch to Control.
+/// Transaction count that triggers a batch handoff to the async client loop.
 const MAX_BATCH_TRANSACTIONS: usize = 128;
-/// Maximum transaction payload bytes retained before offering a batch to Control.
+/// Payload-byte threshold for handing off a batch; one transaction may exceed it.
 const MAX_BATCH_BYTES: usize = 128 * KB;
 
-/// Consecutive transaction payloads accumulated between ordered stream fences.
+/// Consecutive transactions batched without crossing a block, seal, reset, or checkpoint.
 #[derive(Default)]
 struct TransactionsBatch {
     transactions: Vec<Vec<u8>>,
@@ -59,35 +59,35 @@ impl TransactionsBatch {
     }
 }
 
-/// Ordered handoff from blocking Ingest to asynchronous Control.
+/// Ordered handoff from the blocking decoder to the async client loop.
 pub(crate) enum ReplicationMessage {
     /// Raw transactions awaiting authority and signature verification.
     Unverified(Vec<Vec<u8>>),
-    /// Transactions verified by Ingest while Control was occupied.
+    /// Transactions verified by the decoder while the client loop was busy.
     Verified(Vec<VerifiedTransaction>),
-    /// Block boundary fenced behind every preceding batch.
+    /// Block boundary delivered after all preceding transaction batches.
     Block(Signed<Block>),
-    /// Superblock seal fenced behind every preceding batch.
+    /// Superblock seal delivered after all preceding transaction batches.
     Superblock(Signed<SuperblockSeal>),
-    /// Volatile-state reset fenced behind every preceding batch.
+    /// Volatile-state reset delivered after all preceding transaction batches.
     Reset(Signed<Reset>),
-    /// Checksum checkpoint fenced behind every preceding batch.
+    /// Checksum checkpoint delivered after all preceding transaction batches.
     Checkpoint(Signed<Checkpoint>),
 }
 
-/// Why connection-scoped Ingest stopped without a terminal replication error.
+/// Nonterminal exit of the blocking decoder for one connection.
 pub(crate) enum IngestExit {
-    /// Control dropped its receiver after reaching a boundary or terminal error.
+    /// The client loop dropped its receiver after reaching a boundary or terminal error.
     Stopped,
-    /// The transport failed after all preceding entries were handed to Control.
+    /// The transport failed after all decoded entries were handed to the client loop.
     Disconnected(wincode::io::ReadError),
 }
 
-/// Why Control stopped consuming one connection.
+/// Why the async client loop stopped consuming one connection.
 enum ControlExit {
     /// Normal shutdown reached and flushed a validated block boundary.
     Boundary(BlockstorePosition),
-    /// Ingest ended; its join result determines whether to reconnect or fail.
+    /// The decoder ended; its join result determines whether to reconnect or fail.
     HandoffClosed,
 }
 
@@ -95,11 +95,11 @@ enum ControlExit {
 pub(crate) struct Ingest {
     /// Blocking stream for one authenticated connection.
     stream: ReplicationStream,
-    /// Transactions accumulated until a size or entry fence.
+    /// Transactions accumulated until a batch threshold or non-transaction record.
     batch: TransactionsBatch,
     /// Rendezvous handoff preserving decoded stream order.
     tx: Sender<ReplicationMessage>,
-    /// Authority-bound verifier used when Control is occupied.
+    /// Authority-bound verifier used when the client loop cannot accept raw work.
     verifier: TransactionVerifier,
     /// Configured upstream signer for boundary and reset records.
     authority: Pubkey,
@@ -179,7 +179,7 @@ impl ReplicationClient {
         }
     }
 
-    /// Consumes one Ingest stream, draining normal shutdown to the next block.
+    /// Applies one decoder's ordered stream, draining normal shutdown to the next block.
     async fn consume(
         &mut self,
         shutdown: &ShutdownHandle,
@@ -351,7 +351,7 @@ impl Ingest {
         Ok((rx, worker))
     }
 
-    /// Decodes until transport loss, terminal failure, or Control exit.
+    /// Decodes until transport loss, terminal failure, or the client loop exits.
     fn run(mut self) -> Result<IngestExit> {
         loop {
             let entry = match blockstore::decode(&mut self.stream) {
@@ -408,7 +408,8 @@ impl Ingest {
         }
     }
 
-    /// Offers raw work to idle Control, otherwise verifies without losing stream order.
+    /// Hands raw work to a waiting client loop; otherwise verifies it here before
+    /// blocking on delivery. Both paths preserve transaction and boundary order.
     fn flush(&mut self) -> Result<bool> {
         if self.batch.transactions.is_empty() {
             return Ok(true);

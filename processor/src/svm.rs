@@ -123,7 +123,7 @@ impl SvmContext {
         let mut limits = limits.get_compute_budget_and_limits(
             limits.loaded_accounts_bytes,
             Default::default(), // Fee is always zero on ER
-            false,              // Depth-8 CPIs are disabled on solana
+            false,              // This engine does not enable depth-8 CPIs.
         );
         if matches!(txn.version(), TransactionVersion::Magicblock) {
             limits.budget.max_instruction_trace_length = MAGICBLOCK_INSTRUCTION_TRACE_LENGTH;

@@ -17,8 +17,8 @@ use crate::error::CalcError;
 /// stack height.
 ///
 /// A nested call must publish its result *after* its own child `CALL`s complete,
-/// because every CPI clears the return-data register — which is exactly what
-/// happens here, since the result is emitted only once evaluation is done.
+/// because every CPI clears the return-data register. Emit the result only
+/// after evaluation completes so a child cannot overwrite it.
 pub(crate) fn process(accounts: &[AccountInfo], data: &[u8], height: usize) -> ProgramResult {
     let result = eval(accounts, data)?;
     if height == TRANSACTION_LEVEL_STACK_HEIGHT {
@@ -127,8 +127,8 @@ fn call(accounts: &[AccountInfo], nested: &[u8]) -> Result<i64, ProgramError> {
     Ok(read_head_i64(&bytes, CalcError::ShortReturnData)?)
 }
 
-/// A forward cursor over the instruction byte stream. Every read is bounds-
-/// checked and advances the cursor; operands are read in place, never copied.
+/// Bounds-checked cursor over instruction bytes. Scalar reads decode
+/// little-endian values; nested programs borrow a slice of the original input.
 struct Cursor<'a>(&'a [u8]);
 
 impl<'a> Cursor<'a> {
@@ -164,8 +164,8 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// Fixed-capacity operand stack — deep enough for any expression a test would
-/// build, and allocation-free.
+/// Allocation-free operand stack holding at most 64 values. Exceeding that
+/// capacity returns `StackOverflow`.
 struct Stack {
     slots: [i64; 64],
     len: usize,

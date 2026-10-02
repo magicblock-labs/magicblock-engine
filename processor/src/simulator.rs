@@ -1,5 +1,5 @@
 //! Transaction simulation: executes transactions against current state on
-//! owned account copies, without committing any changes.
+//! owned account copies, without committing account changes or execution history.
 
 use std::{sync::Arc, thread};
 

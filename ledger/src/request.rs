@@ -73,7 +73,7 @@ pub struct AccountSignature {
 pub struct TransactionResponse {
     /// Serialized transaction bytes from the blockstore file.
     pub transaction: Vec<u8>,
-    /// Execution metadata when requested or available.
+    /// Execution metadata included by full lookups, omitted by transactions-only block reads.
     pub execution: Execution,
 }
 
@@ -117,9 +117,9 @@ pub struct AccountSignaturesParams {
     pub pubkey: Pubkey,
     /// Maximum number of signatures to return.
     pub limit: usize,
-    /// Signature before which results should start.
+    /// Exclusive starting cursor; return signatures older than this one.
     pub before: Option<Signature>,
-    /// Signature at which results should stop.
+    /// Exclusive stopping cursor; stop before including this signature.
     pub until: Option<Signature>,
 }
 

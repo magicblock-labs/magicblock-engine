@@ -33,7 +33,7 @@ impl VolatileStore {
     /// Opens the volatile store, optionally bootstrapping from a snapshot file.
     ///
     /// If `volatile.db` exists, it is loaded into memory and then removed from
-    /// the snapshot directory so the active tree stays single-sourced.
+    /// the database directory; subsequent reads use only the in-memory state.
     pub(crate) fn new(path: &Path) -> Result<Self> {
         const CAP: usize = 2048;
         let snapshot = path.join(VOLATILE_DB_FILE);

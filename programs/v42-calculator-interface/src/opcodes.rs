@@ -1,7 +1,5 @@
-//! Opcodes for the v42-calculator RPN byte stream — the single source of truth
-//! for the wire format, shared by the off-chain `Expr` builder and the on-chain
-//! evaluator so the two can never drift. Adding an operation is one constant
-//! here plus one match arm in the program.
+//! Shared opcode values for the v42-calculator postfix wire format. The off-chain
+//! builder and on-chain evaluator must agree on each opcode's operand encoding.
 //!
 //! A program is a flat sequence of tokens evaluated left-to-right against a
 //! `i64` stack: `PUSH_*` tokens push one value, the arithmetic tokens pop two

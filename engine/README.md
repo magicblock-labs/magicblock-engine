@@ -45,7 +45,8 @@ require the local signer to match the engine authority.
 
 Use `missing_accounts` to scan a batch for absent accounts and retain leases
 only for those still absent after acquisition. Each accessor exposes `pubkey()`
-to match it to a request and `exists()` to recheck presence under the lease.
+to match it to a request and `exists()` to report whether the account was present
+at acquisition. It does not perform a fresh lookup.
 It does not select transient accounts for refresh. For direct updates, `account`
 returns an accessor whose `observed()` mode and slot can inform caller-owned
 eligibility policy. The observation is captured after lease acquisition; ordinary

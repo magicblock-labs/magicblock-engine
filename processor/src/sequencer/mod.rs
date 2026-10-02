@@ -244,9 +244,8 @@ impl Sequencer {
         info!("sequencer is resuming operation");
     }
 
-    /// Awaits executor-ready signals, reclaiming each finished executor
-    /// until the whole pool is idle. Used to ensure that the in-flight
-    /// work is complete before finalizing a block and during shutdown.
+    /// Finishes all accepted work, including blocked transactions released by
+    /// predecessor completions, then resets the dependency graph.
     async fn drain(&mut self) -> Result<()> {
         let _timer = metrics::time(Operation::BarrierDrain);
         self.dispatch_ready()?;
@@ -289,9 +288,8 @@ impl Sequencer {
             }
         };
 
-        // Block boundaries synchronize executors:
-        // 1. sysvar writes bypass declared account dependencies and must be ordered
-        // 2. replaying should schedule transactions in their original block
+        // Finish this block before updating sysvars outside the dependency graph
+        // or executing later transactions in the next block's environment.
         self.drain().await?;
         self.executors.transition(block.payload)?;
         self.state.blocks().append(block, self.replay)?;

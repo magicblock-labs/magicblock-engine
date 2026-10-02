@@ -3,10 +3,9 @@ use solana_instruction_error::InstructionError;
 use solana_program_runtime::invoke_context::InvokeContext;
 use solana_svm_log_collector::ic_msg;
 
-/// Runs the post-finalize follow-up instructions, invoking each action via CPI
-/// while vouching for exactly the signers that action itself declares, then
-/// rejects the whole instruction if an account exposed as writable did not end
-/// in a mode this engine may mutate.
+/// Invokes each action as `source_program`, supplying its declared signers.
+/// After the actions, writable accounts must pass the transaction-final
+/// writeback guard, which also accepts dirty transitions to transient or closed.
 pub(crate) fn process(
     ctx: &mut InvokeContext<'_, '_>,
     post_finalize: PostFinalize,

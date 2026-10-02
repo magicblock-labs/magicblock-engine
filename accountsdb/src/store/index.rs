@@ -56,14 +56,14 @@ pub(crate) fn read_txn<'t, 'e>(env: &'e Env, txn: OptRoTxn<'t, 'e>) -> Result<&'
 
 /// Iterator over persisted accounts.
 pub(crate) struct AccountIter<'a> {
-    /// Iterator over `pubkey -> account` entries.
+    /// Iterator over pubkeys and their persisted offsets and owner tags.
     pub(super) inner: RoAccountIter<'a>,
     /// Keeps the read transaction alive for the iterator lifetime.
     pub(super) _txn: RoTxnTls<'a>,
 }
 /// Duplicate iterator over persisted accounts for one owner.
 pub(crate) struct OwnerIter<'a> {
-    /// Duplicates iterator over `owner -> account` entries.
+    /// Iterator over the persisted offsets indexed under one owner tag.
     pub(crate) inner: RoProgramIter<'a>,
     /// Keeps the read transaction alive for the iterator lifetime.
     pub(crate) _txn: RoTxnTls<'a>,
@@ -75,9 +75,9 @@ pub(crate) struct Index {
     pub(super) env: Env,
     /// Account pubkey -> offset + owner keytag.
     pub(super) accounts: Database<PubkeyBytes, OwnerAndOffset>,
-    /// Owner keytag -> offset.
+    /// Owner keytag -> multiple account offsets, stored as duplicate values.
     pub(super) programs: Database<KeyTail, Offset>,
-    /// Image size -> offset.
+    /// Image size in storage units -> multiple free offsets, stored as duplicate values.
     pub(super) freelist: Database<U64LE, Offset, IntegerComparator>,
 }
 

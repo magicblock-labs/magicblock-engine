@@ -1,11 +1,9 @@
 //! Keeper-level test harness shared by keeper and processor test suites.
 //!
-//! Builds a real [`Keeper`] over throwaway directories with the canonical test
-//! parameters (retention disabled, 400 ms blocktime, superblock 16), and exposes
-//! the loadable v42 calculator program guaranteed by `build.rs`. The low-level,
+//! Builds a real [`Keeper`] over temporary directories using [`keeper_builder`]
+//! and exposes the loadable v42 calculator program built by `build.rs`. The low-level,
 //! engine-agnostic builders (transactions, blocks, tempdirs) are re-exported from
-//! [`nucleus::testkit`]. Compiled only under the `testkit` feature (or a crate's
-//! own `cfg(test)`), so it never reaches release builds.
+//! [`nucleus::testkit`]. Available only with the `testkit` feature.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::{

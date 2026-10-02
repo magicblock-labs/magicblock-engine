@@ -3,10 +3,9 @@
 //! Only the primitives that depend on nothing above nucleus live here —
 //! wincode-serialized transactions, block boundaries, and throwaway directories.
 //! Keeper-level harness code (building a `Keeper`, loading the v42 ELF) lives in
-//! `keeper::testkit`. Compiled only under the `testkit` feature, so it never
-//! reaches release builds.
+//! `keeper::testkit`. Available only with the `testkit` feature.
 // Test-support code: a panic here fails the test that caused it, which is the
-// intended reporting path. Kept out of release builds by the `testkit` feature.
+// intended reporting path.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::sync::{Arc, Once};

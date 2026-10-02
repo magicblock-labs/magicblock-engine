@@ -56,7 +56,8 @@ pub enum AccountFieldPatch {
 impl AccountFieldPatch {
     /// Applies this patch to `account`.
     ///
-    /// The account methods mark dirtiness and preserve the writable invariants.
+    /// Tracks changed fields but does not authorize the caller or enforce
+    /// instruction-level write permissions; the runtime must check those.
     /// Invalid mode and slot transitions leave the account unchanged and return
     /// their transition context.
     pub fn apply(self, account: &mut AccountSharedData) -> Result<(), AccountPatchError> {

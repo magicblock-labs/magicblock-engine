@@ -31,7 +31,8 @@ impl TransactionVerifier {
         Self { authority }
     }
 
-    /// Sanitizes, validates, and batch-verifies every transaction atomically.
+    /// Sanitizes the batch, checks private-transaction authority, and verifies
+    /// all signatures. Returns verified inputs only if the entire batch passes.
     pub fn verify(&self, transactions: Vec<Vec<u8>>) -> Result<Vec<VerifiedTransaction>> {
         let verified = transactions
             .into_iter()
@@ -54,11 +55,11 @@ impl TransactionVerifier {
     }
 }
 
-/// Conversion of anything composable into an executable
-/// transaction into a sanitized [`TransactionView`].
+/// Converts instructions, messages, or transaction bytes into a sanitized
+/// [`TransactionView`]. Signature verification happens at submission.
 pub trait IntoTransactionView {
     /// Composes `self` into a sanitized [`TransactionView`], signing with
-    /// `engine`'s authority and latest blockhash where applicable.
+    /// `engine`'s local signer and latest blockhash where applicable.
     fn compose(self, engine: &Engine) -> Result<TransactionView>;
 }
 
@@ -124,10 +125,10 @@ fn signature_data(
         .map(move |(signature, key)| (signature, key.as_ref(), message))
 }
 
-/// The engine's sole signature-verification point.
+/// Verifies each signature for ordinary transaction submission.
 ///
-/// Every public transaction accessor verifies here; trusted local replay is
-/// the only bypass. TODO: Remove the bypass before replaying untrusted ledgers.
+/// Replication uses [`TransactionVerifier`] instead; trusted local-ledger replay
+/// skips verification. Untrusted ledger data must be verified before replay.
 pub(super) fn sigverify(view: &TransactionView) -> Result<()> {
     for (signature, key, message) in signature_data(view) {
         if !signature.verify(key, message) {
@@ -142,8 +143,8 @@ pub(super) fn sigverify(view: &TransactionView) -> Result<()> {
 pub(crate) fn magicblock(instructions: &[Instruction], engine: &Engine) -> Result<Vec<u8>> {
     let message = v1::Message::try_compile(&engine.authority(), instructions, engine.blockhash())?;
     let message = VersionedMessage::V1(message);
-    // These checks are merely future proof defenses, currently it should be
-    // impossible to construct a transaction which might violate any of them
+    // Private transactions have larger payloads but still obey runtime
+    // instruction-trace and account-index limits.
     if message.instructions().len() > MAGICBLOCK_INSTRUCTION_TRACE_LENGTH {
         Err(TransactionError::SanitizeFailure)?;
     } else if message.static_account_keys().len() > MAX_MAGICBLOCK_ACCOUNT_LOCKS {
@@ -162,7 +163,7 @@ pub(crate) fn magicblock(instructions: &[Instruction], engine: &Engine) -> Resul
         message,
     };
     let mut data = wincode::serialize(&transaction).map_err(wincode::Error::from)?;
-    // Patch the transaction prefix to allow for larger tranaction limits
+    // Select the private wire format before signing; its payload limit exceeds V1's.
     data[0] = MAGICBLOCK_PREFIX;
 
     let signature_offset = data.len() - SIGNATURE_SIZE;

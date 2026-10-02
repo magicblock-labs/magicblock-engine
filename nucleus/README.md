@@ -18,7 +18,7 @@ No features are enabled by default. Enable the capabilities your crate needs:
 | `metrics` | Shared metric conventions and timing helpers. |
 | `service` | Metrics and shutdown support together. |
 | `tls` | Thread-local context for privileged runtime operations. |
-| `testkit` | Shared transaction and account fixtures. |
+| `testkit` | Shared transaction, block, and temporary-directory fixtures. |
 
 ## Contracts
 

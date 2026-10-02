@@ -15,7 +15,7 @@ use crate::{ReplicationError, Result};
 /// Wire protocol version accepted by this crate.
 pub const PROTO_VERSION: u32 = 1;
 
-/// Encoded length prefix preceding every control frame.
+/// Size in bytes of the little-endian length prefix preceding each control frame.
 const HEADER_LENGTH: usize = size_of::<u32>();
 /// Largest control frame accepted before allocating its payload.
 const MAX_CONTROL_FRAME_LENGTH: u32 = u16::MAX as u32;
@@ -35,7 +35,7 @@ pub(crate) struct Handshake<P> {
     pub(crate) signature: Signature,
 }
 
-/// Initial follower request identifying its last durable blockstore byte.
+/// Initial follower request identifying the next blockstore byte it needs.
 #[derive(SchemaRead, SchemaWrite)]
 pub(crate) struct HandshakeRequest {
     /// Wire version understood by the follower.

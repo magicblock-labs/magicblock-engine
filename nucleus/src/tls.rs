@@ -15,7 +15,7 @@ pub type EncodedMessage = Vec<u8>;
 thread_local! {
     /// Per-thread queue for messages emitted while a transaction executes.
     pub static TLS: RefCell<TlsManager> = RefCell::new(Default::default());
-    /// Signer authorized to invoke the MagicRoot program on the current thread.
+    /// Authority pubkey required as the payer for MagicRoot calls on this thread.
     pub static AUTHORITY: Cell<Pubkey> = Cell::new(Default::default());
 }
 

@@ -38,7 +38,7 @@ pub struct ReplicationDispatcher {
     engine: Engine,
     /// List of follower identities permitted to replicate.
     allowed: Arc<HashMap<Pubkey, Arc<()>>>,
-    /// Cancels the accept loop and parents every per-connection worker.
+    /// Cancels the accept loop and supplies child cancellation tokens to connection workers.
     shutdown: ShutdownHandle,
 }
 
@@ -52,7 +52,7 @@ struct ReplicationServer {
     /// Engine whose local signer authenticates responses and whose ledger is served.
     #[deref]
     engine: Engine,
-    /// Local follower identities permitted to replicate.
+    /// Allowed follower identities and their active-stream reservations.
     allowed: Arc<HashMap<Pubkey, Arc<()>>>,
     /// Fires when the dispatcher shuts down.
     cancellation: CancellationToken,

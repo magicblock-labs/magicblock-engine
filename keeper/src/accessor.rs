@@ -81,7 +81,7 @@ impl<'a> AccountsAccessor<'a> {
         self.keeper.subscriptions.snapshots.subscribe(())
     }
 
-    /// Updates durable `SlotHashes` and `Clock` sysvar accounts from `block`.
+    /// Updates stored `SlotHashes` and `Clock` sysvar accounts from `block`.
     ///
     /// If either sysvar account is absent, no account updates are stored.
     pub fn update_sysvars(&self, block: Block) -> Result<()> {
@@ -302,7 +302,8 @@ impl<'a> BlocksAccessor<'a> {
         self.keeper.caches.blocks.latest.load().slot + 1
     }
 
-    /// Returns whether `hash` is in the recent block hash cache (still valid).
+    /// Returns whether `hash` remains in the recent blockhash cache.
+    /// Expired entries remain accepted until a cache push sweeps them.
     pub fn is_valid(&self, hash: &Hash) -> bool {
         self.keeper.caches.blocks.history.contains(hash)
     }

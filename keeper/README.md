@@ -14,8 +14,9 @@ upstream authority whose records it authenticates; the two identities need not
 be the same. Retain the configured identities across restart.
 
 The effective authority identifies the engine-local sponsor account. Its balance
-survives restart and is replenished on reset. Existing deployments must retain
-that account rather than relying on startup to recreate missing funding state.
+is preserved when the account already exists. Startup seeds an absent sponsor
+with the initial sponsor balance; reset restores that balance on an existing
+sponsor. Reseeding does not recover a missing account's previous balance.
 
 ## Caches and subscriptions
 

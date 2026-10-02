@@ -1,9 +1,6 @@
-//! Account CRUD through the MagicRoot builtin — the privileged mutation path
-//! exposed by `AccountAccessor`. This path is untested below the engine: it needs
-//! the always-on MagicRoot builtin plus the executor's per-thread authority
-//! (MagicRoot authorizes the transaction's fee payer against it). Asserts the
-//! materialize/delete round-trip and the sponsor-balance invariant, and
-//! that post-finalize actions actually run.
+//! Account materialization and deletion through Engine's MagicRoot builtin.
+//! Covers lifecycle validation, sponsor funding, executable caching, atomic
+//! post-finalize actions, and lease retention when callers stop waiting.
 #![cfg(test)]
 
 use std::time::Duration;

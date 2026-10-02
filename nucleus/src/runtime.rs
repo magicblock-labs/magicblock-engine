@@ -1,8 +1,5 @@
-//! Runtime-facing shared types: transaction views, execution I/O, scheduling
-//! messages, and the schema of the engine's built-in MagicRoot program (its
-//! address, instruction set, and authority). The MagicRoot execution logic
-//! lives in the `magic-root-program` crate, which depends on these shared
-//! definitions.
+//! Transaction views, execution results, submission messages, and quiescence
+//! barriers shared by Engine's scheduling and execution paths.
 
 use std::sync::Arc;
 

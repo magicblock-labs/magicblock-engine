@@ -1,6 +1,6 @@
 //! Raw layout used by the borrowed zero-copy account view.
 //!
-//! The buffer is 8-byte aligned and contains a header followed by two images.
+//! The 8-byte-aligned buffer contains a header, a shared pubkey, and two images.
 //! `AccountHeader::sequence` selects the active image; `translate` copies it to the shadow
 //! image, `reset` repoints the view to the active image, `commit` publishes the shadow image,
 //! and `rollback` undoes that publication by decrementing the sequence counter.
@@ -25,12 +25,12 @@ pub(super) const STATIC_SIZE: usize = size_of::<AccountCore>() + size_of::<DataH
 pub(super) const IMAGE_OFFSET: usize =
     (size_of::<AccountHeader>() + size_of::<Pubkey>()) / STORAGE_UNIT;
 
-/// Header that prefixes a double-allocation borrowed account buffer.
+/// Header selecting the active image in a two-image borrowed account buffer.
 #[repr(C, align(8))]
 pub(crate) struct AccountHeader {
     /// Sequence counter; parity selects the active image.
     pub(crate) sequence: AtomicU32,
-    /// Image size measured in `AccountHeader` units.
+    /// Size of each image in 8-byte storage units, excluding the shared prefix.
     pub(crate) space: u32,
 }
 
@@ -53,20 +53,20 @@ const _: () = assert!((size_of::<Pubkey>() + STORAGE_UNIT) / ALIGNMENT == IMAGE_
 pub struct BorrowedAccount {
     /// Header pointer for the borrowed buffer.
     pub(crate) header: NonNull<AccountHeader>,
-    /// Pointer to the active image's account core.
+    /// Account core for this view: active when initialized, shadow after translation.
     pub(crate) core: NonNull<AccountCore>,
-    /// Borrowed data bytes for the active image.
+    /// Data bytes from the same image as `core`.
     pub(crate) data: DataSlice,
     /// Sequence used to select this view's image.
     pub(crate) version: u32,
 }
 
-/// Returns the byte offset for the active or shadow image.
+/// Returns the offset in storage units for the active or shadow image.
 #[inline]
 fn offset(space: u32, sequence: u32, active: bool) -> usize {
     // Even sequence => image A is active, odd sequence => image B is active.
     let even = sequence.is_multiple_of(2);
-    // Flip to the shadow image when `active` does not match the current parity.
+    // Select image B for an odd active sequence or an even shadow sequence.
     let step = (active ^ even) as u32;
     (step * space) as usize + IMAGE_OFFSET
 }
@@ -88,7 +88,7 @@ impl BorrowedAccount {
         space * 2 + IMAGE_OFFSET as u32
     }
 
-    /// Reads the account's pubkey stored in the image prefix.
+    /// Reads the shared pubkey stored between the header and the first image.
     ///
     /// # Safety
     ///
@@ -103,9 +103,10 @@ impl BorrowedAccount {
     /// # Safety
     ///
     /// `buffer` must be 8-byte aligned and point to a valid borrowed account
-    /// buffer whose first bytes are the account header, followed by two
-    /// image-sized payloads. The active image is selected from the header
-    /// sequence parity.
+    /// buffer created by [`OwnedAccount::serialize`]: header, shared pubkey,
+    /// and two image-sized payloads. Keep the buffer live and at the same address
+    /// for every use of the returned view. Mutation requires exclusive writer
+    /// access; reads racing publication require [`super::AccountSeqLock`].
     pub unsafe fn init(buffer: NonNull<StorageUnit>) -> Self {
         let header = buffer.cast::<AccountHeader>();
         let version = header.as_ref().sequence.load(Acquire);
@@ -121,7 +122,8 @@ impl BorrowedAccount {
     ///
     /// # Safety
     ///
-    /// The borrowed image must still be the one selected by `init`.
+    /// This view must still point to the current active image selected by
+    /// `init` or `reset`. The caller must hold exclusive writer access.
     pub unsafe fn translate(&mut self) {
         let offset = offset(self.header.as_ref().space, self.version, false);
 
@@ -165,30 +167,32 @@ impl BorrowedAccount {
         self.data = DataSlice::init(self.core.add(1).cast());
     }
 
-    /// Undoes the latest commit, by adjusting the sequence counter
+    /// Restores the previous active image by decrementing the sequence counter.
     ///
     /// # Safety
     ///
-    /// Call this only after `commit` to avoid data corruption;
+    /// Call only after this view successfully published the latest commit,
+    /// with no intervening publication or write to the previous image.
+    /// Exclusive writer access must be retained through rollback.
     pub unsafe fn rollback(&self) {
         // SAFETY: the header is part of the borrowed buffer for the lifetime of `self`.
         unsafe { self.header.as_ref().sequence.fetch_sub(1, Release) };
     }
 
-    /// Returns the owner pubkey from the active image.
+    /// Returns the owner pubkey from this view's selected image.
     pub fn owner(&self) -> Pubkey {
         // SAFETY: `core` points at a live `AccountCore` inside the borrowed buffer.
         unsafe { self.core.as_ref() }.owner
     }
 
-    /// Returns the serialized active image bytes that define account state.
+    /// Returns the serialized state bytes from this view's selected image.
     ///
     /// The slice starts at `AccountCore`, includes the `DataHeader`, and stops
     /// after initialized data. It excludes the shared header, pubkey prefix,
     /// inactive shadow image, and spare data capacity.
     pub fn storage(&self) -> &[u8] {
         let len = STATIC_SIZE + self.data.len();
-        // SAFETY: `core` points at the active image and `len` only covers its
+        // SAFETY: `core` points at this view's image and `len` only covers its
         // initialized state bytes: core, data header, and initialized data.
         unsafe { slice::from_raw_parts(self.core.as_ptr().cast(), len) }
     }

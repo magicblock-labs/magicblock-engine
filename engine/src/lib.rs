@@ -57,10 +57,9 @@ pub struct Engine {
 impl Engine {
     /// Builds and starts the engine.
     ///
-    /// Opens durable state through the keeper builder (coming up on persisted
-    /// state), replays retained ledger entries to rebuild volatile state only when
-    /// recovering from a rewound accountsdb, starts the live sequencer, and spawns
-    /// the pacemaker using the builder's blockstore timing.
+    /// Opens and validates storage through Keeper. If recovered account state
+    /// trails the ledger, replays retained entries to restore account state and
+    /// cached results before starting live execution and block pacing.
     pub async fn new(
         mut builder: KeeperBuilder,
         pacer: Option<ExternalPacer>,

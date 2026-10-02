@@ -401,9 +401,9 @@ async fn test_large_transaction_roundtrip() {
     }
 }
 
-// A transaction stays pending until its execution arrives: sealed into a block
-// without one, it is never indexed (a record is never half-written); and an
-// execution whose transaction never appeared is silently dropped.
+// Only paired transaction and execution records are indexed. An unpaired
+// transaction remains in the raw blockstore but is absent from indexed queries;
+// an execution without a pending transaction is dropped.
 #[tokio::test]
 async fn test_pending_requires_execution() {
     let (_dir, ledger) = ledger(u64::MAX);
@@ -419,7 +419,7 @@ async fn test_pending_requires_execution() {
         }),
         executed(indexed, &indexed_bytes, 1, Ok(())),
         // Transaction with no execution: written to the blockstore but never
-        // indexed, so no read surface can resolve it.
+        // indexed, so transaction and block lookups cannot resolve it.
         Event::Transaction(TransactionEntry {
             signature: orphan,
             payload: orphan_bytes,

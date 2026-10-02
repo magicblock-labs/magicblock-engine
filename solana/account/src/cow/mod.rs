@@ -30,10 +30,11 @@ pub const STORAGE_UNIT: usize = size_of::<StorageUnit>();
 #[derive(Clone, Copy, Default)]
 pub struct StorageUnit(pub u64);
 
-/// Shared account data that borrows directly from an aligned external buffer
-/// until a write requires promotion to owned heap storage.
+/// Copy-on-write account state backed by owned data or an aligned external buffer.
+/// Borrowed writes use the shadow image until growth exceeds its capacity.
 ///
-/// Higher layers use `mutable()` to enforce transaction write permissions.
+/// Instruction mutation checks use [`AccountMode::mutable`]; [`Self::mutable`]
+/// is the separate transaction-final writeback guard.
 #[cfg_attr(feature = "serde", derive(serde::Deserialize), serde(from = "Account"))]
 #[derive(Clone, Default)]
 pub struct AccountSharedData {
@@ -52,9 +53,9 @@ pub struct AccountCore {
     pub(crate) lamports: u64,
     /// Account owner.
     pub(crate) owner: Pubkey,
-    /// On-chain slot, at which the account was cloned.
+    /// Source slot associated with the latest privileged lifecycle update.
     pub(crate) slot: Slot,
-    /// Mutually exclusive mode of existence for the account.
+    /// Lifecycle mode governing mutability and authority.
     pub(crate) mode: AccountMode,
     /// Account state modifier flags.
     pub(crate) flags: StateFlags,
@@ -114,7 +115,7 @@ impl AccountSharedData {
         &mut self.cow
     }
 
-    /// Returns the account's on-chain slot.
+    /// Returns the source slot associated with the account's lifecycle state.
     pub fn slot(&self) -> Slot {
         self.slot
     }
@@ -440,7 +441,7 @@ const _: () = {
 /// Backing storage for `AccountSharedData`.
 #[derive(PartialEq, Eq)]
 pub enum CoWAccount {
-    /// Borrowed image, a view into static backing buffer.
+    /// View into caller-owned storage, whose lifetime is upheld externally.
     Borrowed(BorrowedAccount),
     /// Heap-owned image.
     Owned(OwnedAccount),
@@ -496,7 +497,7 @@ impl CoWAccount {
         }
     }
 
-    /// Returns mutable data, promoting borrowed storage only when needed.
+    /// Borrows data in place; shared owned buffers are copied before mutation.
     pub(crate) fn data_mut(&mut self) -> &mut [u8] {
         match self {
             Self::Borrowed(account) => &mut account.data,
@@ -574,18 +575,18 @@ impl CoWAccount {
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[cfg_attr(feature = "wincode", derive(wincode::SchemaRead, wincode::SchemaWrite))]
 pub enum AccountMode {
-    /// Empty account (not found on chain) used to avoid frequent chain syncs.
+    /// Cached absence of an external account, allowing callers to avoid repeated fetches.
     #[default]
     Uninit = 0,
-    /// Not writable by users (exists on chain, but not delegated)
+    /// Mirrored external account that user programs may read but not mutate.
     ReadOnly,
     /// Internal account used for sysvars, features, and precompiles.
     System,
     /// Account delegated to the current ER node instance.
     Delegated,
-    /// Account that exists only inside the ER, such as a locally created ATA.
+    /// User-mutable, engine-authoritative account created inside the ER.
     Magic,
-    /// Temporary state during mode transitions (e.g. delegated -> readonly).
+    /// Engine-authoritative but user-immutable state awaiting lifecycle resolution.
     Transient,
     /// Closed account that should be removed from storage.
     Closed = 255,
@@ -753,6 +754,7 @@ impl From<Account> for AccountSharedData {
     }
 }
 
-/// We only access AccountSharedData via transaction lock in the
-/// execution layer or with a SeqLock semantics outside of execution
+// SAFETY: callers serialize borrowed mutations through transaction account
+// ownership and use AccountSeqLock for concurrent reads. The external storage
+// must remain live and cannot be relocated or reused while views access it.
 unsafe impl Sync for AccountSharedData {}

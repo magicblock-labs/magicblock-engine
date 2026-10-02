@@ -1,8 +1,6 @@
-//! Transaction submission at the engine boundary: the `execute`, `simulate`, and
-//! `schedule` wrappers around the sequencer. The processor suite already proves
-//! the SVM commits/simulates correctly; these assert the `TransactionAccessor`
-//! ergonomics on top — request-owned completion, the separate simulation
-//! channel that never commits, and fire-and-forget scheduling.
+//! Engine transaction submission: request-owned execution results, simulation
+//! without account commits, and queue-only scheduling. Also covers retained
+//! receipts, signature observers, duplicate admission, and client wire formats.
 #![cfg(test)]
 
 use agave_transaction_view::MAX_STANDARD_TRANSACTION_SIZE;

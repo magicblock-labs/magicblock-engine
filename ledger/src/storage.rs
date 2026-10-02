@@ -108,7 +108,8 @@ impl AppendFile {
         Ok(())
     }
 
-    /// Persists buffered bytes at `durability` and returns the published cursor.
+    /// Flushes buffered bytes and returns their end offset. Synchronizes file
+    /// data only when `durability` requires it; metadata publication is separate.
     pub(crate) fn persist(&mut self, durability: Durability) -> Result<u64> {
         if self.len.saturating_sub(self.cursor) < PREALLOCATION_THRESHOLD {
             self.preallocate()?;

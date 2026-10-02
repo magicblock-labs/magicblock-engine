@@ -46,7 +46,7 @@ impl Hole {
     }
 }
 
-/// Adjacent entry-time holes treated as one packing destination.
+/// Adjacent holes present at the start of a pass, combined as one destination.
 struct Run {
     parts: Range<usize>,
     offset: Offset,
@@ -116,7 +116,7 @@ impl PersistedStore {
 }
 
 impl<'a> Defrag<'a> {
-    /// Reads a consistent entry-time layout and plans tail-to-left moves.
+    /// Captures the starting layout and plans moves from the tail into earlier holes.
     ///
     /// # Safety
     ///

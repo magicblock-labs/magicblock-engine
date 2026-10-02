@@ -387,7 +387,7 @@ fn test_account_cow_set_data_from_slice_shrinks() {
 }
 
 #[test]
-// Cloning should share storage until a write forces promotion.
+// Owned clones share their data until a write copies the shared buffer.
 fn test_account_cow_is_copy_on_write() {
     let owner = Pubkey::new_unique();
     let mut shared = AccountSharedData::new(1, 2, &owner);

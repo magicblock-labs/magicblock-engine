@@ -162,7 +162,7 @@ pub struct ExecutionHeader {
 pub struct Execution {
     /// Fixed prefix used for cheap signature and error reads.
     pub header: ExecutionHeader,
-    /// Execution details stored in the compressed payload.
+    /// Execution details, or `None` when omitted by the appender's size limit.
     pub details: Option<ExecutionDetails>,
 }
 
@@ -171,7 +171,7 @@ pub struct Execution {
 pub struct ExecutionDetails {
     /// Fee charged for the transaction.
     pub fee: u64,
-    /// Pre/post balance deltas encoded in a compact prototype layout.
+    /// Lamport balances before and after execution, in transaction account order.
     pub balances: Balances,
     /// Log messages emitted during execution.
     pub logs: Arc<Vec<String>>,

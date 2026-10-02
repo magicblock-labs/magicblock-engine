@@ -64,8 +64,8 @@ pub(crate) struct TransactionExecutor {
     state: Arc<Keeper>,
     /// Handle used to report cooperative shutdown for this worker.
     shutdown: ShutdownHandle,
-    /// Whether the executor runs in ledger-replay mode: when set, only state
-    /// transitions are committed directly instead of recording full execution.
+    /// Replay commits account state and caches results without appending ledger
+    /// records or publishing live notifications.
     replay: bool,
 }
 
@@ -169,8 +169,8 @@ impl TransactionExecutor {
         self.shutdown.terminate(reason);
     }
 
-    /// Loads and executes one transaction through the SVM, committing either
-    /// its raw state transition (replay) or full execution.
+    /// Executes and commits one transaction, caching its result. Replay omits
+    /// ledger appends and live notifications.
     fn process(&mut self, request: ExecutionRequest) -> Result<()> {
         let ExecutionRequest { transaction: txn, response } = request;
         let accounts = self.state.accounts();

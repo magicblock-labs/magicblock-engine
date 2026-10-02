@@ -25,7 +25,7 @@ pub enum EngineError {
     /// An account completion task panicked or was cancelled, not proof of rollback.
     #[error("account completion task failed: {0}")]
     Task(#[source] JoinError),
-    /// Replaying the ledger into volatile state on startup failed.
+    /// Rebuilding account state from retained ledger entries on startup failed.
     #[error("replay error: {0}")]
     Replay(#[source] ReplayError),
     /// A background service is no longer reachable.
