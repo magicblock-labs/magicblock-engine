@@ -1,9 +1,7 @@
 # Engine Runtime Differences from Agave
 
 This directory contains the Agave runtime forks required by the engine. These
-crates execute caller-loaded transactions and return account changes; they do
-not own consensus, fork choice, confirmation, persistence, or validator commit
-policy.
+crates execute caller-loaded transactions and return account changes.
 
 The current upstream baseline is Agave **4.2.2**, with SDK account **4.3.1**.
 See [the upgrade disposition](UPSTREAM-4.2.2.md) for ports and intentional omissions.
@@ -15,10 +13,10 @@ representation, transaction context, serialization, VM mapping, and CPI.
 
 - `solana-svm` loads accounts through a caller callback and returns execution
   results and mutated accounts.
-- Persistence, commit decisions, and deployment policy remain outside the fork.
+- Callers own persistence, commit decisions, and deployment policy.
 - Program loading is limited to programs required by the transaction. Callers
-  supply executable SBF account data as raw ELF bytes; decoding loader-specific
-  headers or indirection remains outside the runtime.
+  decode loader-specific headers and indirection to supply executable SBF account
+  data as raw ELF bytes.
 - Deprecated SBF programs retain their loader owner for ABI v0. Other normalized
   SBF programs use loader-v4 as their nominal owner and ABI v1. Native programs
   retain native-loader ownership.
@@ -151,5 +149,3 @@ handling together.
 - Do not enable address lookup resolution without revisiting ingress,
   sanitization, scheduling, and simulation together.
 - Treat dirty markers and touched flags as the caller's writeback signal.
-- Keep persistence, consensus, validator fee policy, and batch commit decisions
-  outside these runtime crates.

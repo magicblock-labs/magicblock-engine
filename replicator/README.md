@@ -2,8 +2,7 @@
 
 Keep another Engine deployment in step with a source over TCP. Replication
 streams ordered execution history, authenticates the source, and checks that the
-follower reconstructs matching state. It provides neither consensus nor automatic
-failover.
+follower reconstructs matching state.
 
 ## Connecting a follower
 
@@ -23,8 +22,7 @@ connection workflow.
 
 Followers may have their own local signing keys, but verify records against the
 source authority and preserve the source's signatures in retained history.
-Invalid signatures or detected state divergence stop replication; they are not
-transport errors to retry or a request to repair state automatically.
+Invalid signatures or detected state divergence are terminal replication errors.
 
 Block validation checks ordered transaction history. Full superblocks and
 checksum-only checkpoints additionally compare persisted state. These checks do
@@ -43,7 +41,7 @@ retains that history. Otherwise it stages an available snapshot and asks the hos
 to restart; reopening installs the snapshot before consuming its remaining tail.
 Snapshot progress may exceed the follower's locally retained transaction history.
 
-Reconnect preserves stream order and does not repeat already applied work.
+Reconnect resumes after already applied work, preserving stream order.
 Upstream resets discard mirrored volatile state while preserving internal system
 accounts and authoritative state.
 
@@ -52,5 +50,4 @@ position. A checkpoint after that block remains pending until reconnect. This
 requires the source's block heartbeat, reconnecting first if necessary; failure
 and snapshot-restart paths do not promise the same graceful boundary.
 
-Replication peers must agree on record formats and execution semantics. Valid
-signatures alone do not make incompatible runtimes interchangeable.
+Replication peers must agree on record formats and execution semantics.

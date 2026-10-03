@@ -11,6 +11,6 @@ return program errors rather than successful partial results.
 
 The transfer fixture changes lamports and stored calculator values on two
 program-owned writable accounts. It deliberately uses wrapping arithmetic and
-does not require account signatures; it is not a production transfer program.
+does not require account signatures.
 
 The program is built with the SBF toolchain and used by Keeper's test fixtures.

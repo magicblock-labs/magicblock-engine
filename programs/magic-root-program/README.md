@@ -30,5 +30,4 @@ Replacement and follow-up account changes are transactional: rejected patches,
 failed executable loading, or failed actions roll them back. Follow-up actions
 cannot target MagicRoot or mark immutable accounts writable.
 
-Authority is not proof that an account image is current. The host remains
-responsible for freshness, replacement eligibility, and action provenance.
+The host validates freshness, replacement eligibility, and action provenance.

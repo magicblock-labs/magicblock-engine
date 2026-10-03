@@ -5,8 +5,8 @@ work across SVM executors and commits results through Keeper, preserving input
 order for conflicting accounts while allowing independent work to run in parallel.
 
 Request completion distinguishes admission rejection from committed execution.
-Fire-and-forget submission does not provide an execution result. Live observers
-are separate from request completion and cannot delay its acknowledgment.
+Fire-and-forget submission acknowledges queueing. Request completion is
+independent of live observers consuming their notifications.
 
 Block boundaries drain preceding execution before publication. Replication and
 recovery validate the same ordered transaction history rather than replacing
@@ -28,4 +28,4 @@ relocation.
 
 Simulation executes against account copies and returns an execution record
 without committing account changes or appending history. It shares the engine's
-runtime environment but is not a substitute for admission and committed execution.
+runtime environment.

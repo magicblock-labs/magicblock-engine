@@ -2,7 +2,7 @@
 
 Embed `Engine` to execute Solana transactions, simulate them without committing,
 and manage local account state. It combines ordered execution, storage, live
-subscriptions, and recovery without introducing validator consensus or fork choice.
+subscriptions, and recovery.
 Start with the [workspace guide](../README.md) for integration examples.
 
 ## Opening an engine
@@ -22,12 +22,12 @@ Choose the completion boundary your application needs:
 | Method | Result |
 | :-- | :-- |
 | `execute` | Admission rejection or committed execution result. |
-| `schedule` | Queueing acknowledgment, not admission or execution success. |
+| `schedule` | Queueing acknowledgment. |
 | `simulate` | Execution against account copies, without committing changes. |
 
-Signature subscriptions observe execution results, not admission rejections.
+Signature subscriptions observe execution results.
 Scheduling can therefore discard rejected work without notifying a signature
-observer. Retained status and duplicate protection are bounded, not permanent.
+observer. Retained status and duplicate protection are bounded by retention.
 
 Cancelling a wait does not cancel submitted work, and Engine imposes no internal
 execution deadline. A lost completion or infrastructure failure is not evidence
@@ -46,8 +46,7 @@ require the local signer to match the engine authority.
 Use `missing_accounts` to scan a batch for absent accounts and retain leases
 only for those still absent after acquisition. Each accessor exposes `pubkey()`
 to match it to a request and `exists()` to report whether the account was present
-at acquisition. It does not perform a fresh lookup.
-It does not select transient accounts for refresh. For direct updates, `account`
+at acquisition. For refreshing transient accounts or other direct updates, `account`
 returns an accessor whose `observed()` mode and slot can inform caller-owned
 eligibility policy. The observation is captured after lease acquisition; ordinary
 transactions can still change the account afterward. Engine handles mode-and-slot
@@ -55,8 +54,7 @@ deduplication against that same observation.
 
 Replacement and its follow-up actions execute atomically. The host must validate
 source freshness, creation or replacement eligibility, and action provenance;
-Engine enforces the [account lifecycle](../solana/account/README.md), not base-chain
-confirmation or application-specific token rules.
+Engine enforces the [account lifecycle](../solana/account/README.md).
 An older image or one matching the observed mode and slot is skipped without
 running follow-up actions. Thus `materialize` success means applied or skipped as
 already handled or superseded; a different-mode image at the same slot still
@@ -78,8 +76,7 @@ rolls back replacement and follow-up account changes.
 [Keeper](../keeper/README.md#startup-and-recovery) restores usable account state;
 Engine replays retained history when needed, without duplicating ledger records
 or live notifications. State mismatches refuse startup rather than silently
-accepting divergence. Recovery depends on retained snapshots and history, not
-an arbitrary-crash recovery guarantee.
+accepting divergence. Recovery depends on valid retained snapshots and history.
 
 Full superblocks provide snapshot and recovery boundaries. Optional checksum
 checkpoints detect persisted-state divergence between them, without snapshotting

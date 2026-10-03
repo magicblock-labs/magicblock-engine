@@ -2,8 +2,8 @@
 
 Engine account values, lifecycle rules, and copy-on-write access to owned or
 borrowed data. This fork lets execution work directly with external storage while
-tracking changes for transactional writeback. It does not decide how state is
-persisted or whether an external account image is trustworthy.
+tracking changes for transactional writeback. Callers own persistence and source
+validation.
 
 Equality compares account state and data, not storage representation or dirty
 markers. The `testkit` feature provides account and borrowed-storage fixtures.
@@ -33,13 +33,13 @@ dirty markers. Authoritative accounts cannot be replaced in the same mode, even
 at a newer slot; ordinary transaction mutations are unaffected.
 
 Magic represents authoritative state created inside the ER. It must be closed
-before another account image can occupy its key. The host validates creation and
-closure eligibility. Empty token balances do not invalidate Magic accounts, and
-this crate does not interpret token data.
+before another account image can occupy its key, regardless of token balance.
+The host validates creation and closure eligibility, including application-specific
+token rules.
 
 Flags are supplied as a complete value during privileged finalization, which
-does not change lamports. They are not evidence of source freshness. Producers
-and consumers must agree on lifecycle semantics as well as binary encoding.
+preserves lamports. The host validates source freshness. Producers and consumers
+must agree on lifecycle semantics as well as binary encoding.
 
 ## Borrowed storage
 

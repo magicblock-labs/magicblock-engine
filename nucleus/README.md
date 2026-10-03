@@ -1,12 +1,11 @@
 # `magicblock-engine-nucleus`
 
 Shared vocabulary and utilities for Engine crates: configuration, execution
-requests, signed ledger records, service lifecycle, and observability. This crate
-does not execute transactions or decide how account state is persisted.
+requests, signed ledger records, service lifecycle, and observability.
 
 ## Features
 
-No features are enabled by default. Enable the capabilities your crate needs:
+Capabilities are opt-in through features:
 
 | Feature | Purpose |
 | :-- | :-- |
@@ -30,5 +29,4 @@ payloads.
 
 Coordinated shutdown waits for service completion and retains failures reported
 during draining. Dropping the manager requests cancellation but does not wait for
-durable completion. Request-owned execution replies are local observations, not
-part of persisted or replicated transaction data.
+durable completion. Request-owned execution replies are local observations.

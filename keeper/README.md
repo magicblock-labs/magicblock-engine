@@ -10,8 +10,8 @@ initial state; most applications access the resulting services through `Engine`.
 ## Authority
 
 Local identity signs locally produced records. A follower also has an effective
-upstream authority whose records it authenticates; the two identities need not
-be the same. Retain the configured identities across restart.
+upstream authority whose records it authenticates. Retain the configured
+identities across restart.
 
 The effective authority identifies the engine-local sponsor account. Its balance
 is preserved when the account already exists. Startup seeds an absent sponsor
@@ -29,13 +29,12 @@ contracts differ, so consumers must handle backpressure appropriately:
 | Accounts, programs, logs, blocks, completed snapshots | Multicast; slow receivers are disconnected. |
 | Processed transactions, service messages, cache evictions | One receiver per process lifetime; unbounded queues never block producers. |
 
-Signature observers report execution results, not admission rejections. Request
-completion does not depend on observers consuming their notifications. Account
-updates delivered to subscribers do not retain borrowed storage views.
+Signature observers report execution results. Admission rejections are returned
+through request completion, which is independent of notification consumption.
+Account updates delivered to subscribers own their account data.
 
-Recent results and duplicate protection are bounded by slot-based retention,
-not permanent transaction history. Account-cache eviction must not discard
-unresolved engine-authoritative state.
+Recent results and duplicate protection are bounded by slot-based retention.
+Account-cache eviction must preserve unresolved engine-authoritative state.
 
 ## Startup and recovery
 
@@ -45,8 +44,8 @@ restores a retained snapshot; Engine then replays the remaining ledger history.
 Recovery depends on valid retained state and may fail rather than open an
 inconsistent engine.
 
-Restart does not restore every live cache. Leaders resume with the latest
-blockhash and without the previous processed-signature cache; followers recover
+Leaders resume with the latest blockhash and an empty processed-signature cache;
+followers recover
 bounded duplicate protection from retained history. Recovered signatures do not
 necessarily have retained execution results. Snapshot bootstrap may also leave
 account-state transaction counts ahead of locally retained history.

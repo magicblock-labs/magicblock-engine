@@ -20,8 +20,7 @@ combines the SVM with persistent account state, transaction history, live
 subscriptions, and replication: the execution foundation for ephemeral rollups.
 
 Your application chooses what to execute and when. Engine runs the transactions
-and keeps track of the resulting state. It is an embeddable library, not a
-validator; consensus, fork choice, and confirmation policy remain with the host.
+and keeps track of the resulting state.
 
 ## ✨ Engine in practice
 
@@ -51,7 +50,7 @@ See [startup configuration](keeper/README.md#startup-and-recovery).
 
 Submit instructions or an already signed transaction. Independent transactions
 run in parallel, while conflicting account accesses retain their canonical
-order. Your application does not have to schedule those dependencies itself.
+order.
 Choose one of these submission modes:
 
 ```rust
@@ -70,8 +69,7 @@ Cancelling a wait does not cancel submitted execution. See
 ### 📦 Keep local state durable and mirrored state lightweight
 
 Accounts controlled by the engine live on disk; external-chain copies live in
-memory. Storage follows the account lifecycle, so applications do not have to
-coordinate the two backends themselves.
+memory. Engine coordinates both backends according to the account lifecycle.
 
 Import an account image, optionally applying follow-up instructions in the same
 transaction. This lets account activation and the work that depends on it succeed
@@ -81,9 +79,9 @@ or fail together.
 engine.account(key).await?.materialize(account, actions).await?;
 ```
 
-The host supplies and verifies external-chain state. Replacement respects
-delegation and lifecycle rules, not just which image is newer, and requires the
-local signer to match the engine authority. If a submitted operation times out,
+The host supplies and verifies external-chain state. Replacement enforces
+delegation, lifecycle, and slot rules, and requires the local signer to match the
+engine authority. If a submitted operation times out,
 reacquire the accessor and reconcile the account state before retrying. See
 [account replacement](engine/README.md#account-replacement).
 
@@ -108,8 +106,7 @@ disconnected. Other streams have different delivery guarantees. See
 ### 🔁 Keep another deployment in step
 
 A source serves execution history over TCP, and followers replay it locally.
-This gives you another copy of execution state without building your own
-transaction-streaming and snapshot-transfer machinery.
+Engine handles transaction streaming and snapshot transfer.
 
 ```text
 Source:   allow follower identities → serve retained history
@@ -117,8 +114,8 @@ Follower: trust source authority → follow its transactions and block boundarie
 ```
 
 Followers resume from their durable position. When that history has expired,
-they receive a snapshot and ask the host to restart from it. This is replication,
-not automatic failover or consensus. See [follower setup](replicator/README.md#connecting-a-follower)
+they receive a snapshot and ask the host to restart from it.
+See [follower setup](replicator/README.md#connecting-a-follower)
 for identities, pacing, and connection requirements.
 
 ### 🩹 Stop cleanly and recover on restart

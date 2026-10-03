@@ -20,4 +20,4 @@ untrusted instructions, grants no extra signers, and is not inherited by nested
 calls, later siblings, or follow-up actions. Ordinary native CPI and caller
 provenance do not grant MagicRoot access.
 
-The `frozen-abi` feature is a compatibility stub, not frozen-ABI validation.
+The `frozen-abi` feature is a compatibility stub.

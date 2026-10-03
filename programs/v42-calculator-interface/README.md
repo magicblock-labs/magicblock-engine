@@ -11,4 +11,4 @@ start after it, including in nested calls.
 
 Transfer instructions apply a signed delta to two distinct writable calculator
 accounts, changing both lamports and stored values. Negative deltas reverse the
-direction. These are test fixtures, not a production token-transfer interface.
+direction.

@@ -36,11 +36,10 @@ Replay starts after the last sealed superblock already represented in the
 consumer's state and proceeds through retained history. Consumers that fall
 behind retention need a snapshot or another recovery source.
 
-Retention removes sealed history, never the active superblock. Its size limit
-measures used space on the ledger filesystem, so a dedicated filesystem is
+Retention removes sealed history and preserves the active superblock. Its size
+limit measures used space on the ledger filesystem, so a dedicated filesystem is
 expected: unrelated files can trigger earlier retention. In-flight readers may
 delay physical space reclamation.
 
-Storage and replication participants must agree on record encoding and meaning.
-Changing persisted formats is a compatibility decision, not an implementation
-cleanup.
+Storage and replication participants must agree on record encoding and meaning,
+including across persisted format changes.
