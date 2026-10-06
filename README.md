@@ -17,7 +17,7 @@
 
 MagicBlock Engine brings Solana program execution into your Rust service. It
 combines the SVM with persistent account state, transaction history, live
-subscriptions, and replication: the execution foundation for ephemeral rollups.
+subscriptions, and replication.
 
 Your application chooses what to execute and when. Engine runs the transactions
 and keeps track of the resulting state.
@@ -43,15 +43,14 @@ let engine = Engine::new(builder, None, &mut shutdown).await?;
 ```
 
 Keep the engine and its shutdown manager alive while serving requests. Reuse the
-same storage directories and authority identity when reopening a deployment.
+same storage directories and configured identities when reopening a deployment.
 See [startup configuration](keeper/README.md#startup-and-recovery).
 
 ### ⚡ Execute in parallel, or simulate first
 
-Submit instructions or an already signed transaction. Independent transactions
-run in parallel, while conflicting account accesses retain their canonical
-order.
-Choose one of these submission modes:
+Execute instructions or signed transactions, or simulate an unsigned transaction.
+Independent transactions run in parallel, while conflicting account accesses
+retain their canonical order. Choose one of these submission modes:
 
 ```rust
 let simulation = engine.transaction(transaction)?.simulate().await?;
@@ -60,9 +59,9 @@ engine.transaction(transaction)?.schedule().await?;
 ```
 
 `execute` reports admission rejection or the committed result; `simulate` returns
-a simulation result without committing.
-The `?` operators handle Engine errors; `simulation` and `result` still need to be
-checked for transaction-level failures. `schedule` acknowledges queueing only.
+a simulation result without committing or verifying transaction signatures.
+Successful Engine calls can still return transaction-level failures.
+`schedule` acknowledges queueing only.
 Cancelling a wait does not cancel submitted execution. See
 [transaction semantics](engine/README.md#submitting-transactions).
 
