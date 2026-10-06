@@ -56,7 +56,8 @@ impl TransactionVerifier {
 }
 
 /// Converts instructions, messages, or transaction bytes into a sanitized
-/// [`TransactionView`]. Signature verification happens at submission.
+/// [`TransactionView`]. Signature verification happens at execution submission,
+/// not simulation.
 pub trait IntoTransactionView {
     /// Composes `self` into a sanitized [`TransactionView`], signing with
     /// `engine`'s local signer and latest blockhash where applicable.

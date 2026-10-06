@@ -158,13 +158,18 @@ impl Engine {
     }
 
     /// Returns an accessor for signing and submitting transactions.
+    ///
+    /// Signature verification is deferred to execution submission; simulation
+    /// does not verify transaction signatures.
     pub fn transaction<T>(&self, transaction: T) -> Result<TransactionAccessor<'_>>
     where
         T: IntoTransactionView,
     {
-        let transaction = transaction.compose(self)?;
-        transaction::sigverify(&transaction)?;
-        Ok(TransactionAccessor { engine: self, transaction })
+        Ok(TransactionAccessor {
+            engine: self,
+            transaction: transaction.compose(self)?,
+            verify: true,
+        })
     }
 
     /// Returns an authority-bound verifier for replicated transaction batches.

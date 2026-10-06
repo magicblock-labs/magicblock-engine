@@ -11,9 +11,9 @@ Configure initial state and storage with `KeeperBuilder`, retain a
 `ShutdownManager`, and choose internal or externally supplied block pacing.
 Startup validates and recovers state before accepting live execution.
 
-Keep local signing identity distinct from effective authority: followers sign
-local messages with their own key but authenticate replicated records against
-the configured upstream authority.
+The local identity signs records produced by this engine. Followers authenticate
+replicated records against their configured upstream authority, which may differ
+from their local identity.
 
 ## Submitting transactions
 
@@ -22,12 +22,19 @@ Choose the completion boundary your application needs:
 | Method | Result |
 | :-- | :-- |
 | `execute` | Admission rejection or committed execution result. |
-| `schedule` | Queueing acknowledgment. |
+| `schedule` | Queueing acknowledgment, not admission or execution. |
 | `simulate` | Execution against account copies, without committing changes. |
 
-Signature subscriptions observe execution results.
-Scheduling can therefore discard rejected work without notifying a signature
-observer. Retained status and duplicate protection are bounded by retention.
+`Engine::transaction` composes and sanitizes the input and checks authority for
+private Magicblock transactions. Ordinary submissions verify transaction signatures
+before queueing; `execute` and `schedule` return any signature-verification error.
+Simulation skips transaction-signature verification, allowing unsigned transactions
+or transactions whose blockhash was replaced. It still requires a sanitized input
+and valid private-transaction authority.
+
+Signature subscriptions report execution results, not admission rejections.
+Scheduled work rejected at admission is dropped without notifying signature
+observers. Retained status and duplicate protection are bounded by retention.
 
 Cancelling a wait does not cancel submitted work, and Engine imposes no internal
 execution deadline. A lost completion or infrastructure failure is not evidence
@@ -49,16 +56,15 @@ to match it to a request and `exists()` to report whether the account was presen
 at acquisition. For refreshing transient accounts or other direct updates, `account`
 returns an accessor whose `observed()` mode and slot can inform caller-owned
 eligibility policy. The observation is captured after lease acquisition; ordinary
-transactions can still change the account afterward. Engine handles mode-and-slot
-deduplication against that same observation.
+transactions can still change the account afterward.
 
 Replacement and its follow-up actions execute atomically. The host must validate
 source freshness, creation or replacement eligibility, and action provenance;
 Engine enforces the [account lifecycle](../solana/account/README.md).
-An older image or one matching the observed mode and slot is skipped without
-running follow-up actions. Thus `materialize` success means applied or skipped as
-already handled or superseded; a different-mode image at the same slot still
-reaches lifecycle validation.
+An image older than the lease observation or matching its mode and slot is skipped
+without running follow-up actions. Thus `materialize` success means applied or
+skipped as already handled or superseded; a different-mode image at the same slot
+still reaches lifecycle validation.
 
 In particular, redelegating transient state requires a genuinely new delegation
 at a strictly newer slot, not just a newer observation of the old delegation.

@@ -33,8 +33,10 @@ pub struct AccountAccessor<'a> {
 /// Transaction-submission operations bound to an engine instance.
 pub struct TransactionAccessor<'a> {
     pub(crate) engine: &'a Engine,
-    /// Transaction prepared by verified ingress or trusted replay.
+    /// Sanitized transaction with private-transaction authority checked.
     pub(crate) transaction: TransactionView,
+    /// Verify signatures before execution unless ingress or replay is trusted.
+    pub(crate) verify: bool,
 }
 
 impl AccountAccessor<'_> {
@@ -121,19 +123,26 @@ impl AccountAccessor<'_> {
 impl<'a> TransactionAccessor<'a> {
     /// Composes a trusted local-ledger transaction without verifying its signatures.
     pub(super) fn replay(engine: &'a Engine, transaction: Vec<u8>) -> Result<Self> {
-        let sanitized = TransactionView::try_new_sanitized(transaction.into(), true)?;
-        let transaction = sanitized.compose(engine)?;
-        Ok(Self { engine, transaction })
+        Ok(Self {
+            engine,
+            transaction: transaction.compose(engine)?,
+            verify: false,
+        })
     }
 
     /// Enters the trusted replication path without repeating signature verification.
     ///
     /// The caller must only pass values produced by this Engine's verifier.
     pub fn verified(engine: &'a Engine, verified: VerifiedTransaction) -> Self {
-        Self { engine, transaction: verified.0 }
+        Self {
+            engine,
+            transaction: verified.0,
+            verify: false,
+        }
     }
 
     /// Submits `transaction` and awaits admission rejection or its committed result.
+    /// Ordinary inputs must pass signature verification before queueing.
     /// There is no internal deadline: submitted execution either publishes a
     /// request-specific result or the host shuts down the process on an
     /// infrastructure failure. Cancelling this wait does not cancel the transaction.
@@ -149,6 +158,7 @@ impl<'a> TransactionAccessor<'a> {
     }
 
     /// Submits `transaction` for execution without awaiting its result.
+    /// Ordinary inputs must pass signature verification before queueing.
     /// Success acknowledges queueing, not admission; rejected work is dropped.
     pub async fn schedule(self) -> Result<()> {
         self.enqueue(None).await
@@ -159,6 +169,9 @@ impl<'a> TransactionAccessor<'a> {
         if self.engine.terminating.load(Ordering::Acquire) {
             return Err(EngineError::ShuttingDown);
         }
+        if self.verify {
+            transaction::sigverify(&self.transaction)?;
+        }
         let transaction =
             ResolvedTransaction::try_new(self.transaction, None, &Default::default())?;
         let msg = SequencerMessage::Transaction(ExecutionRequest { transaction, response });
@@ -166,6 +179,7 @@ impl<'a> TransactionAccessor<'a> {
     }
 
     /// Simulates `transaction` against current state without committing it.
+    /// Transaction signatures are not verified.
     pub async fn simulate(self) -> Result<TransactionResult<ExecutionRecord>> {
         if self.engine.terminating.load(Ordering::Acquire) {
             return Err(EngineError::ShuttingDown);
