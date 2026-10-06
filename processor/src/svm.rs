@@ -11,7 +11,13 @@ use keeper::{Keeper, ResolvedTransaction};
 use nucleus::Slot;
 use solana_compute_budget_instruction::instructions_processor::process_compute_budget_instructions;
 use solana_hash::Hash;
-use solana_program_runtime::loaded_programs::{ProgramCache, ProgramRuntimeEnvironments};
+use solana_program_runtime::{
+    execution_budget::{
+        MAX_COMPUTE_UNIT_LIMIT, MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES, MIN_HEAP_FRAME_BYTES,
+        SVMTransactionExecutionAndFeeBudgetLimits, SVMTransactionExecutionBudget,
+    },
+    loaded_programs::{ProgramCache, ProgramRuntimeEnvironments},
+};
 use solana_svm::{
     account_loader::CheckedTransactionDetails,
     transaction_processor::{
@@ -77,7 +83,7 @@ impl SvmContext {
         txn: &ResolvedTransaction,
         features: &FeatureSet,
     ) -> LoadAndExecuteSanitizedTransactionOutput {
-        let details = match self.parse_details(txn, features) {
+        let details = match Self::parse_details(txn, features) {
             Ok(d) => d,
             Err(e) => {
                 return LoadAndExecuteSanitizedTransactionOutput {
@@ -111,23 +117,46 @@ impl SvmContext {
         self.processor.slot
     }
 
-    /// Derives the compute budget and limits from the transaction's compute-budget
-    /// instructions. Fees are forced to zero and depth-8 CPIs disabled on the ER.
-    pub(crate) fn parse_details(
-        &self,
+    /// Derives limits from V1 inline config or compute-budget instructions for
+    /// other versions. Fees are zero and depth-8 CPIs disabled on the ER.
+    fn parse_details(
         txn: &ResolvedTransaction,
         features: &FeatureSet,
     ) -> TransactionResult<CheckedTransactionDetails> {
-        let ixs = txn.program_instructions_iter();
-        let limits = process_compute_budget_instructions(ixs, features)?;
-        let mut limits = limits.get_compute_budget_and_limits(
-            limits.loaded_accounts_bytes,
-            Default::default(), // Fee is always zero on ER
-            false,              // This engine does not enable depth-8 CPIs.
-        );
+        // Magicblock shares V1 framing but retains instruction-derived limits.
+        let (units, heap, data_limit) = if let Some(config) = txn.transaction_config()
+            && matches!(txn.version(), TransactionVersion::V1)
+        {
+            // Sanitization already validates heap size. Unlike legacy/V0, absent
+            // V1 compute and loaded-data limits mean zero, not runtime defaults.
+            let data_limit = config.loaded_accounts_data_size_limit().unwrap_or(0);
+            (
+                config.compute_unit_limit().unwrap_or(0).min(MAX_COMPUTE_UNIT_LIMIT),
+                config.requested_heap_size().unwrap_or(MIN_HEAP_FRAME_BYTES),
+                data_limit.min(MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES.get()),
+            )
+        } else {
+            let limits =
+                process_compute_budget_instructions(txn.program_instructions_iter(), features)?;
+            (
+                limits.compute_unit_limit,
+                limits.updated_heap_bytes,
+                limits.loaded_accounts_bytes.get(),
+            )
+        };
+        let mut budget = SVMTransactionExecutionBudget {
+            compute_unit_limit: u64::from(units),
+            heap_size: heap,
+            ..SVMTransactionExecutionBudget::default() // Depth-8 CPIs remain disabled.
+        };
         if matches!(txn.version(), TransactionVersion::Magicblock) {
-            limits.budget.max_instruction_trace_length = MAGICBLOCK_INSTRUCTION_TRACE_LENGTH;
+            budget.max_instruction_trace_length = MAGICBLOCK_INSTRUCTION_TRACE_LENGTH;
         }
+        let limits = SVMTransactionExecutionAndFeeBudgetLimits {
+            budget,
+            loaded_accounts_data_size_limit: data_limit,
+            fee_details: Default::default(), // Fees are always zero on ER.
+        };
         Ok(CheckedTransactionDetails::new(None, limits))
     }
 }

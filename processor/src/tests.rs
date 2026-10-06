@@ -14,15 +14,25 @@ use nucleus::{
 };
 use solana_account::{AccountMode, ReadableAccount};
 use solana_hash::Hash;
-use solana_instruction::Instruction;
+use solana_instruction::{Instruction, error::InstructionError};
 use solana_keypair::Keypair;
-use solana_program_runtime::loaded_programs::ProgramCache;
+use solana_message::{
+    VersionedMessage,
+    v1::{Message as V1Message, TransactionConfig},
+};
+use solana_program_runtime::{
+    execution_budget::{MAX_COMPUTE_UNIT_LIMIT, MIN_HEAP_FRAME_BYTES},
+    loaded_programs::ProgramCache,
+};
 use solana_pubkey::Pubkey;
 use solana_sdk_ids::loader_v4;
 use solana_signature::Signature;
+use solana_signer::Signer;
 use solana_svm::transaction_processing_result::{
     TransactionProcessingResult, TransactionProcessingResultExtensions,
 };
+use solana_transaction::versioned::VersionedTransaction;
+use solana_transaction_error::TransactionError;
 use tokio::time::timeout;
 use v42_calculator_interface::builder::{Expr as E, transfer};
 
@@ -156,6 +166,96 @@ fn operand(accounts: &[Pubkey], output: Pubkey, index: usize) -> Pubkey {
         key = accounts[(index + 1) % accounts.len()];
     }
     key
+}
+
+/// Proves V1 resource limits reach execution and simulation, including zero
+/// defaults, compute clamping, configured heap size, zero fees, and non-commit
+/// on simulation or resource failure.
+#[tokio::test(flavor = "current_thread")]
+async fn v1_resource_config_is_honored() {
+    const SETUP_FAILURE: TransactionError =
+        TransactionError::InstructionError(0, InstructionError::ProgramEnvironmentSetupFailure);
+    const DATA_LIMIT: TransactionError = TransactionError::MaxLoadedAccountsDataSizeExceeded;
+    const EXEC_FAILURE: TransactionError =
+        TransactionError::InstructionError(0, InstructionError::ProgramFailedToComplete);
+
+    let harness = Harness::new(false).await;
+    let payer = harness.signer().pubkey();
+    let sign = |output, config| {
+        let ix = E::lit(42).compose(output, &[]);
+        let message =
+            V1Message::try_compile_with_config(&payer, &[ix], harness.blockhash(), config).unwrap();
+        let transaction =
+            VersionedTransaction::try_new(VersionedMessage::V1(message), &[harness.signer()])
+                .unwrap();
+        let bytes = wincode::serialize(&transaction).unwrap();
+        TransactionView::try_new_sanitized(bytes.into(), true).unwrap()
+    };
+    let config = TransactionConfig::empty()
+        .with_compute_unit_limit(123_456)
+        .with_loaded_accounts_data_size_limit(1_048_576)
+        .with_heap_size(65_536)
+        .with_priority_fee(u64::MAX);
+    let no_units = TransactionConfig {
+        compute_unit_limit: None,
+        ..config
+    };
+    let no_data = TransactionConfig {
+        loaded_accounts_data_size_limit: None,
+        ..config
+    };
+    let cases = [
+        (config, Ok(())),
+        (
+            config
+                .with_compute_unit_limit(u32::MAX)
+                .with_loaded_accounts_data_size_limit(u32::MAX),
+            Ok(()),
+        ),
+        // A larger heap consumes compute while creating the VM, before execution.
+        (config.with_compute_unit_limit(0), Err(SETUP_FAILURE)),
+        (
+            config.with_compute_unit_limit(1).with_heap_size(MIN_HEAP_FRAME_BYTES),
+            Err(EXEC_FAILURE),
+        ),
+        (
+            config.with_loaded_accounts_data_size_limit(1),
+            Err(DATA_LIMIT),
+        ),
+        (TransactionConfig::empty(), Err(DATA_LIMIT)),
+        (no_units, Err(SETUP_FAILURE)),
+        (no_data, Err(DATA_LIMIT)),
+        (TransactionConfig { heap_size: None, ..config }, Ok(())),
+    ];
+    let balance = load_v42_lamports(&harness, payer).unwrap();
+    for (config, expected) in cases {
+        let output = store_v42(&harness, 0, AccountMode::Magic);
+        let tx = sign(output, config);
+        let signature = tx.signatures()[0];
+        let sim_tx = TransactionView::try_new_sanitized(tx.inner_data().clone(), true).unwrap();
+        let result = harness.simulate(sim_tx).await;
+        if expected.is_ok() {
+            let executed = result.as_ref().expect("simulation loaded accounts");
+            let budget = executed.loaded_transaction.compute_budget;
+            let units = u64::from(config.compute_unit_limit.unwrap().min(MAX_COMPUTE_UNIT_LIMIT));
+            let heap = config.heap_size.unwrap_or(MIN_HEAP_FRAME_BYTES);
+            assert_eq!(budget.compute_unit_limit, units);
+            assert_eq!(budget.heap_size, heap);
+        }
+        assert_eq!(result.flattened_result(), expected,);
+        assert_eq!(load_v42_data(&harness, output), Some(0),);
+        harness.execute(tx).await;
+        harness.barrier().await;
+        assert_eq!(harness.status(signature).await.result, expected,);
+        assert_eq!(
+            load_v42_data(&harness, output),
+            Some(if expected.is_ok() { 42 } else { 0 })
+        );
+        let payer_balance = load_v42_lamports(&harness, payer).unwrap();
+        assert_eq!(payer_balance, balance, "V1 priority fees remain zero");
+    }
+
+    harness.close().await;
 }
 
 // Simulation and execution both accept the same v42 transaction, but only
