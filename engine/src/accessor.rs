@@ -179,10 +179,13 @@ impl<'a> TransactionAccessor<'a> {
     }
 
     /// Simulates `transaction` against current state without committing it.
-    /// Transaction signatures are not verified.
-    pub async fn simulate(self) -> Result<TransactionResult<ExecutionRecord>> {
+    /// Verifies transaction signatures before queueing only when `sigverify` is true.
+    pub async fn simulate(self, sigverify: bool) -> Result<TransactionResult<ExecutionRecord>> {
         if self.engine.terminating.load(Ordering::Acquire) {
             return Err(EngineError::ShuttingDown);
+        }
+        if sigverify {
+            transaction::sigverify(&self.transaction)?;
         }
         let (response, rx) = oneshot::channel();
         let msg = SimulatorMessage::Transaction(Simulation {

@@ -25,9 +25,10 @@ rather than sampling state independently.
 `schedule` acknowledges queueing only. `simulate` runs against account copies
 without committing. Execution completion doesn't imply disk synchronization.
 
-Ordinary execution and scheduling verify signatures before queueing. Simulation
-skips transaction-signature verification, allowing unsigned inputs or a replaced
-blockhash; sanitization and private-transaction authority checks still apply.
+Ordinary execution and scheduling verify signatures before queueing.
+`simulate(true)` verifies signatures too; `simulate(false)` skips verification,
+allowing unsigned inputs or a replaced blockhash. Sanitization and
+private-transaction authority checks still apply in both modes.
 
 Signature subscriptions report execution results, not admission rejections.
 Scheduled work rejected during admission can be dropped without a signature

@@ -127,12 +127,12 @@ impl TestEngine {
         self.transaction(txn).unwrap().execute().await.unwrap()
     }
 
-    /// Simulates instructions without committing them.
+    /// Simulates instructions without committing them or verifying signatures.
     pub async fn simulate(
         &self,
         txn: impl IntoTransactionView,
     ) -> TransactionResult<ExecutionRecord> {
-        self.transaction(txn).unwrap().simulate().await.unwrap()
+        self.transaction(txn).unwrap().simulate(false).await.unwrap()
     }
 
     /// Schedules instructions without awaiting commit.

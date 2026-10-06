@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/edition-2024-blue" alt="Edition 2024">
   <img src="https://img.shields.io/badge/Solana-SVM-14F195?logo=solana&logoColor=white" alt="Solana SVM">
   <img src="https://img.shields.io/badge/status-experimental-yellow" alt="Status experimental">
-  <img src="https://img.shields.io/badge/version-0.14.0-lightgrey" alt="Version 0.14.0">
+  <img src="https://img.shields.io/badge/version-0.14.1-lightgrey" alt="Version 0.14.1">
 </p>
 
 <p align="center">
@@ -56,13 +56,13 @@ Independent transactions run concurrently; conflicting account accesses keep the
 input order. Preview a transaction, then execute it against local state:
 
 ```rust
-let simulation = engine.transaction(transaction.clone())?.simulate().await?;
+let simulation = engine.transaction(transaction.clone())?.simulate(true).await?;
 let result = engine.transaction(transaction)?.execute().await?;
 ```
 
 | Mode | Completion boundary |
 | :-- | :-- |
-| `simulate` | Execution on account copies, without committing or verifying transaction signatures. |
+| `simulate(sigverify)` | Execution on account copies, without committing; verifies transaction signatures when requested. |
 | `execute` | Admission rejection or the committed execution result. |
 | `schedule` | Queueing acknowledgment, without waiting for admission or execution. |
 
