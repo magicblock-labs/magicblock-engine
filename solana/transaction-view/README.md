@@ -1,30 +1,33 @@
-# `agave-transaction-view`
+# Transaction views
 
-Parse and sanitize serialized transactions without fully deserializing them.
-This Engine fork of Agave provides views over owned or borrowed transaction bytes
-for execution, signature verification, and instruction inspection.
-
-## Supported formats
-
-Legacy, v0, and V1 retain their standard wire layouts. Magicblock is an
-Engine-private, V1-shaped format for larger atomic account operations; it is not
-a client-facing Solana transaction version. Its larger size allowance does not
-relax standard transaction or instruction-sysvar limits.
-
-Signing must cover the format's exact message range after the final version
-prefix is written, excluding signatures themselves. Private-format construction,
-parsing, and execution policy must stay synchronized.
+Transaction views expose serialized transaction fields without full deserialization.
+Engine uses them for account-dependency scheduling, signature verification, and
+instruction access. This fork adds Engine-private framing while preserving standard
+Solana wire layouts.
 
 ## Validation boundary
 
 Parsing establishes checked frame boundaries before exposing unchecked views.
-Sanitization enforces account-key uniqueness and structural limits; instructions
-may still reference the same account index more than once. Callers must not treat
-successfully parsed but unsanitized data as ready for execution.
+Sanitization validates account-key uniqueness, indices, and structural limits;
+parsed but unsanitized data isn't ready for execution. Static account keys must
+be unique, although an instruction can reference the same index more than once.
 
-Address lookup tables are unsupported and nonempty lookup entries fail
-sanitization. A v0 transaction with an empty lookup list remains valid.
+Nonempty address lookup entries fail sanitization because Engine doesn't resolve
+lookup tables. Empty v0 lookup lists remain valid. Resolution support would need
+ingress, sanitization, scheduling, and simulation changes together, not just parser support.
 
-Preserve canonical compact-u16 parsing and standard wire compatibility when
-changing the framing code. See the [runtime-fork contracts](../README.md) for
-private-format and runtime compatibility constraints.
+## Private framing
+
+Legacy, v0, and V1 retain standard layouts. Magicblock is a private V1-shaped format
+with version 127 and a 16 MiB limit, used for atomic account imports. It isn't a
+client-facing Solana version. Its larger framing doesn't enlarge standard
+instruction-sysvar encoding or remove runtime trace limits; those constraints are
+collected in the [runtime overview](../README.md#private-transaction-framing).
+
+Signatures cover the exact message range, excluding signatures themselves. The
+final version prefix must be written before signing. Private construction,
+parsing, sanitization, and execution policy must stay synchronized.
+
+[Views](src/transaction_view.rs) and [sanitization](src/sanitize.rs) define the
+structural boundary. Framing changes must preserve canonical compact-u16 parsing,
+checked `u32` offsets, and standard wire compatibility.

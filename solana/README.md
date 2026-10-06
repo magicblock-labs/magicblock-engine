@@ -1,151 +1,151 @@
-# Engine Runtime Differences from Agave
+# Engine runtime differences from Agave
 
-This directory contains the Agave runtime forks required by the engine. These
-crates execute caller-loaded transactions and return account changes.
+These forks adapt Agave execution to Engine's account model: lifecycle-aware
+accounts, borrowed storage, and direct VM mapping. The SVM executes caller-loaded
+transactions and returns account changes; persistence, commit decisions, and
+deployment policy remain outside the runtime. Validator consensus and fork-management
+machinery aren't part of this boundary.
 
-The current upstream baseline is Agave **4.2.2**, with SDK account **4.3.1**.
-See [the upgrade disposition](UPSTREAM-4.2.2.md) for ports and intentional omissions.
+The baseline is Agave **4.2.2**, with SDK account **4.3.1**. The
+[upgrade disposition](UPSTREAM-4.2.2.md) records upstream ports and intentional omissions.
+The sections below describe the intentional runtime deviations and their
+cross-crate compatibility constraints; individual crate READMEs explain each layer.
 
-The differences below are intentional compatibility constraints for account
-representation, transaction context, serialization, VM mapping, and CPI.
+## Runtime layers
 
-## Runtime boundary
+| Crate | Responsibility |
+| :-- | :-- |
+| [account](account/README.md) | Account representation, lifecycle, and copy-on-write storage. |
+| [transaction-view](transaction-view/README.md) | Transaction framing and structural sanitization. |
+| [svm](svm/README.md) | Transaction account loading, program loading, and execution. |
+| [transaction-context](transaction-context/README.md) | Per-transaction borrowing, instruction state, and mutation accounting. |
+| [program-runtime](program-runtime/README.md) | Invocation, SBF VM setup, serialization, and CPI. |
 
-- `solana-svm` loads accounts through a caller callback and returns execution
-  results and mutated accounts.
-- Callers own persistence, commit decisions, and deployment policy.
-- Program loading is limited to programs required by the transaction. Callers
-  decode loader-specific headers and indirection to supply executable SBF account
-  data as raw ELF bytes.
-- Deprecated SBF programs retain their loader owner for ABI v0. Other normalized
-  SBF programs use loader-v4 as their nominal owner and ABI v1. Native programs
-  retain native-loader ownership.
-- Rent-state and lamport-balance checks remain part of execution.
-- SIMD-0392 rent-transition relaxation follows the supplied runtime feature set;
-  it does not activate new Engine features. Nonzero Magic accounts are rent-exempt.
-  Magic resizing remains restricted to the builtin.
-- If a requested instruction sysvar cannot represent the transaction,
-  account loading fails with `MaxLoadedAccountsDataSizeExceeded`; it never
-  substitutes an empty instruction sysvar. Private transaction size limits do
-  not enlarge the standard instruction-sysvar encoding.
+`solana-svm` loads through caller callbacks and returns execution results and
+mutated accounts. The caller supplies normalized executable data.
+Loader headers and indirection are resolved into raw ELF bytes outside the SVM;
+only programs required by the transaction are loaded. Deprecated SBF programs
+retain their loader owner for ABI v0. Other normalized SBF programs use loader-v4
+as nominal owner and ABI v1; native programs retain native-loader ownership.
 
-## Account representation
+## Account lifecycle and writeback
 
-`solana-account` uses copy-on-write owned data or an 8-byte-aligned borrowed
+`solana-account` supports copy-on-write owned data and an 8-byte-aligned borrowed
 view with active/shadow images. Mutation copies into the shadow; commit publishes
 it, reset abandons it, and rollback is valid only after commit. Growth beyond
-borrowed capacity promotes to owned storage; shared owned data uses
-`Arc::make_mut`. See [layout and lifecycle rules](account/README.md).
+borrowed capacity promotes to owned storage; shared owned data uses `Arc::make_mut`.
+This representation lets execution borrow account data from storage while retaining
+transactional writeback.
 
-Only delegated and Magic accounts are user-mutable. Transient and closed
-revoke mutation immediately, including across CPI. The transaction-final guard
-accepts dirty transitions into those modes for writeback, not further writes.
-Transient remains authoritative and persisted; the caller removes closed state.
+Engine mutation requires a permitted lifecycle mode in addition to Solana access
+checks. Delegated and Magic accounts allow user writes. Transient state remains
+authoritative and persisted but immutable; closed state is removed by the caller.
+Transitions to either revoke mutation immediately, including across CPI. Final
+writeback can accept a dirty transition without authorizing further writes.
 
-Dirty markers track data, owner, lamports, slot, mode, and flags. Complete-account
-patches cover non-flag fields; MagicRoot finalization installs all supplied flags
-without changing lamports. Freshness remains the caller's responsibility.
-`rent_epoch` is not stored; compatibility APIs return or ignore its masked value.
+The [account crate](account/README.md) owns those rules and the active/shadow layout.
+Dirty markers track data, owner, lamports, slot, mode, and flags; touched flags track
+transaction access. Both are caller writeback signals, not persistence operations.
+Complete-account patches cover non-flag fields, and MagicRoot finalization installs
+the complete flags without changing lamports. Source freshness remains the host's
+responsibility. `rent_epoch` isn't stored; compatibility APIs return a masked value
+or ignore writes.
+
+Rent-state and lamport-balance checks remain part of execution. SIMD-0392 rent
+relaxation follows supplied runtime features without activating Engine features.
+Nonzero Magic accounts are rent-exempt; Magic resizing remains restricted to the builtin.
 
 ## Transaction context
 
 `solana-transaction-context` stores accounts in `UnsafeCell`s guarded by explicit
-borrow counters. This permits the VM access handler to remap account data while
-runtime borrow rules remain enforced.
+borrow counters. This allows account data to be remapped during execution while
+runtime borrow rules remain enforced. `AccountRef` and `AccountRefMut` release
+their counters on drop.
 
-`TransactionAccounts` records touched accounts, total account-data resize, and
-instruction lamport deltas. `AccountRef` and `AccountRefMut` release their
-counters on drop. `ExecutionRecord` returns keyed accounts, return data, touched
-count, and resize delta. All references must be released before context
-deconstruction; failure of `Rc::try_unwrap` indicates a lifetime bug.
+`TransactionAccounts` tracks touched accounts, total account-data resize, and
+instruction lamport deltas. `ExecutionRecord` returns keyed accounts, return data,
+touched count, and resize delta for caller-owned writeback. All account references
+must be released before context deconstruction; failed `Rc::try_unwrap` indicates
+a lifetime bug. The [context README](transaction-context/README.md) covers borrowing
+and instruction-level mutation checks.
 
-## Transaction parsing and Engine-private transactions
+## Direct VM mapping
 
-`agave-transaction-view` supports Legacy, v0, V1, and private Magicblock version
-127. Standard versions accept up to `u16::MAX` bytes; Magicblock uses the V1
-layout with a distinct prefix and a 16 MiB limit. Full canonical compact-u16
-parsing and checked `u32` framing precede unchecked views.
+Account data is mapped from its backing storage, avoiding serialized copies and
+copy-back after execution. Program input still contains loader ABI metadata,
+lamports, lengths, owners, instruction data, and program id. Data bytes occupy
+separate `MemoryRegion`s; deserialization updates metadata, not account bytes.
 
-Engine composes account operations as Magicblock transactions, signs the exact
-message after setting the prefix, and requires the first static account to be
-the configured authority. The private format permits atomic chunked account
-patches without widening standard policy: instruction traces allow 255 entries,
-CPI remains limited to 64 and reserves space for top-level instructions, and
-V1-shaped address counts remain limited to 255.
+Serialization preserves the loader ABI metadata even though account bytes are
+mapped separately:
 
-Address lookup entries fail sanitization with `AddressLookupMismatch`; empty v0
-lookup lists remain valid. Static account keys must be unique. See the
-[wire and safety contracts](transaction-view/README.md); keep parsing, sanitizing,
-Engine composition, and SVM trace limits synchronized.
+| Loader ABI | Account-region reservation |
+| :-- | :-- |
+| Deprecated loader: ABI v0 | Current account-data length. |
+| Loader-v2 and loader-v3: ABI v1 | Current length plus `MAX_PERMITTED_DATA_INCREASE`. |
 
-## VM account mapping
+ABI v1 optionally includes direct account pointers. Direct mapping is the only
+runtime path; the removed `virtual_address_space_adjustments` and
+`account_data_direct_mapping` copy-based branches must not be restored.
 
-Account data is always mapped directly into the SBF VM. Do not restore the
-removed `virtual_address_space_adjustments` or `account_data_direct_mapping`
-branches that copied account data through serialized program input.
-
-Serialization retains loader ABI metadata:
-
-- Deprecated-loader accounts use ABI v0.
-- Loader-v2 and loader-v3 accounts use ABI v1.
-- ABI v1 optionally includes direct account pointers.
-
-The serialized input contains metadata, lamports, lengths, owners, instruction
-data, and program id. Account data resides in separate `MemoryRegion`s.
-Deprecated-loader regions reserve the current length; newer loaders also reserve
-`MAX_PERMITTED_DATA_INCREASE`. Deserialization reads mutable metadata but does
-not copy account bytes back from the input buffer.
-
-## Access-violation growth
-
-Writable borrowed or shared-owned account data may initially be mapped
-read-only. The first VM store enters the transaction-context handler, which:
-
-- handles stores only and requires an account-index region payload;
-- rejects accesses outside the account's reserved address range;
-- records touch and resize deltas before growing data;
-- grows only to the requested access length; and
-- replaces the region host pointer, length, and writability.
-
-Keep serialization, `TransactionContext::access_violation_handler`, and VM error
-mapping synchronized. They jointly map growth failures to account-specific
+Borrowed or shared-owned writable data can initially be mapped read-only. A VM
+store enters `TransactionContext::access_violation_handler` to obtain mutable
+backing data and update the region pointer, length, and writability. The handler accepts only
+stores with an account-index region payload, rejects access beyond the reserved
+range, and records touch and resize deltas before growing to the requested length.
+Serialization, the handler, and VM error mapping jointly preserve account-specific
 readonly, size, and realloc errors.
 
-## CPI synchronization
+CPI synchronizes lamports, owner, and length while bytes remain directly mapped;
+`CallerAccount::serialized_data` stays empty. Storage movement requires replacing
+the caller region from the current account. Strict syscall parameter-address checks
+are always enforced: CPI rejects `AccountInfo` key, owner, lamports, data, and
+data-length pointers that don't reference canonical VM locations for the passed
+account. Without copy-back serialization, those checks protect the mapped storage.
+Inner-call growth uses the caller's original length plus the permitted increase;
+deprecated loaders reserve only the original length.
 
-Builtin CPI into MagicRoot requires `InvokeContext::native_invoke_magic_root`,
-in addition to MagicRoot's authority-payer, builtin-caller, and recursion checks.
-Only its exact child instruction is authorized; descendants and post-finalize
-actions do not inherit authorization. Builtins must construct or validate the
-privileged operation, not elevate arbitrary forwarded payloads. Ordinary native
-CPI and logical caller provenance do not grant this access. Top-level authority
-operations and instruction serialization remain unchanged.
+## Private transaction framing
 
-`CallerAccount::serialized_data` remains empty. CPI entry and exit synchronize
-lamports, owner, and data length, while account bytes remain directly mapped.
-When storage can move, CPI replaces the caller `MemoryRegion` with one created
-from the current account.
+Engine composes account operations as atomic Magicblock transactions: private version
+127, using V1-shaped framing with a distinct prefix and a 16 MiB size limit. This
+allows chunked account patches within one transaction without widening standard policy.
+Standard Legacy, v0, and V1 versions accept up to `u16::MAX` bytes. Construction
+sets the final prefix before signing the exact message and requires the first
+static account to be the configured authority.
 
-Strict syscall parameter-address checks are always enforced. CPI rejects
-`AccountInfo` fields whose key, owner, lamports, data, or data-length pointers do
-not reference the canonical VM locations for the passed account. This is required
-because account bytes are mapped directly into the VM and cannot be protected by
-copy-back serialization.
+Magicblock permits 255 instruction trace entries; CPI remains limited to 64 and
+reserves room for top-level instructions. V1-shaped address counts remain limited
+to 255. The standard instruction-sysvar encoding isn't enlarged: if a requested
+sysvar can't represent the transaction, loading fails with
+`MaxLoadedAccountsDataSizeExceeded`, never an empty replacement sysvar.
 
-Inner-instruction growth uses the caller's original length plus the permitted
-increase. Deprecated loaders reserve only the original length. Any account-region
-layout change must update CPI pointer checks, region replacement, and VM access
-handling together.
+[`agave-transaction-view`](transaction-view/README.md) validates `u32` framing and canonical
+compact-u16 lengths before unchecked access. Sanitization rejects duplicate static
+keys and nonempty address lookups (`AddressLookupMismatch`); empty v0 lookup lists
+remain valid. Lookup resolution would require coordinated ingress, sanitization,
+scheduling, and simulation changes.
 
-## Maintenance constraints
+## Privileged invocation
 
-- Preserve direct account-region mapping as the only runtime path.
-- Preserve ABI v0 and ABI v1 metadata compatibility.
-- Keep borrowed layout changes synchronized across account, transaction-context,
-  serialization, and mapping code.
-- Preserve full compact-u16 parsing and checked `u32` transaction framing.
-- Keep Magicblock construction and execution policy synchronized with
-  `agave-transaction-view`.
-- Do not enable address lookup resolution without revisiting ingress,
-  sanitization, scheduling, and simulation together.
-- Treat dirty markers and touched flags as the caller's writeback signal.
+Builtin CPI into [MagicRoot](../programs/magic-root-program/README.md) requires
+`InvokeContext::native_invoke_magic_root` plus MagicRoot's authority-payer,
+builtin-caller, and recursion checks. The builtin must construct or validate the
+operation, not authorize arbitrary forwarded payloads. Authorization applies only
+to the exact child; descendants and post-finalize actions don't inherit it.
+Ordinary native CPI and logical caller provenance confer no such access. This
+authorization doesn't change top-level authority operations or instruction serialization.
+The SVM's transaction-wide final-writeback exemption still requires all top-level
+instructions to target MagicRoot; authorized CPI doesn't grant that exemption.
+
+## Maintenance boundaries
+
+Borrowed account layout, transaction-context borrowing, serialization, VM regions,
+and CPI pointer checks must evolve together while preserving ABI v0/v1 metadata
+and direct account-region mapping as the only runtime path. Account-region changes
+must update CPI pointer checks, region replacement, and VM access handling together.
+Exact buffer and lifetime invariants belong to the unsafe APIs.
+
+Private construction, parsing, sanitization, and SVM trace policy must likewise
+stay synchronized. Preserve full compact-u16 parsing, checked `u32` framing, and
+caller-owned writeback when porting upstream changes.

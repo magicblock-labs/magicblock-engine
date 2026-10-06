@@ -1,99 +1,93 @@
-# `magicblock-engine`
+# Engine
 
-Embed `Engine` to execute Solana transactions, simulate them without committing,
-and manage local account state. It combines ordered execution, storage, live
-subscriptions, and recovery.
-Start with the [workspace guide](../README.md) for integration examples.
+Engine is MBV's execution subsystem. It combines Solana transaction execution,
+account storage, retained history, subscriptions, and recovery behind one handle.
+MBV owns external-chain integration and commit policy; Engine owns local execution
+and the resulting state. Its blocks delimit execution history, not consensus or
+confirmation.
 
-## Opening an engine
+## Execution flow
 
-Configure initial state and storage with `KeeperBuilder`, retain a
-`ShutdownManager`, and choose internal or externally supplied block pacing.
-Startup validates and recovers state before accepting live execution.
+Transaction ingress parses and sanitizes inputs before submission; ordinary
+execution verifies signatures. The [processor](../processor/README.md) schedules
+account dependencies and runs SVM workers. [Keeper](../keeper/README.md) coordinates
+account writeback, history, caches, and notifications.
 
-The local identity signs records produced by this engine. Followers authenticate
-replicated records against their configured upstream authority, which may differ
-from their local identity.
+Engine starts these services and the block pacemaker. Local production uses an
+internal timer; followers supply upstream boundaries through an external pacer.
+The processor drains preceding work at each boundary before advancing its Clock
+and blockhash. Pacing, snapshots, and replay therefore share the execution order
+rather than sampling state independently.
 
 ## Submitting transactions
 
-Choose the completion boundary your application needs:
+`execute` waits for admission rejection or a committed execution result.
+`schedule` acknowledges queueing only. `simulate` runs against account copies
+without committing. Execution completion doesn't imply disk synchronization.
 
-| Method | Result |
-| :-- | :-- |
-| `execute` | Admission rejection or committed execution result. |
-| `schedule` | Queueing acknowledgment, not admission or execution. |
-| `simulate` | Execution against account copies, without committing changes. |
-
-`Engine::transaction` composes and sanitizes the input and checks authority for
-private Magicblock transactions. Ordinary submissions verify transaction signatures
-before queueing; `execute` and `schedule` return any signature-verification error.
-Simulation skips transaction-signature verification, allowing unsigned transactions
-or transactions whose blockhash was replaced. It still requires a sanitized input
-and valid private-transaction authority.
+Ordinary execution and scheduling verify signatures before queueing. Simulation
+skips transaction-signature verification, allowing unsigned inputs or a replaced
+blockhash; sanitization and private-transaction authority checks still apply.
 
 Signature subscriptions report execution results, not admission rejections.
-Scheduled work rejected at admission is dropped without notifying signature
-observers. Retained status and duplicate protection are bounded by retention.
+Scheduled work rejected during admission can be dropped without a signature
+notification. Results and duplicate protection are bounded by retention.
 
-Cancelling a wait does not cancel submitted work, and Engine imposes no internal
-execution deadline. A lost completion or infrastructure failure is not evidence
-of rollback; the host must stop on execution infrastructure failure rather than
-continue with an unknown outcome. Keep the async runtime alive through shutdown.
-
-Replication uses authority-verified transaction inputs. Values verified for one
-Engine must not be reused as proof of authorization for another.
+Submitted work is independent of its waiter: cancellation doesn't cancel
+execution, and Engine imposes no execution deadline. A lost reply or infrastructure
+failure isn't evidence of rollback. The host must stop on execution infrastructure
+failure rather than continue with an unknown outcome, keeping the runtime alive
+through coordinated shutdown. Replication verification is specific to the receiving
+Engine; verified inputs aren't transferable proof of authorization for another instance.
 
 ## Account replacement
 
-Account accessors serialize competing materialization operations for the same
-account, but do not serialize ordinary transactions. Materialization and deletion
-require the local signer to match the engine authority.
+External account images enter execution through privileged
+[MagicRoot](../programs/magic-root-program/README.md) transactions. Replacement and
+follow-up actions are atomic, so account activation uses the same ordering and
+rollback machinery as ordinary work rather than a separate storage-write path.
 
-Use `missing_accounts` to scan a batch for absent accounts and retain leases
-only for those still absent after acquisition. Each accessor exposes `pubkey()`
-to match it to a request and `exists()` to report whether the account was present
-at acquisition. For refreshing transient accounts or other direct updates, `account`
-returns an accessor whose `observed()` mode and slot can inform caller-owned
-eligibility policy. The observation is captured after lease acquisition; ordinary
-transactions can still change the account afterward.
+Account accessors serialize materialization for a key, not ordinary transactions.
+Their presence, mode, and slot observations are captured after lease acquisition
+and can be superseded by execution. `missing_accounts` retains leases only for
+accounts still absent after acquisition; `account` also supports existing state.
 
-Replacement and its follow-up actions execute atomically. The host must validate
-source freshness, creation or replacement eligibility, and action provenance;
-Engine enforces the [account lifecycle](../solana/account/README.md).
-An image older than the lease observation or matching its mode and slot is skipped
-without running follow-up actions. Thus `materialize` success means applied or
-skipped as already handled or superseded; a different-mode image at the same slot
-still reaches lifecycle validation.
+Materialization skips an image older than the observation or matching its mode
+and slot, without running follow-up actions. Success can therefore mean applied
+or skipped as already handled or superseded. A different mode at the same slot
+still reaches [lifecycle validation](../solana/account/README.md#account-lifecycle).
 
-In particular, redelegating transient state requires a genuinely new delegation
-at a strictly newer slot, not just a newer observation of the old delegation.
-Already-delegated accounts cannot be replaced in the same mode. Magic accounts
-remain authoritative until explicitly closed; an empty token balance is not
-grounds for removing that protection.
+MBV validates source freshness, replacement eligibility, and action provenance.
+Engine enforces lifecycle transitions. Transient redelegation requires a new
+delegation at a strictly newer slot, not a newer observation of the old delegation.
+Delegated state can't be replaced in the same mode. Magic state remains authoritative
+until explicitly closed, regardless of token balance. Materialization and deletion
+require the local signer to match the effective authority.
 
-Once submitted, replacement retains its materialization lease through completion,
-even if the caller stops waiting. After a timeout or uncertain result, reacquire
-the accessor and reconcile state before retrying. A definitive execution failure
-rolls back replacement and follow-up account changes.
+After submission, the operation retains its lease through completion even if the
+waiter is cancelled. An uncertain outcome requires reacquiring the accessor and
+reconciling state before retrying. A definitive execution failure rolls back the
+replacement and follow-up account changes.
 
 ## Startup and recovery
 
-[Keeper](../keeper/README.md#startup-and-recovery) restores usable account state;
-Engine replays retained history when needed, without duplicating ledger records
-or live notifications. State mismatches refuse startup rather than silently
-accepting divergence. Recovery depends on valid retained snapshots and history.
+[Keeper](../keeper/README.md#startup-and-recovery) opens and validates the stores,
+restoring a retained snapshot when needed. Engine replays the remaining history
+before live execution, without duplicating ledger entries or live notifications.
+State mismatches refuse startup; recovery depends on valid retained snapshots and history.
 
-Full superblocks provide snapshot and recovery boundaries. Optional checksum
-checkpoints detect persisted-state divergence between them, without snapshotting
-or forcing disk synchronization. Their interval is independent of superblocks;
-full superblocks take precedence when both are due. Followers consume upstream
-boundaries rather than generating their own.
+Full superblocks pair account snapshots with history boundaries. Optional checksum
+checkpoints check persisted state between snapshots without snapshotting or forcing
+disk synchronization. Their interval is independent of superblocks; full superblocks
+take precedence when both are due. Followers consume upstream boundaries.
 
 ## Shutdown
 
-Stop external ingress and terminate the retained shutdown manager while the
-runtime is still running. Coordinated shutdown drains work and synchronizes
-storage. Internally paced producers publish a final block; followers also preserve
-volatile state for restart. See the [follower recovery contract](../replicator/README.md#follower-recovery)
-for the boundary at which replication stops.
+The host stops ingress and terminates the retained shutdown manager while Engine
+and the async runtime remain alive. Services drain execution and synchronize storage.
+Locally paced engines publish a final block; followers also save volatile state for
+restart. Follower draining follows the [replication boundary](../replicator/README.md#follower-recovery).
+
+The orchestration path is in [startup and replay](src/lib.rs), with ingress in
+[transaction verification](src/transaction.rs), imports in [accessors](src/accessor.rs),
+and boundaries in the [pacemaker](src/pacemaker.rs).

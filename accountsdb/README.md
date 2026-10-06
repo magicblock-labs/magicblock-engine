@@ -1,45 +1,51 @@
-# `magicblock-accountsdb`
+# Accountsdb
 
-Account storage for the execution engine, with scoped zero-copy reads, snapshots,
-and state checksums. Engine-authoritative accounts are persisted; externally
-owned state is kept in memory and can be fetched again.
+Accountsdb stores current account state; the [ledger](../ledger/README.md) retains
+execution history. The store separates engine-authoritative state from rebuildable
+external-chain mirrors. Authoritative accounts are persisted, while mirrored state
+lives in memory and can be fetched again.
 
-Storage follows the [account lifecycle](../solana/account/README.md). Delegated,
-Magic, and transient accounts remain authoritative, even when they are no longer
-user-mutable. Closing an account removes it from storage. Resetting externally
-owned state preserves authoritative accounts and internal system accounts.
+Routing follows [lifecycle mode](../solana/account/README.md#account-lifecycle),
+not memory representation. Delegated, Magic, and transient accounts remain
+authoritative, including transient state that no longer permits user writes.
+Closed accounts are removed. Reset discards mirrored state while preserving
+authoritative and internal system accounts.
 
-## Reading and writing
+## Storage access and writeback
 
-Scoped reads let callers inspect account data without retaining references into
-storage. Read callbacks may retry, so they must be side-effect-free. Keep reader
-scopes short: they prevent relocation, not concurrent account writes, and must
-not span asynchronous work or invoke compaction.
+Persisted accounts support borrowed reads and copy-on-write execution over an
+[active/shadow layout](../solana/account/README.md#borrowed-storage). This avoids
+copying account data on every execution load, but ties access to storage lifetime
+and relocation rules.
 
-Raw borrowed access is reserved for callers that can uphold its lifetime and
-exclusion requirements. Unguarded readers must also exclude compaction. Follow
-the safety contracts on the access APIs rather than treating a borrowed account
-as an independent owned value.
+Scoped readers prevent relocation, not concurrent account writes. Read callbacks
+may retry and must be side-effect-free. Scopes must remain short, never span async
+work, and never invoke compaction. Raw borrowed access requires the lifetime and
+exclusion guarantees specified by its unsafe API; unguarded readers must exclude
+compaction themselves.
 
-Transaction commits track progress for recovery, including failed executions
-that produce no account changes. Direct administrative writes do not advance
-that transaction count.
+Commit advances the recovery transaction count after storing account transitions.
+Failed executions with no account changes still count when they reach the commit
+path; direct administrative writes don't. Recovery compares this progress with
+the ledger rather than inferring it solely from account contents.
 
 ## Snapshots and checksums
 
-Snapshots capture state for recovery; compaction reclaims unused persisted
-storage. Both require quiesced account writes, and relocation must wait for
-borrowed readers. Platforms must support the reader synchronization required by
-the store; initialization failures propagate to the caller.
+Snapshots capture recoverable state; compaction reclaims unused persisted space.
+Both require quiesced writes, and relocation waits for borrowed readers. Platform
+support for reader synchronization is required, with initialization failures
+propagated to the caller.
 
-Snapshot export directories are temporary. Keeper removes orphaned exports at
-startup; retained snapshots live in the ledger.
+Snapshot exports are temporary. [Keeper](../keeper/README.md#state-boundaries)
+archives them into retained ledger history and removes orphaned exports on startup.
+Volatile state can be saved for snapshot recovery and clean follower restart;
+ordinary account writes don't make it durable.
 
-Checksums cover persisted account state and its slot and superblock identity,
-not volatile accounts, the transaction counter, or the chain slot. A cached
-checksum describes a previously published state. Fresh sampling requires writes
-and metadata updates to be quiesced, but does not flush storage or refresh the
-cached value.
+Checksums cover persisted accounts plus slot and superblock identity, excluding
+volatile accounts, the transaction counter, and the chain slot. The cached checksum
+describes previously published state. Fresh sampling requires writes and metadata
+updates to be quiesced, but neither flushes storage nor refreshes that cache.
 
-Volatile state can be saved for snapshot recovery and clean follower restart.
-It is not made durable by ordinary account writes.
+[Store routing and loading](src/lib.rs) connect the [persisted store](src/store/mod.rs)
+and volatile backend. [Snapshots](src/snapshot.rs) handle recovery exports;
+[reader admission](src/readers.rs) coordinates relocation with active readers.
