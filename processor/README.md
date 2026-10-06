@@ -29,3 +29,10 @@ relocation.
 Simulation executes against account copies and returns an execution record
 without committing account changes or appending history. It shares the engine's
 runtime environment.
+
+Execution and simulation honor V1 inline resource limits; omitted compute and
+loaded-account data limits are zero, while omitted heap size is 32 KiB. Compute
+and loaded-data requests are capped at the runtime maxima, and heap requests
+must satisfy transaction sanitization. Legacy/v0 and private Magicblock
+transactions retain compute-budget instruction handling. All versions execute
+without fees.

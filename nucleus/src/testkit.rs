@@ -70,6 +70,7 @@ pub fn block(slot: Slot) -> Block {
 }
 
 /// Signs `instructions` in a standard client wire format.
+/// V1 explicitly requests the runtime maxima because omitted limits are zero.
 pub fn sign_versioned_instructions(
     payer: &Keypair,
     version: WireVersion,
@@ -87,7 +88,15 @@ pub fn sign_versioned_instructions(
             v0::Message::try_compile(&payer.pubkey(), instructions, &[], blockhash).unwrap(),
         ),
         WireVersion::V1 => VersionedMessage::V1(
-            v1::Message::try_compile(&payer.pubkey(), instructions, blockhash).unwrap(),
+            v1::Message::try_compile_with_config(
+                &payer.pubkey(),
+                instructions,
+                blockhash,
+                v1::TransactionConfig::empty()
+                    .with_compute_unit_limit(u32::MAX)
+                    .with_loaded_accounts_data_size_limit(u32::MAX),
+            )
+            .unwrap(),
         ),
     };
     let transaction = VersionedTransaction::try_new(message, &[payer]).unwrap();
