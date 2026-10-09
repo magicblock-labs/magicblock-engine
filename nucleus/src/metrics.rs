@@ -2,8 +2,11 @@
 
 use std::{fmt::Display, sync::OnceLock, time::Instant};
 
-use prometheus::{HistogramOpts, HistogramVec, Opts, default_registry};
-pub use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec};
+use prometheus::default_registry;
+pub use prometheus::{
+    Histogram, HistogramOpts, HistogramTimer, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec, Opts,
+};
 use tracing::{info, warn};
 
 /// Prometheus namespace shared by all engine metrics.
@@ -39,7 +42,8 @@ impl Drop for EventTimer {
     }
 }
 
-/// Metric name and help text kept together so collector definitions stay grepable.
+/// Engine metric name and help text, converted to options with the `engine` namespace.
+/// Use explicit [`Opts`] for collectors with caller-controlled names or namespaces.
 #[derive(Clone, Copy)]
 pub struct MetricSpec {
     /// Prometheus collector name.
@@ -48,34 +52,44 @@ pub struct MetricSpec {
     pub help: &'static str,
 }
 
+impl From<MetricSpec> for Opts {
+    fn from(spec: MetricSpec) -> Self {
+        Self::new(spec.name, spec.help).namespace(NAMESPACE)
+    }
+}
+
 /// Creates and registers a counter after applying its initial value.
-pub fn counter(spec: MetricSpec, initial: u64) -> IntCounter {
-    let counter = validate(IntCounter::with_opts(opts(spec)));
+pub fn counter(opts: impl Into<Opts>, initial: u64) -> IntCounter {
+    let counter = validate(IntCounter::with_opts(opts.into()));
     counter.inc_by(initial);
-    register(spec, counter.clone());
-    counter
+    register(counter)
 }
 
 /// Creates and registers a labeled counter.
-pub fn counter_vec(spec: MetricSpec, labels: &[&'static str]) -> IntCounterVec {
-    let counter = validate(IntCounterVec::new(opts(spec), labels));
-    register(spec, counter.clone());
-    counter
+pub fn counter_vec(opts: impl Into<Opts>, labels: &[&str]) -> IntCounterVec {
+    register(validate(IntCounterVec::new(opts.into(), labels)))
 }
 
 /// Creates and registers a gauge after applying its initial value.
-pub fn gauge(spec: MetricSpec, initial: i64) -> IntGauge {
-    let gauge = validate(IntGauge::with_opts(opts(spec)));
+pub fn gauge(opts: impl Into<Opts>, initial: i64) -> IntGauge {
+    let gauge = validate(IntGauge::with_opts(opts.into()));
     gauge.set(initial);
-    register(spec, gauge.clone());
-    gauge
+    register(gauge)
 }
 
 /// Creates and registers a labeled gauge.
-pub fn gauge_vec(spec: MetricSpec, labels: &[&'static str]) -> IntGaugeVec {
-    let gauge = validate(IntGaugeVec::new(opts(spec), labels));
-    register(spec, gauge.clone());
-    gauge
+pub fn gauge_vec(opts: impl Into<Opts>, labels: &[&str]) -> IntGaugeVec {
+    register(validate(IntGaugeVec::new(opts.into(), labels)))
+}
+
+/// Creates and registers a histogram with caller-controlled names, units, and buckets.
+pub fn histogram(opts: HistogramOpts) -> Histogram {
+    register(validate(Histogram::with_opts(opts)))
+}
+
+/// Creates and registers a labeled histogram with caller-controlled options.
+pub fn histogram_vec(opts: HistogramOpts, labels: &[&str]) -> HistogramVec {
+    register(validate(HistogramVec::new(opts, labels)))
 }
 
 /// Converts an unsigned metric value to a saturating Prometheus gauge value.
@@ -117,9 +131,7 @@ impl OperationCounters {
         let opts = HistogramOpts::new(micros.name, micros.help)
             .namespace(NAMESPACE)
             .buckets(OPERATION_BUCKETS_MICROS.to_vec());
-        let counters = Self(validate(HistogramVec::new(opts, &["op"])));
-        register(micros, counters.0.clone());
-        counters
+        Self(histogram_vec(opts, &["op"]))
     }
 
     /// Starts an operation timer that records latency when the returned guard drops.
@@ -164,23 +176,21 @@ impl Drop for OperationTimer<'_> {
     }
 }
 
-/// Builds namespaced Prometheus options for an engine metric.
-fn opts(spec: MetricSpec) -> Opts {
-    Opts::new(spec.name, spec.help).namespace(NAMESPACE)
-}
-
 /// Registers `collector`, logging registry errors without aborting startup.
-fn register<C>(spec: MetricSpec, collector: C)
+fn register<C>(collector: C) -> C
 where
-    C: prometheus::core::Collector + 'static,
+    C: prometheus::core::Collector + Clone + 'static,
 {
-    if let Err(error) = default_registry().register(Box::new(collector)) {
-        warn!(metric = spec.name, ?error, "failed to register metric");
+    if let Err(error) = default_registry().register(Box::new(collector.clone())) {
+        let descriptors = collector.desc();
+        let name = descriptors.first().map(|desc| desc.fq_name.as_str());
+        warn!(metric = name, ?error, "failed to register metric");
     }
+    collector
 }
 
 /// Unwraps construction of static metric definitions.
 #[allow(clippy::expect_used)]
 fn validate<T>(result: prometheus::Result<T>) -> T {
-    result.expect("prometheus metric registration should succeed")
+    result.expect("valid static Prometheus metric definition")
 }
