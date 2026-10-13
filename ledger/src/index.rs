@@ -115,6 +115,7 @@ pub(crate) struct TxSpan {
 }
 
 impl TxSpan {
+    /// Decodes the transaction's paired blockstore and execution spans.
     fn from_value(bytes: &[u8]) -> Result<Self> {
         let value = fixed::<TX_SPAN_BYTES>(bytes, "invalid transaction span value")?;
         Ok(Self {
@@ -209,7 +210,10 @@ impl Index {
                     outside(spans.blockstore, blockstore) || outside(spans.execution, executions)
                 }
                 Some(&ACCOUNT) => {
-                    outside(Span::from_key(&key[ACCOUNT_PREFIX_BYTES..])?, executions)
+                    let bytes = key
+                        .get(ACCOUNT_PREFIX_BYTES..)
+                        .ok_or(LedgerError::Corruption("invalid account index key"))?;
+                    outside(Span::from_key(bytes)?, executions)
                 }
                 Some(&BLOCK) => outside(Span::from_value(&value)?, blockstore),
                 _ => return Err(LedgerError::Corruption("invalid index namespace")),
