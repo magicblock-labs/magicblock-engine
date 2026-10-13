@@ -169,11 +169,16 @@ impl LedgerAppender {
         self.indexer.send(IndexMessage::Transaction { signature, accounts, span })
     }
 
-    /// Publishes a block's data spans before queuing its atomic index commit.
+    /// Flushes block data and its atomic index before publishing the replay boundary.
     fn write_block(&mut self, block: Signed<Block>) -> Result<()> {
         let span = self.writer.write_blockstore(&BlockstoreEntry::Block(block))?;
-        self.publish(Some(block.payload.slot), Durability::Buffer)?;
-        self.indexer.send(IndexMessage::Block { slot: block.slot, span })?;
+        let cursors = self.writer.persist(Durability::Buffer)?;
+        let (response, acknowledged) = oneshot::channel();
+        self.indexer.send(IndexMessage::Block { slot: block.slot, span, response })?;
+        acknowledged.recv().map_err(|_| LedgerError::IndexerFenceClosed)?;
+        // Replay must never reach account writes whose transaction index was
+        // still queued in memory when the process exited.
+        self.publish(cursors, Some(block.payload.slot), Durability::Buffer)?;
         if block.slot.is_multiple_of(SIZE_CHECK_FREQUENCY) && self.ledger.size_exceeded()? {
             self.sync()?;
             self.truncate()?;
@@ -209,7 +214,8 @@ impl LedgerAppender {
     /// Publishes a state checkpoint without adding a synchronous durability fence.
     fn write_checkpoint(&mut self, checkpoint: Signed<Checkpoint>) -> Result<()> {
         self.writer.write_blockstore(&BlockstoreEntry::Checkpoint(checkpoint))?;
-        self.publish(None, Durability::Buffer)
+        let cursors = self.writer.persist(Durability::Buffer)?;
+        self.publish(cursors, None, Durability::Buffer)
     }
 
     /// Writes and publishes a volatile-state reset marker.
@@ -223,13 +229,18 @@ impl LedgerAppender {
     /// Makes files and preceding block indexes durable, publishes accumulated
     /// metadata, and broadcasts the new blockstore position.
     fn sync(&mut self) -> Result<()> {
-        self.publish(None, Durability::SyncData)?;
-        self.indexer.fence(None)
+        let cursors = self.writer.persist(Durability::SyncData)?;
+        self.indexer.fence(None)?;
+        self.publish(cursors, None, Durability::SyncData)
     }
 
-    /// Publishes one data-file boundary with buffered or data-synced durability.
-    fn publish(&mut self, slot: Option<Slot>, durability: Durability) -> Result<()> {
-        let cursors = self.writer.persist(durability)?;
+    /// Publishes flushed file cursors only after their preceding indexes are ready.
+    fn publish(
+        &mut self,
+        cursors: Cursors,
+        slot: Option<Slot>,
+        durability: Durability,
+    ) -> Result<()> {
         self.writer.publish(cursors, slot, durability)?;
         self.ledger.meta.transactions.fetch_add(self.transactions, Release);
         if let Some(slot) = slot {

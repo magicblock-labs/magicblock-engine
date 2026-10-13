@@ -171,6 +171,15 @@ impl Sequencer {
                 Ok(())
             }
             SequencerMessage::Barrier(guard) => self.barrier(guard).await,
+            SequencerMessage::Shutdown(guard) => {
+                // A sender can pass Engine's termination check before this fence
+                // and enqueue afterwards. Close ingress before the final drain.
+                self.rx.close();
+                while let Some(message) = self.rx.recv().await {
+                    Box::pin(self.handle_message(message)).await?;
+                }
+                self.barrier(guard).await
+            }
         }
     }
 

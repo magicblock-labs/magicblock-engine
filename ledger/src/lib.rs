@@ -181,6 +181,13 @@ impl Ledger {
             let id = meta.id;
             superblocks.insert(id, Superblock::open(meta, &index)?);
         }
+        if let Some(head) = superblocks.get(&meta.head()) {
+            index.truncate(
+                &head.index,
+                head.meta.cursors.blockstore.load(Acquire),
+                head.meta.cursors.executions.load(Acquire),
+            )?;
+        }
         info!(?directory, superblocks = superblocks.len(), "opened ledger");
         Ok(Self {
             meta,

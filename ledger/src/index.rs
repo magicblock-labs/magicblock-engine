@@ -114,6 +114,16 @@ pub(crate) struct TxSpan {
     pub(crate) execution: Span,
 }
 
+impl TxSpan {
+    fn from_value(bytes: &[u8]) -> Result<Self> {
+        let value = fixed::<TX_SPAN_BYTES>(bytes, "invalid transaction span value")?;
+        Ok(Self {
+            blockstore: Span::from_value(&value[..SPAN_BYTES])?,
+            execution: Span::from_value(&value[SPAN_BYTES..])?,
+        })
+    }
+}
+
 /// Reverse account-index iterator over execution spans.
 pub(crate) struct AccountIter {
     inner: Rev<fjall::Iter>,
@@ -178,6 +188,39 @@ impl Index {
         self.db.delete_keyspace(keyspace).map_err(Into::into)
     }
 
+    /// Removes an indexed tail whose file cursors were not published before a crash.
+    pub(crate) fn truncate(
+        &self,
+        keyspace: &Keyspace,
+        blockstore: u64,
+        executions: u64,
+    ) -> Result<()> {
+        let Some(last) = keyspace.prefix([BLOCK]).next_back() else { return Ok(()) };
+        let outside = |span: Span, limit| span.offset() + span.size() > limit;
+        if !outside(Span::from_value(&last.value()?)?, blockstore) {
+            return Ok(());
+        }
+        let mut batch = self.db.batch();
+        for entry in keyspace.iter() {
+            let (key, value) = entry.into_inner()?;
+            let unpublished = match key.first() {
+                Some(&TRANSACTION) => {
+                    let spans = TxSpan::from_value(&value)?;
+                    outside(spans.blockstore, blockstore) || outside(spans.execution, executions)
+                }
+                Some(&ACCOUNT) => {
+                    outside(Span::from_key(&key[ACCOUNT_PREFIX_BYTES..])?, executions)
+                }
+                Some(&BLOCK) => outside(Span::from_value(&value)?, blockstore),
+                _ => return Err(LedgerError::Corruption("invalid index namespace")),
+            };
+            if unpublished {
+                batch.remove(keyspace, key);
+            }
+        }
+        batch.durability(Some(PersistMode::SyncData)).commit().map_err(Into::into)
+    }
+
     /// Creates the single writer for a superblock keyspace.
     pub(crate) fn writer(&self, keyspace: &Keyspace) -> IndexWriter {
         let batch = self.db.batch();
@@ -200,11 +243,7 @@ impl<'a> IndexReader<'a> {
         let Some(value) = self.0.get(transaction_key(signature))? else {
             return Ok(None);
         };
-        let value = fixed::<TX_SPAN_BYTES>(&value, "invalid transaction span value")?;
-        Ok(Some(TxSpan {
-            blockstore: Span::from_value(&value[..SPAN_BYTES])?,
-            execution: Span::from_value(&value[SPAN_BYTES..])?,
-        }))
+        TxSpan::from_value(&value).map(Some)
     }
 
     /// Locates a block boundary by slot.

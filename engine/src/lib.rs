@@ -111,7 +111,10 @@ impl Engine {
     pub async fn shutdown(&self, dump: bool) -> Result<()> {
         info!(dump, "shutting down the engine");
         self.terminating.store(true, Ordering::Release);
-        let _guard = self.barrier().await?;
+        let (controller, guard) = runtime::barrier();
+        self.sequencer.send(SequencerMessage::Shutdown(guard)).await?;
+        controller.acknowledged.await?;
+        let _guard = controller.released;
         if dump {
             self.accounts().dump(None).map_err(KeeperError::from)?;
         }

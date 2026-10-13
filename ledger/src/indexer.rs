@@ -24,7 +24,11 @@ pub(crate) enum IndexMessage {
         span: TxSpan,
     },
     /// Commits all preceding transaction entries atomically with this block.
-    Block { slot: Slot, span: Span },
+    Block {
+        slot: Slot,
+        span: Span,
+        response: oneshot::Sender<()>,
+    },
     /// Makes preceding blocks durable or starts a successor keyspace.
     Fence {
         next: Option<Keyspace>,
@@ -84,7 +88,10 @@ impl LedgerIndexer {
                     self.writer.insert_transaction(&signature, span);
                     self.writer.insert_accounts(&accounts, span.execution);
                 }
-                IndexMessage::Block { slot, span } => self.commit_block(slot, span)?,
+                IndexMessage::Block { slot, span, response } => {
+                    self.commit_block(slot, span)?;
+                    let _ = response.send(());
+                }
                 IndexMessage::Fence { next, response } => {
                     if let Some(keyspace) = next {
                         self.writer.rotate_memtable()?;
