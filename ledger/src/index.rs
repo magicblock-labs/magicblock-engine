@@ -196,11 +196,7 @@ impl Index {
         blockstore: u64,
         executions: u64,
     ) -> Result<()> {
-        let Some(last) = keyspace.prefix([BLOCK]).next_back() else { return Ok(()) };
         let outside = |span: Span, limit| span.offset() + span.size() > limit;
-        if !outside(Span::from_value(&last.value()?)?, blockstore) {
-            return Ok(());
-        }
         let mut batch = self.db.batch();
         for entry in keyspace.iter() {
             let (key, value) = entry.into_inner()?;
@@ -221,6 +217,9 @@ impl Index {
             if unpublished {
                 batch.remove(keyspace, key);
             }
+        }
+        if batch.is_empty() {
+            return Ok(());
         }
         batch.durability(Some(PersistMode::SyncData)).commit().map_err(Into::into)
     }

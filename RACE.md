@@ -99,13 +99,14 @@ before publishing their cursors.
 There is an inverse crash window between index commit and cursor publication.
 Startup removes active-head index entries beyond the published file cursors,
 so they cannot expose transactions that replay did not restore or point into
-bytes subsequently overwritten by the appender. Clean heads take a last-block
-index check; only an unpublished indexed tail requires a keyspace scan.
+bytes subsequently overwritten by the appender. Cleanup scans only the active
+head; sealed segments do not need this repair. A final sync can index executions
+without a new block marker, so checking only the last indexed block is insufficient.
 
 This is process-crash ordering, not a claim of atomic power-loss durability
 across the data files, mmap metadata, and Fjall journals. Buffered boundaries
 retain their existing durability policy. The added index wait's effect on block
-publication latency has not been benchmarked.
+publication latency and the active-head startup scan have not been benchmarked.
 
 Relevant sources: `ledger/src/appender.rs`, `ledger/src/indexer.rs`,
 `ledger/src/index.rs`, `ledger/src/lib.rs`, `ledger/src/reader.rs`, and
