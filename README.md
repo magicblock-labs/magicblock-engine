@@ -118,8 +118,8 @@ replication, not consensus between peers. [Replication →](replicator/README.md
 
 ### 🩹 Drain cleanly and recover on restart
 
-Coordinated shutdown drains work and synchronizes storage. Keep Engine and the
-async runtime alive while services finish:
+Coordinated shutdown drains scheduled execution and synchronizes storage. Keep
+Engine and the async runtime alive while services finish:
 
 ```rust
 let reason = shutdown.wait().await;

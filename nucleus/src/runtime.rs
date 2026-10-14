@@ -90,6 +90,10 @@ pub enum SequencerMessage {
     /// a consistent snapshot at superblock boundaries (see ledger replay and
     /// `finalize_superblock`).
     Barrier(BarrierGuard),
+    /// Close execution ingress and drain scheduled work, then pause until released.
+    /// Submissions queued behind this marker are dropped when the sequencer exits.
+    #[from(skip)]
+    Shutdown(BarrierGuard),
 }
 
 /// Quiescence barrier handed to a running service.

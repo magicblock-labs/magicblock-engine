@@ -85,7 +85,12 @@ take precedence when both are due. Followers consume upstream boundaries.
 ## Shutdown
 
 The host stops ingress and terminates the retained shutdown manager while Engine
-and the async runtime remain alive. Services drain execution and synchronize storage.
+and the async runtime remain alive. Engine closes execution ingress at a terminal
+marker, drains scheduled execution, and holds the barrier while synchronizing storage.
+Work ahead of the marker is processed normally; submissions queued behind it are
+dropped when the sequencer exits, and their execution waiters receive channel errors.
+Waiting sends fail once ingress closes. Queueing acknowledgment is not an execution
+guarantee during shutdown.
 Locally paced engines publish a final block; followers also save volatile state for
 restart. Follower draining follows the [replication boundary](../replicator/README.md#follower-recovery).
 

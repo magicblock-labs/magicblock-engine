@@ -126,25 +126,14 @@ impl Sequencer {
         Ok(())
     }
 
-    /// Main loop: handles executor completions, inbound messages, and shutdown,
+    /// Handles executor completions, inbound messages, and shutdown,
     /// then drains on orderly cancellation and joins the executor threads.
     async fn run(mut self) {
-        let mut reason = loop {
-            let result = tokio::select! {
-                biased;
-                Some(msg) = self.rx.recv(), if self.accepting() => {
-                    self.handle_message(msg).await
-                }
-                Some(event) = self.executors.events.recv() => {
-                    self.handle_event(event)
-                }
-                _ = self.shutdown.signalled() => {
-                    break ShutdownReason::Signalled;
-                }
-            };
-            if let Err(error) = result {
+        let mut reason = match self.process().await {
+            Ok(()) => ShutdownReason::Signalled,
+            Err(error) => {
                 error!(?error, "sequencer failed, terminating");
-                break ShutdownReason::Error(Box::new(error));
+                ShutdownReason::Error(Box::new(error))
             }
         };
         if matches!(reason, ShutdownReason::Signalled) {
@@ -160,17 +149,33 @@ impl Sequencer {
         self.shutdown.terminate(reason);
     }
 
-    /// Dispatches an inbound message to the transaction or block handler.
-    async fn handle_message(&mut self, msg: SequencerMessage) -> Result<()> {
-        match msg {
-            SequencerMessage::Transaction(txn) => self.schedule(txn).await,
-            SequencerMessage::Block { block, tx } => self.finalize(block, tx).await,
-            SequencerMessage::Checkpoint { block, tx, guard } => {
-                self.finalize(BlockInput::Production(block), tx).await?;
-                self.pause(guard).await;
-                Ok(())
-            }
-            SequencerMessage::Barrier(guard) => self.barrier(guard).await,
+    /// Processes ordered messages and completions until shutdown or execution failure.
+    async fn process(&mut self) -> Result<()> {
+        loop {
+            tokio::select! {
+                biased;
+                Some(msg) = self.rx.recv(), if self.accepting() => {
+                    match msg {
+                        SequencerMessage::Transaction(txn) => self.schedule(txn).await,
+                        SequencerMessage::Block { block, tx } => self.finalize(block, tx).await,
+                        SequencerMessage::Checkpoint { block, tx, guard } => {
+                            self.finalize(BlockInput::Production(block), tx).await?;
+                            self.pause(guard).await;
+                            Ok(())
+                        }
+                        SequencerMessage::Barrier(guard) => self.barrier(guard).await,
+                        SequencerMessage::Shutdown(guard) => {
+                            self.rx.close();
+                            self.barrier(guard).await?;
+                            // Do not resume ingress after terminal storage synchronization.
+                            self.shutdown.signalled().await;
+                            return Ok(());
+                        }
+                    }
+                }
+                Some(event) = self.executors.events.recv() => self.handle_event(event),
+                _ = self.shutdown.signalled() => return Ok(()),
+            }?;
         }
     }
 
