@@ -5,6 +5,7 @@ mod account;
 #[cfg(feature = "bincode")]
 mod codec;
 mod cow;
+mod mode;
 mod patch;
 #[cfg(feature = "bincode")]
 pub mod state_traits;
@@ -17,9 +18,10 @@ mod traits;
 
 pub use account::{Account, PROGRAM_OWNERS, create_is_signer_account_infos};
 pub use cow::{
-    ALIGNMENT, AccountBuilder, AccountMode, AccountSeqLock, AccountSharedData, BorrowedAccount,
-    CoWAccount, DirtyMarkers, OwnedAccount, STORAGE_UNIT, StateFlags, StorageUnit,
+    ALIGNMENT, AccountBuilder, AccountSeqLock, AccountSharedData, BorrowedAccount, CoWAccount,
+    DirtyMarkers, OwnedAccount, STORAGE_UNIT, StateFlags, StorageUnit,
 };
+pub use mode::{AccessMode, AccountKind, AccountMode, DataFlow, InvalidAccountMode};
 pub use patch::{AccountFieldPatch, AccountPatchError};
 #[cfg(feature = "bincode")]
 pub use sysvar::{

@@ -29,7 +29,7 @@ pub(crate) fn process(
     for i in 0..count {
         let index = instruction.get_index_of_instruction_account_in_transaction(i)?;
         let account = ctx.transaction_context.accounts().try_borrow(index)?;
-        if instruction.is_instruction_account_writable(i)? && !account.mutable() {
+        if instruction.is_instruction_account_writable(i)? && !account.can_writeback() {
             ic_msg!(
                 ctx,
                 "MagicRoot: post-finalize rejected immutable writable account: {}",

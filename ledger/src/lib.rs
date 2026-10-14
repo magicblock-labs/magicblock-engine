@@ -50,7 +50,7 @@ const APPENDER_QUEUE_CAPACITY: usize = 2_048;
 const INDEXER_QUEUE_CAPACITY: usize = 2_048;
 const READER_QUEUE_CAPACITY: usize = 128;
 /// Current on-disk superblock format version.
-const VERSION: LedgerVersion = 1;
+const VERSION: LedgerVersion = 2;
 /// Version tag stored at the start of every superblock metadata header.
 pub type LedgerVersion = u64;
 

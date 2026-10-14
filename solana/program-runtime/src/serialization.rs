@@ -1331,7 +1331,7 @@ mod tests {
     fn deserialize_rejects_post_transition_credits() {
         for loader in [bpf_loader::id(), bpf_loader_deprecated::id()] {
             for (from, to) in [
-                (AccountMode::Delegated, AccountMode::Transient),
+                (AccountMode::Delegated, AccountMode::Undelegating),
                 (AccountMode::Magic, AccountMode::Closed),
             ] {
                 let program = Pubkey::new_unique();
@@ -1375,7 +1375,7 @@ mod tests {
                 let account = context.accounts().try_borrow(1).unwrap();
                 assert_eq!(account.lamports(), 10);
                 assert_eq!(*account.markers(), markers);
-                assert!(account.mutable());
+                assert!(account.can_writeback());
             }
         }
     }

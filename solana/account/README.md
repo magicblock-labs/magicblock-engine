@@ -8,37 +8,83 @@ persistence and the host owns validation of imported state.
 
 ## Account lifecycle
 
-Lifecycle separates authority from mutability. `Delegated` accounts are delegated
-to this ER; `Magic` accounts are authoritative state created within it. Both allow
-user mutation. `Transient` accounts remain authoritative while awaiting lifecycle
-resolution but reject user writes. `Closed` marks state for storage removal.
+`AccountMode` combines residual classification (`AccountKind`), ordinary local
+access (`AccessMode`), and ongoing synchronization policy (`DataFlow`) in two
+bytes. Named constants expose the supported combinations:
 
-Transitions to transient or closed revoke mutation immediately, including in CPI.
-The transaction-final writeback guard can accept a dirty transition into those
-modes without permitting further program writes. Other modes represent cached
-external absence (`Uninit`), a read-only mirror (`ReadOnly`), and internal sysvar,
-feature, or precompile state (`System`).
+| Constant | Kind | Access | DataFlow |
+| --- | --- | --- | --- |
+| `Uninit` | Uninit | ReadOnly | BaseToMagic |
+| `Base` | Regular | ReadOnly | BaseToMagic |
+| `Delegated` | Regular | Writable | MagicToBase |
+| `Undelegating` | Regular | ReadOnly | MagicToBase |
+| `Magic` | Regular | Writable | None |
+| `System` | System | ReadOnly | None |
+| `MirroredSystem` | System | ReadOnly | BaseToMagic |
+| `Closed` | Closed | ReadOnly | None |
 
-Privileged replacement validates mode and source slot together. Authoritative
-state can't be refreshed in the same mode, even at a newer slot; otherwise a later
-external image could overwrite local execution. Ordinary transaction mutations
-aren't replacements and don't follow that restriction.
+The default is `Uninit`. An account delegated to another validator uses `Base`;
+its delegation status is not separately retained by the mode. Callers can compare
+complete modes with `account.is(AccountMode::Magic)` or use typed getters and
+predicates. Mode fields are private, and decoding admits only supported states.
 
-| From | Allowed at the same or a newer slot | Requires a strictly newer slot |
-| :-- | :-- | :-- |
-| Uninit | ReadOnly, System, Delegated, Magic, Closed | Uninit |
-| ReadOnly | Delegated, Magic, Closed | ReadOnly, Uninit |
+`is_writable()` controls ordinary program mutation. `can_writeback()` on shared
+account data also accepts this transaction's dirty transitions into Undelegating
+or Closed, without authorizing further writes, including across CPI.
+
+`is_authoritative()` protects Regular accounts whose policy is None or MagicToBase:
+Magic, active local delegation, and undelegating state. Base mirrors remain
+refreshable and evictable. Both System modes remain volatile and survive mirror
+reset. The host establishes delegation authority, commit targets, and trusted
+lifecycle evidence; this type stores no keys or proof of that authority.
+
+DataFlow describes ongoing account-state synchronization between the base chain
+and the Magic Validator. Magic names the validator here, independently of the
+account mode. Initial cloning and
+delegation-status observation are separate. MagicToBase remains the policy during
+handoff without authorizing ordinary writes or arbitrary new commits.
+
+Mode and slot are validated together. **System** below means either System
+constant; the slot requirement also applies when changing between their flows.
+
+| From | Same or newer slot | Strictly newer slot |
+| --- | --- | --- |
+| Uninit | Base, System, Delegated, Magic, Closed | Uninit |
+| Base | Delegated, Magic, Closed | Base, Uninit |
 | System | — | System |
-| Delegated | Transient | — |
+| Delegated | Undelegating | — |
 | Magic | Closed | — |
-| Transient | ReadOnly, Uninit, Closed | Delegated |
+| Undelegating | Base, Uninit, Closed | Delegated |
 | Closed | — | — |
 
-Unlisted transitions and slot regressions fail without changing state or dirty
-markers. Magic state must be explicitly closed before another image can occupy
-its key, regardless of token balance. The host validates creation and closure
-eligibility, including application-specific token rules. [Engine's import path](../../engine/README.md#account-replacement)
-owns observation-based deduplication and the evidence required for redelegation.
+Unlisted transitions and slot regressions are rejected without changing state or
+dirty markers. Authoritative accounts cannot be replaced in the same mode, even
+at a newer slot; ordinary transaction mutations are unaffected. Access and flow
+changes are part of the complete lifecycle transition, not independent setters.
+
+Magic represents locally authoritative ER state without direct base commitment
+through protocol delegation. A base counterpart may exist independently. Magic
+must be closed before another image can occupy its key; the host validates
+creation and closure eligibility. Empty token balances do not invalidate Magic
+accounts, and this crate does not interpret token data.
+
+[Engine's import path](../../engine/README.md#account-replacement) owns
+observation-based deduplication and the evidence required for redelegation.
+
+Closed is a deletion tombstone, retained in the transaction until storage removes
+the image. It means deletion has occurred, rather than eligibility for closure.
+
+The binary mode encoding is `[kind_byte, policy_byte]`: policy bit 0 is Access,
+bits 1–2 are DataFlow, and the remaining bits are reserved. Decoders reject
+invalid tags, reserved bits, and unsupported combinations before constructing a
+mode. The mode and mmap core remain two and 56 bytes respectively. This encoding
+replaces the unpublished kind/access prototype; existing prototype state must
+be discarded. Accountsdb and ledger format version 2 remain the new format of
+this unreleased refactor; replication protocol version 1 is unchanged.
+
+Flags are supplied as a complete value during privileged finalization, which
+does not change lamports. They are not evidence of source freshness. Producers
+and consumers must agree on lifecycle semantics as well as binary encoding.
 
 ## Borrowed storage
 

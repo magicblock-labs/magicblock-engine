@@ -65,7 +65,7 @@ impl VolatileStore {
         for (pubkey, account) in accounts {
             // An account that has moved to an authoritative mode, or has been
             // closed, drops any stale volatile copy.
-            if account.mode().authoritative() || account.is(AccountMode::Closed) {
+            if account.mode().is_authoritative() || account.is(AccountMode::Closed) {
                 self.delete(pubkey);
                 continue;
             }
@@ -114,7 +114,7 @@ impl VolatileStore {
     pub(crate) fn reset(&self) {
         self.programs.clear_sync();
         self.accounts.retain_sync(|k, a| {
-            if !a.is(AccountMode::System) {
+            if a.mode().kind() != solana_account::AccountKind::System {
                 return false;
             }
             let mut set = self.programs.entry_sync(a.owner()).or_default();

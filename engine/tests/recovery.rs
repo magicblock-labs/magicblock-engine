@@ -199,7 +199,7 @@ async fn clean_restart_reopens_persisted_and_volatile_state() {
     te.execute(transaction.clone()).await.expect("increment commits");
     te.advance(1).await;
     let direct = store_v42(&te, 7, AccountMode::Delegated);
-    let volatile = store_v42(&te, 8, AccountMode::ReadOnly);
+    let volatile = store_v42(&te, 8, AccountMode::Base);
     let expected_clock = te.clock(te.blocks().latest());
     assert!(expected_clock.epoch > 0);
     let (dirs, authority) = te.close().await;

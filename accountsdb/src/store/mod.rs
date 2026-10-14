@@ -33,7 +33,7 @@ pub(crate) use defrag::MIN_REMAINDER;
 pub(crate) use mmap::Stats;
 
 /// Current on-disk storage format version.
-pub(crate) const VERSION: DatabaseVersion = 1;
+pub(crate) const VERSION: DatabaseVersion = 2;
 /// Version tag stored in the metadata header.
 pub(crate) type DatabaseVersion = u64;
 
@@ -157,7 +157,7 @@ impl PersistedStore {
         let (pubkey, account) = acc;
         // An account that has moved to a non-authoritative mode, or has been
         // closed, no longer belongs here, so drop any stale persisted entry.
-        if !account.mode().authoritative() || account.is(AccountMode::Closed) {
+        if !account.mode().is_authoritative() || account.is(AccountMode::Closed) {
             self.delete(pubkey, txn)?;
             if let Borrowed(acc) = account.cow() {
                 acc.commit();

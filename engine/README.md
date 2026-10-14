@@ -59,7 +59,7 @@ or skipped as already handled or superseded. A different mode at the same slot
 still reaches [lifecycle validation](../solana/account/README.md#account-lifecycle).
 
 MBV validates source freshness, replacement eligibility, and action provenance.
-Engine enforces lifecycle transitions. Transient redelegation requires a new
+Engine enforces lifecycle transitions. Undelegating redelegation requires a new
 delegation at a strictly newer slot, not a newer observation of the old delegation.
 Delegated state can't be replaced in the same mode. Magic state remains authoritative
 until explicitly closed, regardless of token balance. Materialization and deletion
@@ -69,6 +69,15 @@ After submission, the operation retains its lease through completion even if the
 waiter is cancelled. An uncertain outcome requires reacquiring the accessor and
 reconciling state before retrying. A definitive execution failure rolls back the
 replacement and follow-up account changes.
+
+Account modes separate classification, local write access, and synchronization
+policy. Accounts delegated to other validators use the same mode as base mirrors.
+Magic and MagicToBase regular state retain local authority, including read-only
+Undelegating accounts. Complete mode changes include access and flow, so neither
+is deduplicated as an identical observation. The new encoding requires accountsdb
+and ledger format version 2 and fresh state; deploy matching producers and
+consumers. Replication protocol version 1 remains unchanged. Earlier lifecycle
+payloads are not replay-compatible.
 
 ## Startup and recovery
 

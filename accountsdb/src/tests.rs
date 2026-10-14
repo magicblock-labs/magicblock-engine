@@ -79,10 +79,10 @@ fn reload(db: &AccountsDB, pubkey: &Pubkey) -> AccountSharedData {
 fn close(db: &AccountsDB, pubkey: &Pubkey) {
     let mut acc = reload(db, pubkey);
     if acc.is(AccountMode::Delegated) {
-        transition(&mut acc, AccountMode::Transient);
+        transition(&mut acc, AccountMode::Undelegating);
     }
-    if acc.is(AccountMode::Transient) {
-        transition(&mut acc, AccountMode::ReadOnly);
+    if acc.is(AccountMode::Undelegating) {
+        transition(&mut acc, AccountMode::Base);
     }
     transition(&mut acc, AccountMode::Closed);
     store(db, *pubkey, acc);
@@ -162,20 +162,20 @@ fn test_routing_and_persistence_flips() {
     assert_eq!(program(&db, &p), vec![b]); // `a` left p's set
     assert_eq!(program(&db, &q), vec![a]); // and joined q's
 
-    // Transient is immutable to programs but remains persistent while its
+    // Undelegating is immutable to programs but remains persistent while its
     // lifecycle state is unresolved.
     let mut flip = reload(&db, &a);
-    transition(&mut flip, AccountMode::Transient);
+    transition(&mut flip, AccountMode::Undelegating);
     flip.set_lamports(30);
     store(&db, a, flip);
     let transient = reload(&db, &a);
-    assert!(!transient.mutable());
+    assert!(!transient.can_writeback());
     assert!(in_persisted(&db, &a) && !in_volatile(&db, &a));
     assert_eq!(lamports(&db, &a), 30);
 
     // Resolving to ReadOnly evicts the persisted copy into volatile.
     let mut flip = reload(&db, &a);
-    transition(&mut flip, AccountMode::ReadOnly);
+    transition(&mut flip, AccountMode::Base);
     store(&db, a, flip);
     assert!(!in_persisted(&db, &a) && in_volatile(&db, &a));
     assert_eq!(lamports(&db, &a), 30);
@@ -193,9 +193,81 @@ fn test_routing_and_persistence_flips() {
     // reset() drops volatile mirror only; persisted state is authoritative.
     let c = Pubkey::new_unique();
     store(&db, c, delegated_account(50, vec![], p).build());
+    let systems = [AccountMode::System, AccountMode::MirroredSystem].map(|mode| {
+        let key = Pubkey::new_unique();
+        store(
+            &db,
+            key,
+            AccountBuilder::default().owner(p).lamports(40).mode(mode).build(),
+        );
+        assert!(in_volatile(&db, &key) && !in_persisted(&db, &key));
+        key
+    });
     db.reset();
     assert!(!in_volatile(&db, &b));
     assert!(in_persisted(&db, &c));
+    for key in systems {
+        assert!(in_volatile(&db, &key));
+        assert!(program(&db, &p).contains(&key));
+    }
+}
+
+/// Mirrors become protected local state until delegation handoff completes.
+#[test]
+fn test_mirror_and_handoff_routing() {
+    let (_dir, db) = db();
+    let key = Pubkey::new_unique();
+    let mirror = AccountMode::Base;
+    store(
+        &db,
+        key,
+        AccountBuilder::default().mode(mirror).slot(10).lamports(20).build(),
+    );
+    assert!(in_volatile(&db, &key) && !in_persisted(&db, &key));
+    let mut account = reload(&db, &key);
+    account.set_lifecycle(mirror, 11).unwrap();
+    account.set_lamports(30);
+    store(&db, key, account);
+    assert_eq!(lamports(&db, &key), 30);
+
+    let mut account = reload(&db, &key);
+    account.set_lifecycle(AccountMode::Delegated, 11).unwrap();
+    store(&db, key, account);
+    assert!(in_persisted(&db, &key) && !in_volatile(&db, &key));
+    let mut account = reload(&db, &key);
+    transition(&mut account, AccountMode::Undelegating);
+    store(&db, key, account);
+    let mut account = reload(&db, &key);
+    account.set_lifecycle(mirror, 11).unwrap();
+    store(&db, key, account);
+    assert!(in_volatile(&db, &key) && !in_persisted(&db, &key));
+    db.reset();
+    assert!(!db.loader().contains(&key).unwrap());
+}
+
+/// Opening rejects the old core layout before attempting to decode its volatile snapshot.
+#[test]
+fn test_old_storage_version_rejected() {
+    use std::{fs, os::unix::fs::FileExt};
+
+    let (dir, db) = db();
+    db.flush(true).unwrap();
+    drop(db);
+    let active = AccountsDB::directory(dir.path());
+    let path = active.join(STORAGE_FILE);
+    let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.write_all_at(&1u64.to_ne_bytes(), 0).unwrap();
+    // A decoder error here would show that version validation happened too late.
+    let snapshot = active.join(VOLATILE_DB_FILE);
+    fs::write(&snapshot, b"invalid old snapshot").unwrap();
+    assert!(matches!(
+        AccountsDB::new(dir.path()),
+        Err(AccountsDBError::UnsupportedVersion(1))
+    ));
+    assert!(
+        path.exists() && snapshot.exists(),
+        "incompatible state is left intact"
+    );
 }
 
 // Both migration directions remove the source image and owner mapping, retain
@@ -230,8 +302,8 @@ fn test_store_kind_migration_invariants() {
         let base = cursor(&db);
 
         let mut account = reload(&db, &key);
-        transition(&mut account, AccountMode::Transient);
-        transition(&mut account, AccountMode::ReadOnly);
+        transition(&mut account, AccountMode::Undelegating);
+        transition(&mut account, AccountMode::Base);
         account.set_owner(volatile_owner);
         account.set_lamports(20);
         store(&db, key, account);
@@ -333,7 +405,7 @@ fn test_dump_restores_volatile_on_reopen() {
 
     {
         let db = AccountsDB::new(dir.path()).unwrap();
-        let account = AccountBuilder::default().lamports(42).mode(AccountMode::ReadOnly).build();
+        let account = AccountBuilder::default().lamports(42).mode(AccountMode::Base).build();
         store(&db, key, account);
         db.dump(None).unwrap();
         assert!(dump.exists(), "dump is written into the active tree");
@@ -578,7 +650,7 @@ fn test_snapshot_export_and_volatile_restore() {
     let snapshot = {
         let db = AccountsDB::new(src.path()).unwrap();
         let aacc = delegated_account(10, vec![], Pubkey::default());
-        let bacc = AccountBuilder::default().lamports(20).mode(AccountMode::ReadOnly);
+        let bacc = AccountBuilder::default().lamports(20).mode(AccountMode::Base);
         db.store(&[(a, aacc.build()), (b, bacc.build())]).unwrap();
         // SAFETY: the test holds exclusive access to the store.
         unsafe { db.snapshot(1) }.unwrap()
