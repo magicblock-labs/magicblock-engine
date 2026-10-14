@@ -28,8 +28,10 @@ or publishing live transaction notifications.
 
 Snapshots and checksums require a stable state beyond a queue drain. An execution
 barrier drains in-flight work and prevents later execution until released.
-Block-boundary checkpoints hold this barrier while sampling state; shutdown uses
-it before terminal synchronization.
+Block-boundary checkpoints hold this barrier while sampling state. Shutdown closes
+execution ingress and drains scheduled work through the same barrier before terminal
+synchronization. Submissions queued behind the shutdown marker never execute and
+are dropped when the sequencer exits.
 
 The execution path also relies on barrier exclusion to prevent relocation of
 borrowed account storage. Simulation runs independently and retains its own reader

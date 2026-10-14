@@ -13,7 +13,7 @@ use keeper::{Keeper, builder::KeeperBuilder, error::KeeperError};
 use ledger::schema::OwnedBlockstoreEntry;
 use magic_root_program::entrypoint::MagicRootEntrypoint;
 use nucleus::{
-    runtime::{self, BarrierHandle, BlockInput, SequencerHandle},
+    runtime::{self, BarrierGuard, BarrierHandle, BlockInput, SequencerHandle},
     shutdown::{Service, ShutdownManager, ShutdownReason},
 };
 use processor::{SequencerMessage, sequencer::Sequencer};
@@ -105,13 +105,17 @@ impl Engine {
 
     /// Quiesces execution and closes durable state.
     ///
+    /// Work ahead of the terminal marker drains before storage closes. Submissions
+    /// queued behind it are dropped when the sequencer exits, even if queueing was
+    /// acknowledged; their execution waiters receive channel errors.
+    ///
     /// `dump` serializes chain-mirrored state for an externally paced replica to
     /// restore on its next open. Internally paced leaders clear that state once
     /// during startup instead and only flush durable state here.
     pub async fn shutdown(&self, dump: bool) -> Result<()> {
         info!(dump, "shutting down the engine");
         self.terminating.store(true, Ordering::Release);
-        let _guard = self.barrier().await?;
+        let _guard = self.pause(SequencerMessage::Shutdown).await?;
         if dump {
             self.accounts().dump(None).map_err(KeeperError::from)?;
         }
@@ -179,8 +183,16 @@ impl Engine {
 
     /// Drains in-flight execution and keeps the sequencer paused until the handle is dropped.
     pub async fn barrier(&self) -> Result<BarrierHandle> {
+        self.pause(SequencerMessage::Barrier).await
+    }
+
+    /// Submits a barrier-bearing message and retains its release handle after acknowledgment.
+    async fn pause(
+        &self,
+        message: impl FnOnce(BarrierGuard) -> SequencerMessage,
+    ) -> Result<BarrierHandle> {
         let (controller, guard) = runtime::barrier();
-        self.sequencer.send(SequencerMessage::Barrier(guard)).await?;
+        self.sequencer.send(message(guard)).await?;
         controller.acknowledged.await?;
         Ok(controller.released)
     }

@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/edition-2024-blue" alt="Edition 2024">
   <img src="https://img.shields.io/badge/Solana-SVM-14F195?logo=solana&logoColor=white" alt="Solana SVM">
   <img src="https://img.shields.io/badge/status-experimental-yellow" alt="Status experimental">
-  <img src="https://img.shields.io/badge/version-0.14.2-lightgrey" alt="Version 0.14.2">
+  <img src="https://img.shields.io/badge/version-0.14.3-lightgrey" alt="Version 0.14.3">
 </p>
 
 <p align="center">
@@ -118,8 +118,8 @@ replication, not consensus between peers. [Replication →](replicator/README.md
 
 ### 🩹 Drain cleanly and recover on restart
 
-Coordinated shutdown drains work and synchronizes storage. Keep Engine and the
-async runtime alive while services finish:
+Coordinated shutdown drains scheduled execution and synchronizes storage. Keep
+Engine and the async runtime alive while services finish:
 
 ```rust
 let reason = shutdown.wait().await;

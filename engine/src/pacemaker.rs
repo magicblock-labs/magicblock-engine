@@ -7,7 +7,7 @@ use ledger::schema::Block;
 use nucleus::{
     Slot,
     config::BlockstoreParams,
-    runtime::{self, BlockInput},
+    runtime::BlockInput,
     shutdown::{Service, ShutdownHandle, ShutdownManager, ShutdownReason},
     unix_time,
 };
@@ -187,10 +187,7 @@ impl PaceMaker {
             return Ok(());
         }
 
-        let (controller, guard) = runtime::barrier();
-        let msg = SequencerMessage::Checkpoint { block, tx, guard };
-        self.sequencer.send(msg).await?;
-        controller.acknowledged.await?;
+        let _guard = self.pause(|guard| SequencerMessage::Checkpoint { block, tx, guard }).await?;
         if !seal {
             // SAFETY: the checkpoint barrier holds execution until this scope ends.
             unsafe { self.checkpoint(None) }?;
