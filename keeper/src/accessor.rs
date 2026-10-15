@@ -1,6 +1,6 @@
 //! Namespaced keeper access APIs.
 
-use std::{ops::Deref, path::PathBuf, sync::Arc};
+use std::{cell::LazyCell, ops::Deref, path::PathBuf, sync::Arc};
 
 use accountsdb::{AccountEntry, AccountsDB, AccountsDBError};
 use ledger::{
@@ -13,7 +13,8 @@ use nucleus::{
     ledger::{Block, BlockstorePosition},
     tls::{EncodedMessage, TlsManager},
 };
-use solana_account::{AccountSharedData, ReadableAccount};
+use smallvec::SmallVec;
+use solana_account::{AccountSharedData, CoWAccount};
 use solana_hash::Hash;
 use solana_pubkey::Pubkey;
 use solana_sdk_ids::sysvar;
@@ -32,7 +33,6 @@ use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 use crate::{
     AccountLease, ExecutionRecord, FullTransaction, Keeper, ResolvedTransaction,
     error::Result,
-    subscriptions::TransactionLogs,
     util::{execution_commit, request, transaction_status},
 };
 
@@ -133,8 +133,18 @@ impl<'a> TransactionsAccessor<'a> {
     /// Subscribes as the sole receiver of all processed transactions, including failures.
     ///
     /// Returns an error if the process-lifetime transaction receiver was already registered.
-    pub fn subscribe_processed(&self) -> Result<UnboundedReceiver<FullTransaction>> {
+    pub fn subscribe_processed(&self) -> Result<UnboundedReceiver<Arc<FullTransaction>>> {
         self.keeper.subscriptions.transactions.subscribe()
+    }
+
+    /// Subscribes to failed live transactions, including loading and execution failures.
+    /// Admission rejections, simulation, and replay do not publish here.
+    ///
+    /// Each receiver buffers 32 transactions without blocking execution. Overflow
+    /// disconnects that receiver; after draining, closure signals lost continuity.
+    /// Resubscription observes future failures only, with no replay of missed events.
+    pub fn subscribe_failures(&self) -> Receiver<Arc<FullTransaction>> {
+        self.keeper.subscriptions.failures.subscribe(())
     }
 
     /// Subscribes to one execution result, including an already retained result.
@@ -153,8 +163,8 @@ impl<'a> TransactionsAccessor<'a> {
         Ok(rx)
     }
 
-    /// Subscribes to log batches mentioning `account`.
-    pub async fn subscribe_logs(&self, account: Pubkey) -> Receiver<Arc<TransactionLogs>> {
+    /// Subscribes to successful transactions mentioning `account`, including their logs.
+    pub async fn subscribe_logs(&self, account: Pubkey) -> Receiver<Arc<FullTransaction>> {
         self.keeper.subscriptions.logs.subscribe(account)
     }
 
@@ -196,49 +206,52 @@ impl<'a> TransactionsAccessor<'a> {
     /// Returns the committed result for the caller to complete its request.
     pub fn commit_execution(&self, mut txn: FullTransaction) -> Result<TransactionResult<()>> {
         let subs = &self.keeper.subscriptions;
-        let commit = execution_commit(&mut txn);
+        let success =
+            txn.execution.result.as_ref().is_ok_and(|execution| execution.was_successful());
+        // Class-level checks are atomic. Keyed maps are accessed only for delivery.
+        let logs = success && !subs.logs.is_empty();
+        let failures = !success && !subs.failures.is_empty();
+        let transactions = subs.transactions.sender();
+        let notify = logs || failures || transactions.is_some();
+        let commit = execution_commit(&mut txn, notify);
         self.keeper.ledger.appender.send(commit.event)?;
 
         if let Some(execution) = self.commit_state_transitions(&txn.execution.result)? {
-            let accounts = &execution.loaded_transaction.accounts;
-            let mut logs = None;
-            for (pubkey, acc) in accounts {
-                if subs.logs.contains(pubkey) {
-                    let logs = logs.get_or_insert_with(|| {
-                        Arc::new(TransactionLogs {
-                            signature: commit.signature,
-                            result: commit.status.result.clone(),
-                            logs: Arc::clone(&commit.logs),
-                        })
-                    });
-                    subs.logs.send(pubkey, logs);
-                }
-                if !acc.dirty() {
-                    continue;
-                }
-                subs.accounts.send(pubkey, acc);
-                if subs.programs.contains(acc.owner()) {
-                    let account = &(*pubkey, acc.clone());
-                    subs.programs.send(acc.owner(), account);
-                }
-            }
+            subs.send_accounts(&execution.loaded_transaction.accounts);
             while let Some(msg) = TlsManager::dequeue() {
                 subs.services.send(|| msg);
             }
         }
-        subs.transactions.send(|| {
-            // Subscriber queues outlive the execution barrier. Materialize
-            // borrowed accounts before handing off, while their mmap images
-            // are still protected by execution's account ownership.
-            if let Ok(execution) = &mut txn.execution.result {
-                for (_, account) in &mut execution.loaded_transaction.accounts {
-                    if matches!(account.cow(), solana_account::CoWAccount::Borrowed(_)) {
-                        *account = account.clone();
+        if notify {
+            // Keep routing keys separate so unmatched log subscriptions never
+            // force account materialization or allocate the shared payload.
+            let keys: SmallVec<[Pubkey; 8]> = if logs {
+                SmallVec::from_slice(txn.transaction.static_account_keys())
+            } else {
+                SmallVec::new()
+            };
+            let txn = LazyCell::new(|| {
+                // Queues outlive the execution barrier. Copy borrowed images
+                // once, before sharing, while account ownership protects them.
+                if let Ok(execution) = &mut txn.execution.result {
+                    for (_, account) in &mut execution.loaded_transaction.accounts {
+                        if matches!(account.cow(), CoWAccount::Borrowed(_)) {
+                            *account = account.clone();
+                        }
                     }
                 }
+                Arc::new(txn)
+            });
+            for key in keys {
+                subs.logs.send_with(&key, || Arc::clone(&txn));
             }
-            txn
-        });
+            if failures {
+                subs.failures.send_with(&(), || Arc::clone(&txn));
+            }
+            if let Some(sender) = transactions {
+                let _ = sender.send(Arc::clone(&txn));
+            }
+        }
         // Clear TLS unconditionally so unsent messages cannot leak into the next transaction.
         TlsManager::clear();
         // Cache before fanout so a subscriber that misses delivery can still

@@ -185,10 +185,7 @@ pub struct ExecutionDetails {
 
 /// One cross-program invocation group.
 #[derive(Encode, Decode)]
-pub struct Cpis(
-    /// Inner instructions invoked by one transaction-level instruction.
-    pub Vec<Instruction>,
-);
+pub struct Cpis(pub Vec<Instruction>);
 
 /// Runtime instruction metadata.
 #[derive(Encode, Decode)]

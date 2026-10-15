@@ -1,7 +1,5 @@
 //! Internal helpers shared by keeper accessors.
 
-use std::sync::Arc;
-
 use ledger::{
     request::{ReadRequest, RequestPayload, TransactionStatus},
     schema::{
@@ -22,7 +20,7 @@ use solana_svm::{
 
 use crate::{FullTransaction, Keeper, Result};
 
-/// Ledger event, status-cache entry, and logs derived from one execution result.
+/// Ledger event and status-cache entry derived from one execution result.
 pub(crate) struct ExecutionCommit {
     /// First transaction signature used for status notifications.
     pub(crate) signature: Signature,
@@ -30,8 +28,6 @@ pub(crate) struct ExecutionCommit {
     pub(crate) status: TransactionStatus,
     /// Ledger event that pairs execution metadata with the appended transaction.
     pub(crate) event: Event,
-    /// Execution logs shared with account log subscribers.
-    pub(crate) logs: Arc<Vec<String>>,
 }
 
 /// Sends a typed read request to the ledger reader and waits for its response.
@@ -46,7 +42,11 @@ where
 }
 
 /// Builds the ledger and cache records for a completed transaction execution.
-pub(crate) fn execution_commit(txn: &mut FullTransaction) -> ExecutionCommit {
+/// Retains balances in the transaction only when live notifications need them.
+pub(crate) fn execution_commit(
+    txn: &mut FullTransaction,
+    retain_balances: bool,
+) -> ExecutionCommit {
     let slot = txn.execution.slot;
     let signature = txn.transaction.signatures()[0];
     let status = transaction_status(&txn.execution.result, slot);
@@ -56,20 +56,21 @@ pub(crate) fn execution_commit(txn: &mut FullTransaction) -> ExecutionCommit {
         slot,
         result: status.result.clone(),
     };
-    let details = txn
-        .execution
-        .result
-        .as_ref()
-        .ok()
-        .map(|execution| execution_details(execution, txn.execution.balances.take()));
-    let logs = details.as_ref().map(|d| Arc::clone(&d.logs)).unwrap_or_default();
+    let details = txn.execution.result.as_ref().ok().map(|execution| {
+        let balances = if retain_balances {
+            txn.execution.balances.clone()
+        } else {
+            txn.execution.balances.take()
+        };
+        execution_details(execution, balances)
+    });
     let accounts = AccountIndex::new(txn.transaction.static_account_keys());
     let event = Event::Execution {
         execution: Execution { header, details },
         accounts,
     };
 
-    ExecutionCommit { signature, status, event, logs }
+    ExecutionCommit { signature, status, event }
 }
 
 /// Projects an SVM result into the terminal status shared by live and replay commits.
@@ -110,10 +111,8 @@ fn execution_details(
 
 /// Projects grouped SVM inner instructions into ledger CPI records.
 fn cpis(groups: &InnerInstructionsList) -> Vec<Cpis> {
-    groups
-        .iter()
-        .map(|group| Cpis(group.iter().map(instruction).collect()))
-        .collect()
+    let iter = groups.iter();
+    iter.map(|group| Cpis(group.iter().map(instruction).collect())).collect()
 }
 
 /// Projects one SVM inner instruction into the ledger instruction format.
