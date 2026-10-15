@@ -592,7 +592,7 @@ async fn cancelled_activation_retains_ownership() {
             .await
             .expect("submitted activation completes")
             .expect("processed transaction stream remains open");
-        let execution = completed.execution.result.expect("activation reaches execution");
+        let execution = completed.execution.result.as_ref().expect("activation reaches execution");
         let result = &execution.execution_details.status;
         let accessor = timeout(COMPLETION, waiting)
             .await

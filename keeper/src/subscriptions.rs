@@ -20,10 +20,9 @@ use nucleus::{
 };
 use scc::HashMap;
 use smallvec::SmallVec;
-use solana_account::AccountSharedData;
+use solana_account::{AccountSharedData, ReadableAccount};
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
-use solana_transaction_error::TransactionResult;
 use tokio::{
     sync::mpsc::{self, error::TrySendError},
     time::{MissedTickBehavior, interval},
@@ -39,10 +38,8 @@ use crate::{
 type Senders<S> = SmallVec<[S; 1]>;
 
 /// Keyed receivers with a constant-time, conservative empty check.
-#[derive(Deref)]
 pub(crate) struct Subscribers<K, S> {
     /// Nonempty sender lists protected by SCC's bucket locks.
-    #[deref]
     entries: HashMap<K, Senders<S>, RandomState>,
     /// Registered keys, including closed receivers until pruning. Detached lists
     /// remain counted until removal finishes, so zero never hides a live key.
@@ -61,36 +58,31 @@ impl<K, S> Default for Subscribers<K, S> {
 
 impl<K: Eq + Hash, S> Subscribers<K, S> {
     /// Skips map access when no registered key remains.
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.keys.load(Ordering::Acquire) == 0
     }
 
     /// Registers under the bucket lock without waiting for channel capacity.
     fn insert(&self, key: K, sender: S) {
-        let mut entry = self.entry_sync(key).or_default();
+        let mut entry = self.entries.entry_sync(key).or_default();
         if entry.is_empty() {
             self.keys.fetch_add(1, Ordering::Release);
         }
         entry.push(sender);
     }
 
-    /// Prunes one key and reports whether it still has registered senders.
-    fn retain(&self, key: &K, keep: impl FnMut(&S) -> bool) -> bool {
+    /// Prunes one key, removing its entry when no sender remains.
+    fn retain(&self, key: &K, keep: impl FnMut(&S) -> bool) {
         if self.is_empty() {
-            return false;
+            return;
         }
-        let mut present = false;
-        self.remove_if_sync(key, |senders| {
-            present = self.prune(senders, keep);
-            !present
-        });
-        present
+        self.entries.remove_if_sync(key, |senders| !self.prune(senders, keep));
     }
 
     /// Prunes all keys, yielding between contended buckets.
     async fn cleanup(&self, mut keep: impl FnMut(&S) -> bool) {
         if !self.is_empty() {
-            self.retain_async(|_, senders| self.prune(senders, &mut keep)).await;
+            self.entries.retain_async(|_, senders| self.prune(senders, &mut keep)).await;
         }
     }
 
@@ -110,7 +102,7 @@ impl<K: Eq + Hash, S> Subscribers<K, S> {
         if self.is_empty() {
             return None;
         }
-        let (_, senders) = self.remove_sync(key)?;
+        let (_, senders) = self.entries.remove_sync(key)?;
         // A concurrent registration counts its own key; subtract only ours.
         self.keys.fetch_sub(1, Ordering::Release);
         Some(senders)
@@ -125,6 +117,7 @@ pub(crate) enum Subscription {
     Logs,
     Blocks,
     Transactions,
+    Failures,
     Snapshots,
     Services,
     Evictions,
@@ -139,6 +132,7 @@ impl Subscription {
             Self::Logs => "logs",
             Self::Blocks => "blocks",
             Self::Transactions => "transactions",
+            Self::Failures => "failures",
             Self::Snapshots => "snapshots",
             Self::Services => "services",
             Self::Evictions => "evictions",
@@ -155,11 +149,13 @@ pub(crate) struct Subscriptions {
     /// Signature status updates keyed by transaction signature.
     pub(crate) signatures: Signatures,
     /// Log notifications keyed by mentioned program or account pubkey.
-    pub(crate) logs: Multicast<Pubkey, Arc<TransactionLogs>>,
+    pub(crate) logs: Multicast<Pubkey, Arc<FullTransaction>>,
     /// Newly committed blocks.
     pub(crate) blocks: Multicast<(), Block>,
     /// All committed transactions for the sole stream consumer.
-    pub(crate) transactions: Unicast<FullTransaction>,
+    pub(crate) transactions: Unicast<Arc<FullTransaction>>,
+    /// Failed live transactions, shared independently with each diagnostic consumer.
+    pub(crate) failures: Multicast<(), Arc<FullTransaction>>,
     /// Accountsdb snapshot archive completions.
     pub(crate) snapshots: Multicast<(), PathBuf>,
     /// Encoded service messages for the sole stream consumer.
@@ -176,6 +172,7 @@ impl Subscriptions {
             logs: Multicast::new(8, Subscription::Logs),
             blocks: Multicast::new(32, Subscription::Blocks),
             transactions: Unicast::new(Subscription::Transactions),
+            failures: Multicast::new(32, Subscription::Failures),
             snapshots: Multicast::new(4, Subscription::Snapshots),
             services: Unicast::new(Subscription::Services),
         });
@@ -184,26 +181,36 @@ impl Subscriptions {
         subscriptions
     }
 
+    /// Fans out committed dirty account images to account and owner subscribers.
+    pub(crate) fn send_accounts(&self, updates: &[AccountEntry]) {
+        let accounts = !self.accounts.is_empty();
+        let programs = !self.programs.is_empty();
+        if !accounts && !programs {
+            return;
+        }
+        for (key, account) in updates {
+            if !account.dirty() {
+                continue;
+            }
+            if accounts {
+                self.accounts.send(key, account);
+            }
+            if programs {
+                self.programs.send_with(account.owner(), || (*key, account.clone()));
+            }
+        }
+    }
+
     /// Reclaims abandoned keyed subscriptions without affecting unicast ownership.
     async fn cleanup(&self) {
         self.accounts.cleanup().await;
         self.programs.cleanup().await;
         self.signatures.cleanup().await;
         self.logs.cleanup().await;
+        self.failures.cleanup().await;
         self.blocks.cleanup().await;
         self.snapshots.cleanup().await;
     }
-}
-
-/// Composite log notification sent to log subscribers.
-#[derive(Clone)]
-pub struct TransactionLogs {
-    /// First transaction signature.
-    pub signature: Signature,
-    /// Runtime transaction result (carries the error on failure).
-    pub result: TransactionResult<()>,
-    /// Log lines emitted during execution.
-    pub logs: Arc<Vec<String>>,
 }
 
 /// One process-lifetime unbounded receiver; producers never wait for consumption.
@@ -232,14 +239,17 @@ impl<V> Unicast<V> {
         Ok(rx)
     }
 
+    /// Returns the sender only while its registered receiver is open.
+    pub(crate) fn sender(&self) -> Option<&mpsc::UnboundedSender<V>> {
+        self.sender.get().filter(|sender| !sender.is_closed())
+    }
+
     /// Prepares and sends a value without waiting for consumption.
     ///
     /// Skips preparation if no sender exists or it is observed closed.
     /// The receiver may close after this check.
     pub(crate) fn send(&self, prepare: impl FnOnce() -> V) {
-        if let Some(sender) = self.sender.get()
-            && !sender.is_closed()
-        {
+        if let Some(sender) = self.sender() {
             let _ = sender.send(prepare());
         }
     }
@@ -274,11 +284,6 @@ impl<K: Eq + Hash, V> Multicast<K, V> {
         rx
     }
 
-    /// Returns whether `key` has any live receivers.
-    pub(crate) fn contains(&self, key: &K) -> bool {
-        self.retain(key, |sender| !sender.is_closed())
-    }
-
     /// Drops closed receivers while preserving every live queue.
     async fn cleanup(&self) {
         self.senders.cleanup(|sender| !sender.is_closed()).await;
@@ -289,13 +294,24 @@ impl<K: Eq + Hash, V> Multicast<K, V> {
     where
         V: Clone,
     {
-        self.retain(key, |sender| match sender.try_send(value.clone()) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) => {
-                metrics::slow_consumer_disconnect(self.subscription);
-                false
+        self.send_with(key, || value.clone());
+    }
+
+    /// Prepares each delivery under the key's fanout lock, preserving ordering
+    /// without a separate presence lookup. Empty streams never call `prepare`.
+    pub(crate) fn send_with(&self, key: &K, mut prepare: impl FnMut() -> V) {
+        self.retain(key, |sender| {
+            if sender.is_closed() {
+                return false;
             }
-            Err(TrySendError::Closed(_)) => false,
+            match sender.try_send(prepare()) {
+                Ok(()) => true,
+                Err(TrySendError::Full(_)) => {
+                    metrics::slow_consumer_disconnect(self.subscription);
+                    false
+                }
+                Err(TrySendError::Closed(_)) => false,
+            }
         });
     }
 }

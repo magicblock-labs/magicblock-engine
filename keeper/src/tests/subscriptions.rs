@@ -30,7 +30,7 @@ async fn subscribers_send_semantics() {
 
     let multicast = Multicast::new(1, Subscription::Accounts);
     multicast.send(&1, &9);
-    assert!(!multicast.contains(&1));
+    assert!(multicast.is_empty());
     let mut first = multicast.subscribe(1);
     let mut second = multicast.subscribe(1);
     multicast.send(&1, &10);
@@ -48,11 +48,13 @@ async fn subscribers_send_semantics() {
     let mut live = multicast.subscribe(2);
     let closed = multicast.subscribe(3);
     drop(closed);
-    assert!(!multicast.contains(&3));
+    multicast.send(&3, &0);
+    assert!(!multicast.is_empty());
     multicast.send(&2, &13);
     assert_eq!(live.recv().await, Some(13));
     drop(live);
-    assert!(!multicast.contains(&2));
+    multicast.send(&2, &0);
+    assert!(multicast.is_empty());
 
     let signatures = Signatures::default();
     let signature = Signature::from([1; 64]);
