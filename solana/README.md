@@ -37,14 +37,14 @@ borrowed capacity promotes to owned storage; shared owned data uses `Arc::make_m
 This representation lets execution borrow account data from storage while retaining
 transactional writeback.
 
-Engine mutation requires a permitted lifecycle mode in addition to Solana access
-checks. Delegated and Magic accounts allow user writes. Transient state remains
+Engine mutation requires a permitted lifecycle state in addition to Solana access
+checks. Delegated and ErLocal accounts allow user writes. Undelegating state remains
 authoritative and persisted but immutable; closed state is removed by the caller.
-Transitions to either revoke mutation immediately, including across CPI. Final
-writeback can accept a dirty transition without authorizing further writes.
+Entering either state blocks further user-program writes, including CPI, while
+allowing the transaction to commit the lifecycle transition.
 
 The [account crate](account/README.md) owns those rules and the active/shadow layout.
-Dirty markers track data, owner, lamports, slot, mode, and flags; touched flags track
+Dirty markers track data, owner, lamports, slot, state, and flags; touched flags track
 transaction access. Both are caller writeback signals, not persistence operations.
 Complete-account patches cover non-flag fields, and MagicRoot finalization installs
 the complete flags without changing lamports. Source freshness remains the host's
@@ -53,7 +53,7 @@ or ignore writes.
 
 Rent-state and lamport-balance checks remain part of execution. SIMD-0392 rent
 relaxation follows supplied runtime features without activating Engine features.
-Nonzero Magic accounts are rent-exempt; Magic resizing remains restricted to the builtin.
+Nonzero ErLocal accounts are rent-exempt; ErLocal resizing remains restricted to the builtin.
 
 ## Transaction context
 

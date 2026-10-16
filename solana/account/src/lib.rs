@@ -17,7 +17,7 @@ mod traits;
 
 pub use account::{Account, PROGRAM_OWNERS, create_is_signer_account_infos};
 pub use cow::{
-    ALIGNMENT, AccountBuilder, AccountMode, AccountSeqLock, AccountSharedData, BorrowedAccount,
+    ALIGNMENT, AccountBuilder, AccountSeqLock, AccountSharedData, AccountState, BorrowedAccount,
     CoWAccount, DirtyMarkers, OwnedAccount, STORAGE_UNIT, StateFlags, StorageUnit,
 };
 pub use patch::{AccountFieldPatch, AccountPatchError};

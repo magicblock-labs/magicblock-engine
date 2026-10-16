@@ -19,7 +19,7 @@ use nucleus::{
     shutdown::ShutdownManager,
 };
 use serde::Serialize;
-use solana_account::{AccountBuilder, AccountMode, AccountSharedData, ReadableAccount};
+use solana_account::{AccountBuilder, AccountSharedData, AccountState, ReadableAccount};
 use solana_feature_gate_interface::Feature;
 use solana_program_runtime::invoke_context::BuiltinFunctionWithContext;
 use solana_pubkey::Pubkey;
@@ -107,7 +107,7 @@ impl KeeperBuilder {
         if !accountsdb.loader().contains(&authority)? {
             let sponsor = AccountBuilder::default()
                 .lamports(SPONSOR_INIT_BALANCE)
-                .mode(AccountMode::Magic);
+                .lifecycle(AccountState::ErLocal);
             accounts.push((authority, sponsor.build()));
         }
         accounts.extend(self.accounts.drain());
@@ -185,7 +185,7 @@ impl KeeperBuilder {
             let lamports = self.rent.minimum_balance(elf.len());
             let account = AccountBuilder::default()
                 .lamports(lamports)
-                .mode(AccountMode::System)
+                .lifecycle(AccountState::Runtime)
                 .owner(solana_sdk_ids::loader_v4::ID)
                 .executable(true)
                 .data(elf.clone());
@@ -323,7 +323,9 @@ impl KeeperBuilder {
         let account =
             AccountSharedData::new_data(0, state, owner).map_err(AccountsDBError::from)?;
         let lamports = self.rent.minimum_balance(account.data().len());
-        Ok(AccountBuilder::from(account).lamports(lamports).mode(AccountMode::System))
+        Ok(AccountBuilder::from(account)
+            .lamports(lamports)
+            .lifecycle(AccountState::Runtime))
     }
 
     /// Opens accountsdb, restoring the newest archived snapshot after corruption.

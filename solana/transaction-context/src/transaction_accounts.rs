@@ -327,7 +327,7 @@ mod tests {
     use {
         crate::transaction_accounts::TransactionAccounts,
         solana_account::{
-            AccountBuilder, AccountFieldPatch, AccountMode, AccountSharedData, DirtyMarkers,
+            AccountBuilder, AccountFieldPatch, AccountSharedData, AccountState, DirtyMarkers,
             ReadableAccount, StateFlags, WritableAccount,
         },
         solana_instruction::error::InstructionError,
@@ -467,13 +467,13 @@ mod tests {
             .lamports(23)
             .data(vec![1, 2, 3])
             .owner(owner)
-            .mode(AccountMode::ReadOnly)
+            .lifecycle(AccountState::Mirrored)
             .slot(41)
             .executable(true)
             .build::<AccountSharedData>();
 
         AccountFieldPatch::Lifecycle {
-            mode: AccountMode::Magic,
+            state: AccountState::ErLocal,
             slot: 42,
         }
         .apply(&mut account)
@@ -489,7 +489,7 @@ mod tests {
         let account = accounts.pop().unwrap();
 
         assert!(accounts.is_empty());
-        assert!(account.is(AccountMode::Magic));
+        assert!(account.is(AccountState::ErLocal));
         assert_eq!(account.slot(), 42);
         assert!(account.executable());
         assert_eq!(account.data(), &[4, 5, 3]);

@@ -1,6 +1,6 @@
 //! Account-mutability enforcement at the engine boundary.
 //!
-//! Instruction mutation checks reject writes to immutable modes, including after
+//! Instruction mutation checks reject writes to immutable states, including after
 //! a lifecycle transition. The transaction-final guard separately accepts valid
 //! lifecycle writeback. These black-box tests assert errors and atomic rollback,
 //! including foreign actions invoked through privileged account creation.
@@ -9,7 +9,7 @@
 use engine::{EngineError, testkit::TestEngine};
 use keeper::testkit::{load_v42_data, load_v42_lamports, signed_view, store_v42, v42_builder};
 use magic_root_interface::{MagicRootInstruction, PostFinalize};
-use solana_account::{AccountFieldPatch, AccountMode, ReadableAccount};
+use solana_account::{AccountFieldPatch, AccountState, ReadableAccount};
 use solana_instruction::Instruction;
 use solana_instruction_error::InstructionError;
 use solana_keypair::Keypair;
@@ -24,8 +24,8 @@ use v42_calculator_interface::builder::{Expr as E, transfer};
 async fn lifecycle_transition_blocks_later_credits() {
     let te = TestEngine::new().await;
     for (from, to) in [
-        (AccountMode::Delegated, AccountMode::Transient),
-        (AccountMode::Magic, AccountMode::Closed),
+        (AccountState::Delegated, AccountState::Undelegating),
+        (AccountState::ErLocal, AccountState::Closed),
     ] {
         let target = store_v42(&te, 5, from);
         let before = te.get_account(target).unwrap();
@@ -33,7 +33,7 @@ async fn lifecycle_transition_blocks_later_credits() {
         let source_before = te.get_account(source).unwrap().lamports();
         let transition = || {
             MagicRootInstruction::Patch(AccountFieldPatch::Lifecycle {
-                mode: to,
+                state: to,
                 slot: before.slot(),
             })
             .compose(target)
@@ -57,11 +57,11 @@ async fn lifecycle_transition_blocks_later_credits() {
         assert_eq!(te.get_account(source).unwrap().lamports(), source_before);
 
         te.execute(&[transition(), credit(0)]).await.unwrap();
-        if to == AccountMode::Closed {
+        if to == AccountState::Closed {
             assert!(te.get_account(target).is_none());
         } else {
             let after = te.get_account(target).unwrap();
-            assert_eq!(after.mode(), to);
+            assert_eq!(after.lifecycle(), to);
             assert_eq!(after.lamports(), before.lamports());
         }
     }
@@ -69,8 +69,8 @@ async fn lifecycle_transition_blocks_later_credits() {
 }
 
 /// Complete v42 account replacement at an explicit non-default slot.
-fn compose_v42_replacement(key: Pubkey, mode: AccountMode, slot: u64) -> Vec<Instruction> {
-    let account = v42_builder(0, mode).slot(slot).build();
+fn compose_v42_replacement(key: Pubkey, state: AccountState, slot: u64) -> Vec<Instruction> {
+    let account = v42_builder(0, state).slot(slot).build();
     MagicRootInstruction::compose_account(key, account).unwrap()
 }
 
@@ -82,8 +82,8 @@ async fn immutable_writes_are_rejected_and_not_committed() {
 
     // The source's data mapping rejects the transfer before it can complete;
     // neither account's balance may change in storage.
-    let operand = store_v42(&te, 5, AccountMode::ReadOnly);
-    let recipient = store_v42(&te, 0, AccountMode::Delegated);
+    let operand = store_v42(&te, 5, AccountState::Mirrored);
+    let recipient = store_v42(&te, 0, AccountState::Delegated);
     let operand_before = load_v42_lamports(&te, operand).expect("operand exists");
     let recipient_before = load_v42_lamports(&te, recipient).expect("recipient exists");
     assert_eq!(
@@ -110,7 +110,7 @@ async fn immutable_writes_are_rejected_and_not_committed() {
     // into account 0. Fees are zero and this SVM does no fee-payer validation, so
     // a program-owned payer loads as-is.
     let payer = Keypair::new();
-    let acc = v42_builder(5, AccountMode::ReadOnly).build();
+    let acc = v42_builder(5, AccountState::Mirrored).build();
     te.accounts().store(&[(payer.pubkey(), acc)]).unwrap();
     let (_sig, view) = signed_view(&te, Some(&payer), E::lit(9).compose(payer.pubkey(), &[]));
     let result = te.transaction(view).unwrap().execute().await.unwrap();
@@ -128,7 +128,7 @@ async fn immutable_writes_are_rejected_and_not_committed() {
     );
 
     // Positive control: a delegated (mutable) account commits normally.
-    let mutable = store_v42(&te, 0, AccountMode::Delegated);
+    let mutable = store_v42(&te, 0, AccountState::Delegated);
     assert!(te.execute(&[E::lit(9).compose(mutable, &[])]).await.is_ok());
     assert_eq!(
         load_v42_data(&te, mutable),
@@ -139,14 +139,14 @@ async fn immutable_writes_are_rejected_and_not_committed() {
     te.close().await;
 }
 
-/// Proves a foreign post-finalize action cannot bypass mode checks and its
+/// Proves a foreign post-finalize action cannot bypass state checks and its
 /// failure rolls back the privileged creation as well.
 #[tokio::test(flavor = "multi_thread")]
 async fn post_finalize_immutable_action_is_rejected() {
     let te = TestEngine::new().await;
 
     let key = Pubkey::new_unique();
-    let mut ixs = compose_v42_replacement(key, AccountMode::ReadOnly, 1);
+    let mut ixs = compose_v42_replacement(key, AccountState::Mirrored, 1);
     let post_finalize_idx = ixs.len();
     let post_finalize = MagicRootInstruction::PostFinalize(PostFinalize {
         source_program: Pubkey::new_unique(),
@@ -177,7 +177,7 @@ async fn post_finalize_rejects_magic_root_ix() {
 
     let key = Pubkey::new_unique();
     let owner = Pubkey::new_unique();
-    let account = v42_builder(0, AccountMode::Delegated).owner(owner);
+    let account = v42_builder(0, AccountState::Delegated).owner(owner);
     let patch = MagicRootInstruction::Patch(AccountFieldPatch::DataAt {
         offset: 0,
         data: 9_i64.to_le_bytes().to_vec(),
@@ -221,10 +221,7 @@ async fn mixed_foreign_write_on_created_readonly_is_rejected() {
     let te = TestEngine::new().await;
 
     let key = Pubkey::new_unique();
-    // A missing account starts as ReadOnly at slot zero. Advance the replacement
-    // slot so this test reaches the mutation check rather than MagicRoot's
-    // duplicate-replacement guard.
-    let mut ixs = compose_v42_replacement(key, AccountMode::ReadOnly, 1);
+    let mut ixs = compose_v42_replacement(key, AccountState::Mirrored, 1);
     // The foreign instruction that makes the whole transaction non-privileged.
     ixs.push(E::lit(9).compose(key, &[]));
 

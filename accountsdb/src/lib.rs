@@ -9,7 +9,7 @@ use std::{
 
 use derive_more::From;
 use nucleus::Slot;
-use solana_account::{AccountMode, AccountSeqLock, AccountSharedData, CoWAccount, DirtyMarkers};
+use solana_account::{AccountSeqLock, AccountSharedData, AccountState, CoWAccount, DirtyMarkers};
 use solana_pubkey::Pubkey;
 use tracing::{info, warn};
 
@@ -36,9 +36,9 @@ const ACTIVE_DIR: &str = "CURRENT";
 
 /// Top-level account store backed by persisted and volatile backends.
 pub struct AccountsDB {
-    /// On-disk store for engine-authoritative account modes.
+    /// On-disk store for engine-authoritative account states.
     persisted: PersistedStore,
-    /// Rebuildable in-memory store for non-authoritative account modes.
+    /// Rebuildable in-memory store for non-authoritative account states.
     volatile: VolatileStore,
     /// Database root directory.
     root: PathBuf,
@@ -70,10 +70,10 @@ impl AccountsDB {
         root.join(ACTIVE_DIR)
     }
 
-    /// Stores accounts according to their lifecycle mode, not their storage form.
+    /// Stores accounts according to their lifecycle state, not their storage form.
     ///
-    /// Persistent modes are kept in persisted storage. Other modes are kept in
-    /// volatile storage. Mode changes also remove stale copies from the previous
+    /// Persistent states are kept in persisted storage. Other states are kept in
+    /// volatile storage. State changes also remove stale copies from the previous
     /// backend, including when borrowed data has grown into owned storage.
     /// Persisted failures roll back borrowed images before returning an error.
     pub fn store<'a, AC>(&self, accounts: AC) -> Result<()>
@@ -234,7 +234,7 @@ impl AccountsDB {
     /// persisted state is left untouched.
     ///
     /// Chain-owned accounts can be fetched again when synchronization resumes.
-    /// System accounts hold internal runtime state and survive the reset; their
+    /// Runtime accounts hold internal runtime state and survive the reset; their
     /// volatile owner indexes are rebuilt. Persisted, engine-authoritative state
     /// is never reset.
     pub fn reset(&self) {
@@ -329,15 +329,15 @@ impl<'a> AccountLoader<'a> {
         Ok(account.map(|account| AccountSeqLock::new(account).read(reader)))
     }
 
-    /// Reads account mode and slot from one image without cloning volatile data.
+    /// Reads account state and slot from one image without cloning volatile data.
     /// Uses the same backend precedence and cached index snapshot as [`Self::read`];
     /// persisted reads retry if a concurrent publish changes the image.
-    pub fn lifecycle(&self, pubkey: &Pubkey) -> Result<Option<(AccountMode, Slot)>> {
+    pub fn lifecycle(&self, pubkey: &Pubkey) -> Result<Option<(AccountState, Slot)>> {
         if let Some(lifecycle) = self.db.volatile.lifecycle(pubkey) {
             return Ok(Some(lifecycle));
         }
         Ok(self.persisted(pubkey)?.map(|account| {
-            AccountSeqLock::new(account).read(|account| (account.mode(), account.slot()))
+            AccountSeqLock::new(account).read(|account| (account.lifecycle(), account.slot()))
         }))
     }
 
@@ -419,19 +419,22 @@ pub type AccountEntry = (Pubkey, AccountSharedData);
 
 /// Returns `true` for entries that must touch persisted storage.
 fn persisted(entry: &&AccountEntry) -> bool {
-    match entry.1.cow() {
+    let (_, account) = entry;
+    match account.cow() {
         CoWAccount::Borrowed(_) => true,
         CoWAccount::Owned(_) => {
-            // Mode changes still need persisted cleanup after borrowed data grows into owned data.
-            entry.1.mode().authoritative() || entry.1.markers().contains(DirtyMarkers::MODE)
+            // State changes still need persisted cleanup after borrowed data grows into owned data.
+            account.lifecycle().is_er_controlled()
+                || account.markers().contains(DirtyMarkers::STATE)
         }
     }
 }
 
 /// Returns `true` for entries that must touch volatile storage.
 fn volatile(entry: &&AccountEntry) -> bool {
-    match entry.1.cow() {
-        CoWAccount::Borrowed(_) => !entry.1.mode().authoritative(),
+    let (_, account) = entry;
+    match account.cow() {
+        CoWAccount::Borrowed(_) => !account.lifecycle().is_er_controlled(),
         CoWAccount::Owned(_) => true,
     }
 }

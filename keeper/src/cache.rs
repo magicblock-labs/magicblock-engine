@@ -11,7 +11,7 @@ use ledger::{
 use nucleus::{Slot, ledger::Block, notifier::EventNotifier};
 use parking_lot::Mutex;
 use scc::{HashCache, HashMap, hash_cache::Entry as CacheEntry, hash_map::Entry};
-use solana_account::AccountMode;
+use solana_account::AccountState;
 use solana_hash::Hash as SolanaHash;
 use solana_pubkey::Pubkey;
 
@@ -100,7 +100,7 @@ pub struct AccountLease {
     released: Arc<EventNotifier>,
     /// Filled once under the lease by `AccountsAccessor::lock`. Ordinary
     /// transactions may change the account after this snapshot.
-    pub(crate) observed: Option<(AccountMode, Slot)>,
+    pub(crate) observed: Option<(AccountState, Slot)>,
 }
 
 /// Per-account mutation ownership state.
@@ -120,29 +120,34 @@ impl AccountLease {
         self.observed.is_some()
     }
 
-    /// Returns the mode and slot captured after acquiring this lease, or
+    /// Returns the state and slot captured after acquiring this lease, or
     /// `None` if the account was absent. Ordinary transaction writes are not
     /// serialized by the lease and can change the current image afterward.
-    pub fn observed(&self) -> Option<(AccountMode, Slot)> {
+    pub fn observed(&self) -> Option<(AccountState, Slot)> {
         self.observed
     }
 
-    /// Returns whether the observed account may be removed as a remote mirror.
+    /// Returns whether the observed account is not authoritative in this ER.
     pub fn evictable(&self) -> bool {
-        self.observed.is_some_and(|(mode, _)| !mode.authoritative())
+        self.observed.is_some_and(|(state, _)| !state.is_er_controlled())
     }
 
-    /// Returns the local mode when the incoming image is older or duplicates
+    /// Returns the local state when the incoming image is older or duplicates
     /// the observed lifecycle. The caller can use it for recency bookkeeping.
-    pub fn skipped(&self, mode: AccountMode, slot: Slot) -> Option<AccountMode> {
-        self.observed.and_then(|(local_mode, local_slot)| {
-            (slot < local_slot || (slot == local_slot && mode == local_mode)).then_some(local_mode)
-        })
+    pub fn skipped(&self, state: AccountState, slot: Slot) -> Option<AccountState> {
+        let (local_state, local_slot) = self.observed?;
+        if slot < local_slot {
+            return Some(local_state);
+        }
+        if slot == local_slot && state == local_state {
+            return Some(local_state);
+        }
+        None
     }
 
-    /// Updates recency after materializing the account in `mode`.
-    pub fn materialized(&mut self, mode: AccountMode) {
-        if let Some(pubkey) = self.cache.track(self.pubkey, mode) {
+    /// Updates recency after materializing the account in `state`.
+    pub fn materialized(&mut self, state: AccountState) {
+        if let Some(pubkey) = self.cache.track(self.pubkey, state) {
             self.cache.evictions.send(|| pubkey);
         }
     }
@@ -169,8 +174,8 @@ impl Drop for AccountLease {
 
 impl AccountCache {
     /// Tracks a materialized account and returns one displaced from recency.
-    fn track(&self, pubkey: Pubkey, mode: AccountMode) -> Option<Pubkey> {
-        if !mode.authoritative() {
+    fn track(&self, pubkey: Pubkey, state: AccountState) -> Option<Pubkey> {
+        if !state.is_er_controlled() {
             return self.admit_recency(pubkey);
         }
         self.remove_recency(&pubkey);

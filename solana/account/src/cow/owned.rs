@@ -2,7 +2,7 @@ use super::borrowed::{AccountHeader, DataHeader, STATIC_SIZE};
 use super::{ALIGNMENT, StateFlags};
 use crate::cow::AccountCore;
 use crate::cow::borrowed::IMAGE_OFFSET;
-use crate::{Account, AccountMode, AccountSharedData, StorageUnit};
+use crate::{Account, AccountSharedData, AccountState, StorageUnit};
 use solana_clock::Slot;
 use solana_pubkey::Pubkey;
 use std::{ptr::NonNull, sync::Arc};
@@ -57,9 +57,9 @@ impl OwnedAccount {
         self.data.as_ptr().copy_to_nonoverlapping(ptr.as_ptr(), len);
     }
 
-    /// Tests the exact account mode without grouping modes by mutability.
-    pub fn is(&self, mode: AccountMode) -> bool {
-        self.core.mode == mode
+    /// Returns whether the account is in `state`.
+    pub fn is(&self, state: AccountState) -> bool {
+        self.core.state == state
     }
 
     /// Returns the owner pubkey.
@@ -72,9 +72,9 @@ impl OwnedAccount {
         self.core.lamports
     }
 
-    /// Returns the account's exact lifecycle mode.
-    pub fn mode(&self) -> AccountMode {
-        self.core.mode
+    /// Returns the account's exact lifecycle state.
+    pub fn lifecycle(&self) -> AccountState {
+        self.core.state
     }
 
     /// Returns the source slot associated with the account image.
@@ -118,9 +118,9 @@ impl AccountBuilder {
         self
     }
 
-    /// Sets the lifecycle mode; the storage layer decides where to persist it.
-    pub fn mode(mut self, mode: AccountMode) -> Self {
-        self.0.core.mode = mode;
+    /// Sets the account's lifecycle state.
+    pub fn lifecycle(mut self, state: AccountState) -> Self {
+        self.0.core.state = state;
         self
     }
 

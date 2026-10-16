@@ -8,7 +8,7 @@ use std::{path::PathBuf, time::Duration};
 use engine::{EngineError, ReplayError, testkit::TestEngine};
 use keeper::testkit::{corrupt, load_v42_data, signed_view, store_v42};
 use nucleus::ledger::ACCOUNTSDB_SNAPSHOT_FILE;
-use solana_account::AccountMode;
+use solana_account::AccountState;
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 use solana_transaction::TransactionError;
@@ -65,7 +65,7 @@ async fn assert_rejected_transaction(
 #[tokio::test(flavor = "multi_thread")]
 async fn replay_rebuilds_state_after_counter_lag() {
     let mut te = TestEngine::new().await;
-    let key = store_v42(&te, 0, AccountMode::Delegated);
+    let key = store_v42(&te, 0, AccountState::Delegated);
 
     // A: K = 10 sealed into superblock 1, whose snapshot the restore lands on.
     let s1 = commit_and_seal(&mut te, key, 10).await;
@@ -135,11 +135,11 @@ async fn replay_rebuilds_state_after_counter_lag() {
 async fn replay_aborts_on_checksum_mismatch() {
     for checkpoint in [false, true] {
         let mut te = TestEngine::new().await;
-        let key = store_v42(&te, 0, AccountMode::Delegated);
+        let key = store_v42(&te, 0, AccountState::Delegated);
         commit_and_seal(&mut te, key, 10).await;
         // Direct store: lands in persisted state (and superblock 2's checksum)
         // without a ledger entry.
-        store_v42(&te, 7, AccountMode::Delegated);
+        store_v42(&te, 7, AccountState::Delegated);
         let s2 = if checkpoint {
             let _guard = te.barrier().await.unwrap();
             // SAFETY: the execution barrier is held through sampling and append.
@@ -180,7 +180,7 @@ async fn replay_aborts_on_checksum_mismatch() {
 #[tokio::test(flavor = "multi_thread")]
 async fn clean_restart_reopens_persisted_and_volatile_state() {
     let mut te = TestEngine::new().await;
-    let key = store_v42(&te, 0, AccountMode::Delegated);
+    let key = store_v42(&te, 0, AccountState::Delegated);
     commit_and_seal(&mut te, key, 10).await;
     te.execute(&[E::lit(20).compose(key, &[])]).await.unwrap();
     let failed = (E::lit(i64::MIN) - E::lit(1)).compose(key, &[]);
@@ -198,8 +198,8 @@ async fn clean_restart_reopens_persisted_and_volatile_state() {
     let transaction = transaction.inner_data().as_ref().clone();
     te.execute(transaction.clone()).await.expect("increment commits");
     te.advance(1).await;
-    let direct = store_v42(&te, 7, AccountMode::Delegated);
-    let volatile = store_v42(&te, 8, AccountMode::ReadOnly);
+    let direct = store_v42(&te, 7, AccountState::Delegated);
+    let volatile = store_v42(&te, 8, AccountState::Mirrored);
     let expected_clock = te.clock(te.blocks().latest());
     assert!(expected_clock.epoch > 0);
     let (dirs, authority) = te.close().await;

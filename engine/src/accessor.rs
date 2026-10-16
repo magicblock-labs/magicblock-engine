@@ -7,7 +7,7 @@ use keeper::{AccountLease, ExecutionRecord, ResolvedTransaction, TransactionView
 use magic_root_interface::{MagicRootInstruction, PostFinalize};
 use nucleus::runtime::ExecutionRequest;
 use processor::{SequencerMessage, Simulation, SimulatorMessage};
-use solana_account::{AccountMode, OwnedAccount};
+use solana_account::{AccountState, OwnedAccount};
 use solana_instruction::Instruction;
 use solana_transaction::TransactionResult;
 
@@ -45,14 +45,14 @@ impl AccountAccessor<'_> {
     ///
     /// Callers supplying `actions` must verify its trusted provenance as
     /// required by [`PostFinalize`] before invoking this method.
-    /// Confirmed redelegation replaces `Transient` directly with `Delegated`
-    /// at a strictly newer remote slot. The caller must establish a new
-    /// delegation generation, not merely a newer observation of the old one,
-    /// and reconcile local state after acquiring this accessor.
+    /// Confirmed redelegation replaces `Undelegating` directly with `Delegated`
+    /// at a strictly newer remote slot. The caller must verify that the incoming
+    /// image belongs to a new delegation, not a later snapshot of the existing
+    /// delegation, and reconcile local state after acquiring this accessor.
     /// See the crate's account replacement contract for caller evidence.
     ///
     /// Returns success without submitting an older image or one with the same
-    /// slot and mode as the lease observation. In that case follow-up actions
+    /// slot and state as the lease observation. In that case follow-up actions
     /// do not run, even if the image data differs. `Ok(())` therefore means
     /// applied or skipped as already handled or superseded.
     ///
@@ -68,9 +68,9 @@ impl AccountAccessor<'_> {
         actions: Option<PostFinalize>,
     ) -> Result<()> {
         let acc = acc.into();
-        let mode = acc.mode();
-        if let Some(local_mode) = self.skipped(mode, acc.slot()) {
-            self.lease.materialized(local_mode);
+        let state = acc.lifecycle();
+        if let Some(local_state) = self.skipped(state, acc.slot()) {
+            self.lease.materialized(local_state);
             return Ok(());
         }
         let pubkey = self.pubkey();
@@ -79,7 +79,7 @@ impl AccountAccessor<'_> {
             let ix = MagicRootInstruction::PostFinalize(actions);
             instructions.push(ix.compose(pubkey)?);
         }
-        self.execute(&instructions, Some(mode)).await
+        self.execute(&instructions, Some(state)).await
     }
 
     /// Closes the account, releasing ownership after definitive completion.
@@ -90,7 +90,7 @@ impl AccountAccessor<'_> {
         self.execute(&[instruction], None).await
     }
 
-    /// Keeps this accessor only for a present, non-authoritative account.
+    /// Keeps this accessor only for a present account that is not authoritative in this ER.
     pub fn into_eviction(self) -> Option<Self> {
         self.evictable().then_some(self)
     }
@@ -102,7 +102,11 @@ impl AccountAccessor<'_> {
 
     /// Before submission, cancellation releases the lease without submitting work.
     /// After submission, the task owns completion and success bookkeeping.
-    async fn execute(self, instructions: &[Instruction], mode: Option<AccountMode>) -> Result<()> {
+    async fn execute(
+        self,
+        instructions: &[Instruction],
+        state: Option<AccountState>,
+    ) -> Result<()> {
         let txn = transaction::magicblock(instructions, self.engine)?;
         let rx = self.engine.transaction(txn)?.submit().await?;
         // No await may separate successful submission from this lease handoff.
@@ -110,8 +114,8 @@ impl AccountAccessor<'_> {
         // Dropping the join handle detaches this task; it must never be aborted.
         tokio::spawn(async move {
             rx.await??;
-            match mode {
-                Some(mode) => lease.materialized(mode),
+            match state {
+                Some(state) => lease.materialized(state),
                 None => lease.deleted(),
             }
             Ok(())

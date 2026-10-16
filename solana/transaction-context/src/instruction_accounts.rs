@@ -55,12 +55,10 @@ impl InstructionAccount {
     }
 }
 
-/// Account borrowed for the current instruction, with program mutation checks.
+/// Account borrowed for the current instruction.
 ///
-/// Changes require instruction writability, the relevant ownership permissions,
-/// and a currently mutable account mode. Lifecycle dirty markers allow later
-/// writeback, not additional program writes. Scalar setters preserve no-op values
-/// after their Solana checks pass, without touching the account or its accounting.
+/// Writes require instruction writability, writable account access, and the
+/// relevant Solana ownership permissions.
 #[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
 #[derive(Debug)]
 pub struct BorrowedInstructionAccount<'a, 'ix_data> {
@@ -94,7 +92,7 @@ impl BorrowedInstructionAccount<'_, '_> {
 
     /// Assigns a new owner to a writable, mutable account owned by this program.
     ///
-    /// Data must be empty or zeroed. An unchanged owner skips the mode check only
+    /// Data must be empty or zeroed. An unchanged owner skips the state check only
     /// after ownership, instruction writability, and data checks have passed.
     pub fn set_owner(&mut self, pubkey: &[u8]) -> Result<(), InstructionError> {
         if !self.is_owned_by_current_program() || !self.is_writable() {
@@ -103,7 +101,6 @@ impl BorrowedInstructionAccount<'_, '_> {
         if !is_zeroed(self.get_data()) {
             return Err(InstructionError::ModifiedProgramId);
         }
-        // don't touch the account if the owner does not change
         if self.get_owner().to_bytes() == pubkey {
             return Ok(());
         }
@@ -121,20 +118,17 @@ impl BorrowedInstructionAccount<'_, '_> {
 
     /// Replaces the balance and records its delta for instruction balance checks.
     ///
-    /// Debits require ownership; any change requires instruction writability and
-    /// a mutable mode. An unchanged balance skips the mode check and accounting,
-    /// so CPI synchronization can preserve a legally locked account.
+    /// Instruction writability is always required; debits also require ownership.
+    /// Balance changes require writable account access. Unchanged balances skip
+    /// the access check and accounting so CPI can synchronize readonly accounts.
     pub fn set_lamports(&mut self, lamports: u64) -> Result<(), InstructionError> {
         let old_lamports = self.get_lamports();
-        // An account not owned by the program cannot have its balance decrease
         if !self.is_owned_by_current_program() && lamports < old_lamports {
             return Err(InstructionError::ExternalAccountLamportSpend);
         }
-        // The balance of read-only may not change
         if !self.is_writable() {
             return Err(InstructionError::ReadonlyLamportChange);
         }
-        // don't touch the account if the lamports do not change
         if old_lamports == lamports {
             return Ok(());
         }
@@ -283,10 +277,9 @@ impl BorrowedInstructionAccount<'_, '_> {
 
     /// Changes the executable flag on a rent-exempt account owned by this program.
     ///
-    /// Instruction writability is required even for an unchanged value; mode
-    /// permission and dirty accounting apply only when the flag changes.
+    /// The instruction must mark the account writable even if the flag is unchanged.
+    /// An unchanged flag skips the access check and does not mark the account dirty.
     pub fn set_executable(&mut self, is_executable: bool) -> Result<(), InstructionError> {
-        // To become executable an account must be rent exempt
         if !self
             .transaction_context
             .rent
@@ -297,7 +290,6 @@ impl BorrowedInstructionAccount<'_, '_> {
         if !self.is_owned_by_current_program() || !self.is_writable() {
             return Err(InstructionError::ExecutableModified);
         }
-        // don't touch the account if the executable flag does not change
         #[allow(deprecated)]
         if self.is_executable() == is_executable {
             return Ok(());
@@ -319,7 +311,7 @@ impl BorrowedInstructionAccount<'_, '_> {
         self.instruction_account.is_signer()
     }
 
-    /// Returns the instruction's writable flag, independently of mode and owner.
+    /// Returns whether the instruction marks this account writable.
     pub fn is_writable(&self) -> bool {
         self.instruction_account.is_writable()
     }
@@ -332,25 +324,19 @@ impl BorrowedInstructionAccount<'_, '_> {
             .unwrap_or_default()
     }
 
-    /// Checks instruction writability, ownership, and mode before data mutation.
-    ///
-    /// Setters and VM mappings share this check, including when rebuilding the
-    /// caller's data regions after CPI changes an account's owner or mode.
+    /// Checks instruction writability, program ownership, and account access.
     pub fn can_data_be_changed(&self) -> Result<(), InstructionError> {
-        // and only if the account is writable
         if !self.is_writable() {
             return Err(InstructionError::ReadonlyDataModified);
         }
-        // and only if we are the owner
         if !self.is_owned_by_current_program() {
             return Err(InstructionError::ExternalAccountDataModified);
         }
         self.check_mutable()
     }
 
-    /// Requires a currently mutable mode, regardless of transaction dirty markers.
     fn check_mutable(&self) -> Result<(), InstructionError> {
-        if self.account.mode().mutable() {
+        if self.account.lifecycle().is_writable() {
             Ok(())
         } else {
             Err(InstructionError::Immutable)
@@ -361,12 +347,12 @@ impl BorrowedInstructionAccount<'_, '_> {
     pub fn can_data_be_resized(&self, new_len: usize) -> Result<(), InstructionError> {
         let old_len = self.get_data().len();
         if new_len != old_len {
-            use solana_account::AccountMode;
+            use solana_account::AccountState;
             if !self.is_owned_by_current_program() {
                 // Only the owner can change the length of the data
                 return Err(InstructionError::AccountDataSizeChanged);
-            } else if self.account.is(AccountMode::Magic) {
-                // Magic accounts can only be resized with special builtin instruction
+            } else if self.account.is(AccountState::ErLocal) {
+                // ErLocal accounts can only be resized with special builtin instruction
                 return Err(InstructionError::InvalidRealloc);
             }
         }
@@ -403,30 +389,33 @@ fn is_zeroed(buf: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use solana_account::{AccountBuilder, AccountMode, AccountSharedData, DirtyMarkers};
+    use solana_account::{AccountBuilder, AccountSharedData, AccountState, DirtyMarkers};
     use solana_rent::Rent;
 
-    /// Proves scalar and data mutations reject immutable modes without changing
+    /// Proves scalar and data mutations reject immutable states without changing
     /// state or lamport deltas, while no-ops preserve legal lifecycle markers.
     #[test]
-    fn immutable_modes_reject_mutations() {
-        use AccountMode::*;
-        for mode in [Uninit, ReadOnly, System, Transient, Closed] {
+    fn readonly_states_reject_mutations() {
+        use AccountState::*;
+        for state in [Missing, Mirrored, Runtime, Undelegating, Closed] {
             let owner = Pubkey::new_unique();
-            let initial = match mode {
-                Transient => Delegated,
-                Closed => Magic,
-                _ => mode,
+            let initial = match state {
+                Undelegating => Delegated,
+                Closed => ErLocal,
+                _ => state,
             };
             let mut account = AccountBuilder::default()
-                .mode(initial)
+                .lifecycle(initial)
                 .owner(owner)
                 .lamports(Rent::default().minimum_balance(0))
                 .build::<AccountSharedData>();
-            if initial != mode {
-                account.set_lifecycle(mode, account.slot()).unwrap();
-                assert!(account.markers().contains(DirtyMarkers::MODE));
-                assert!(account.mutable(), "the transition still permits writeback");
+            if initial != state {
+                account.set_lifecycle(state, account.slot()).unwrap();
+                assert!(account.markers().contains(DirtyMarkers::STATE));
+                assert!(
+                    account.can_writeback(),
+                    "the transition still permits writeback"
+                );
             }
             let before = account.clone();
             let mut context = TransactionContext::new(
@@ -476,7 +465,7 @@ mod tests {
                 account.extend_from_slice(&[1]),
                 Err(InstructionError::Immutable)
             );
-            assert_eq!(**account.account, before, "{mode:?}");
+            assert_eq!(**account.account, before, "{state:?}");
             assert_eq!(account.account.markers(), before.markers());
             assert_eq!(context.accounts.get_lamports_delta(), 0);
             drop(account);

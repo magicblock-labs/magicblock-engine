@@ -1,5 +1,5 @@
 use solana_account::{
-    AccountFieldPatch, AccountMode, ReadableAccount, StateFlags, WritableAccount,
+    AccountFieldPatch, AccountState, ReadableAccount, StateFlags, WritableAccount,
 };
 use solana_instruction_error::InstructionError;
 use solana_program_runtime::{invoke_context::InvokeContext, loaded_programs::ProgramCacheEntry};
@@ -78,7 +78,7 @@ pub(crate) fn delete(
     let mut acc = ctx.transaction_context.accounts().try_borrow_mut(target)?;
 
     let slot = acc.slot();
-    if let Err(error) = acc.set_lifecycle(AccountMode::Closed, slot) {
+    if let Err(error) = acc.set_lifecycle(AccountState::Closed, slot) {
         ic_msg!(ctx, "MagicRoot: {}", error);
         return Err(InstructionError::InvalidArgument);
     }
