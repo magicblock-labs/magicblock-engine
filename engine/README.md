@@ -59,7 +59,7 @@ or skipped as already handled or superseded. A different mode at the same slot
 still reaches [lifecycle validation](../solana/account/README.md#account-lifecycle).
 
 MBV validates source freshness, replacement eligibility, and action provenance.
-Engine enforces lifecycle transitions. Transient redelegation requires a new
+Engine enforces lifecycle transitions. Undelegating redelegation requires a new
 delegation at a strictly newer slot, not a newer observation of the old delegation.
 Delegated state can't be replaced in the same mode. Magic state remains authoritative
 until explicitly closed, regardless of token balance. Materialization and deletion

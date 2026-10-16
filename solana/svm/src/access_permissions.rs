@@ -18,7 +18,7 @@ impl ExecutedTransaction {
         };
         let logs = Arc::make_mut(self.execution_details.log_messages.get_or_insert_default());
         for (i, (pk, acc)) in accounts {
-            if !tx.is_writable(i) || acc.mutable() || privileged {
+            if !tx.is_writable(i) || acc.can_writeback() || privileged {
                 continue;
             }
             let error = format!("Program log: Immutable account {pk} has been modified");
@@ -28,7 +28,7 @@ impl ExecutedTransaction {
         }
         // The payer is writable in Solana messages even when fees are disabled
         // here; reject it only if execution actually changed immutable state.
-        if payer.1.dirty() && !payer.1.mutable() {
+        if payer.1.dirty() && !payer.1.can_writeback() {
             let error = format!("Program log: ({}) Feepayer account is readonly", payer.0);
             logs.push(error);
             self.execution_details.status = Err(TransactionError::InvalidAccountForFee);
@@ -175,7 +175,9 @@ mod tests {
     fn writable_account_guard() {
         let mut transitioned = account(AccountMode::Delegated);
         let transitioned_slot = transitioned.slot();
-        transitioned.set_lifecycle(AccountMode::Transient, transitioned_slot).unwrap();
+        transitioned
+            .set_lifecycle(AccountMode::Undelegating, transitioned_slot)
+            .unwrap();
         let mut closed = account(AccountMode::Magic);
         let closed_slot = closed.slot();
         closed.set_lifecycle(AccountMode::Closed, closed_slot).unwrap();
@@ -185,13 +187,14 @@ mod tests {
         // message-read-only operands are always fine.
         let cases = [
             // (target, writable, privileged, accepted)
-            (account(AccountMode::ReadOnly), true, false, false),
-            (account(AccountMode::Transient), true, false, false),
+            (account(AccountMode::Base), true, false, false),
+            (account(AccountMode::MirroredSystem), true, false, false),
+            (account(AccountMode::Undelegating), true, false, false),
             (transitioned, true, false, true),
             (closed, true, false, true),
             (account(AccountMode::Delegated), true, false, true),
-            (account(AccountMode::ReadOnly), false, false, true), // read-only in the message
-            (account(AccountMode::ReadOnly), true, true, true),   // MagicRoot bypass
+            (account(AccountMode::Base), false, false, true), // read-only in the message
+            (account(AccountMode::Base), true, true, true),   // MagicRoot bypass
         ];
         for (i, (target, writable, privileged, accepted)) in cases.into_iter().enumerate() {
             let (verdict, executed) = run(
@@ -217,8 +220,9 @@ mod tests {
         // payer is always accepted.
         let cases = [
             // (payer, privileged, accepted)
-            (account(AccountMode::ReadOnly), false, false),
-            (account(AccountMode::Transient), false, false),
+            (account(AccountMode::Base), false, false),
+            (account(AccountMode::MirroredSystem), false, false),
+            (account(AccountMode::Undelegating), false, false),
             (account(AccountMode::Delegated), false, true),
         ];
         for (i, (payer, privileged, accepted)) in cases.into_iter().enumerate() {
@@ -245,7 +249,7 @@ mod tests {
         // rewrite the original error into an access error.
         let (verdict, failed) = run(
             AccountSharedData::default(),
-            account(AccountMode::ReadOnly),
+            account(AccountMode::Base),
             true,
             false,
             Err(TransactionError::AccountInUse),

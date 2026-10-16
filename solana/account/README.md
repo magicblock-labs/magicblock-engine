@@ -8,37 +8,54 @@ persistence and the host owns validation of imported state.
 
 ## Account lifecycle
 
-Lifecycle separates authority from mutability. `Delegated` accounts are delegated
-to this ER; `Magic` accounts are authoritative state created within it. Both allow
-user mutation. `Transient` accounts remain authoritative while awaiting lifecycle
-resolution but reject user writes. `Closed` marks state for storage removal.
+AccountMode stores AccountKind, AccessMode, and DataFlow in two bytes. The account
+core remains 56 bytes. Named constants select the supported combinations:
 
-Transitions to transient or closed revoke mutation immediately, including in CPI.
-The transaction-final writeback guard can accept a dirty transition into those
-modes without permitting further program writes. Other modes represent cached
-external absence (`Uninit`), a read-only mirror (`ReadOnly`), and internal sysvar,
-feature, or precompile state (`System`).
+| Constant | Kind | Access | DataFlow |
+| --- | --- | --- | --- |
+| `Uninit` | Uninit | ReadOnly | BaseToMagic |
+| `Base` | Regular | ReadOnly | BaseToMagic |
+| `Delegated` | Regular | Writable | MagicToBase |
+| `Undelegating` | Regular | ReadOnly | MagicToBase |
+| `Magic` | Regular | Writable | None |
+| `System` | System | ReadOnly | None |
+| `MirroredSystem` | System | ReadOnly | BaseToMagic |
+| `Closed` | Closed | ReadOnly | None |
 
-Privileged replacement validates mode and source slot together. Authoritative
-state can't be refreshed in the same mode, even at a newer slot; otherwise a later
-external image could overwrite local execution. Ordinary transaction mutations
-aren't replacements and don't follow that restriction.
+Uninit is the default. Accounts delegated elsewhere use Base. Magic can coexist
+with an independent base account; its local state has no direct delegated commit
+relationship with base. System accounts are volatile and survive mirror reset.
 
-| From | Allowed at the same or a newer slot | Requires a strictly newer slot |
-| :-- | :-- | :-- |
-| Uninit | ReadOnly, System, Delegated, Magic, Closed | Uninit |
-| ReadOnly | Delegated, Magic, Closed | ReadOnly, Uninit |
+Access controls ordinary program writes. `can_writeback()` also accepts dirty
+transitions into Undelegating or Closed, without permitting subsequent program
+writes, including across CPI. Magic, Delegated, and Undelegating remain locally
+authoritative; Closed is a deletion tombstone removed by storage.
+
+DataFlow describes ongoing state sync with base; Magic names the validator here.
+Initial cloning and delegation-status observation are separate. The host supplies
+authority, commit targets, source freshness, and evidence permitting transitions.
+
+Lifecycle changes validate the complete mode and source slot atomically. System
+below means either System constant, including changes between their flows.
+
+| From | Same or newer slot | Strictly newer slot |
+| --- | --- | --- |
+| Uninit | Base, System, Delegated, Magic, Closed | Uninit |
+| Base | Delegated, Magic, Closed | Base, Uninit |
 | System | — | System |
-| Delegated | Transient | — |
+| Delegated | Undelegating | — |
 | Magic | Closed | — |
-| Transient | ReadOnly, Uninit, Closed | Delegated |
+| Undelegating | Base, Uninit, Closed | Delegated |
 | Closed | — | — |
 
-Unlisted transitions and slot regressions fail without changing state or dirty
-markers. Magic state must be explicitly closed before another image can occupy
-its key, regardless of token balance. The host validates creation and closure
-eligibility, including application-specific token rules. [Engine's import path](../../engine/README.md#account-replacement)
-owns observation-based deduplication and the evidence required for redelegation.
+Unlisted pairs and slot regressions fail without changing state or dirty markers.
+Authoritative images cannot be replaced in the same mode, even at a newer slot;
+ordinary execution is unaffected. Magic must be closed before replacement,
+regardless of token balance. See [Engine's import contract](../../engine/README.md#account-replacement)
+for deduplication and redelegation evidence.
+
+The encoding is `[kind, policy]`: policy bit 0 is access and bits 1–2 are flow.
+Decoders reject invalid tags, reserved bits, and unsupported combinations.
 
 ## Borrowed storage
 
@@ -59,7 +76,7 @@ The host remains responsible for source freshness. Equality compares account sta
 and bytes, not storage representation or dirty markers. Lifecycle semantics and
 binary encoding must agree across producers and consumers.
 
-[Modes and copy-on-write behavior](src/cow/mod.rs), the [borrowed layout](src/cow/borrowed.rs),
+[Modes](src/mode.rs), [copy-on-write behavior](src/cow/mod.rs), the [borrowed layout](src/cow/borrowed.rs),
 and [field patches](src/patch.rs) define this model. The `testkit` feature supplies
 account and borrowed-storage fixtures. Representation changes also affect transaction
 context, VM mapping, and persistence; see the [runtime overview](../README.md).

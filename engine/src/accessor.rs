@@ -45,7 +45,7 @@ impl AccountAccessor<'_> {
     ///
     /// Callers supplying `actions` must verify its trusted provenance as
     /// required by [`PostFinalize`] before invoking this method.
-    /// Confirmed redelegation replaces `Transient` directly with `Delegated`
+    /// Confirmed redelegation replaces `Undelegating` directly with `Delegated`
     /// at a strictly newer remote slot. The caller must establish a new
     /// delegation generation, not merely a newer observation of the old one,
     /// and reconcile local state after acquiring this accessor.

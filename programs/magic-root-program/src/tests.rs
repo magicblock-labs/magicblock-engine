@@ -323,7 +323,7 @@ fn explicit_invocation_preserves_account_protections() {
     }
     with_cpi(true, |ctx, target| {
         let invalid = MagicRootInstruction::Patch(AccountFieldPatch::Lifecycle {
-            mode: AccountMode::Transient,
+            mode: AccountMode::Undelegating,
             slot: 1,
         })
         .compose(target)

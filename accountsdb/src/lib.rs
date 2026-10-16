@@ -423,7 +423,7 @@ fn persisted(entry: &&AccountEntry) -> bool {
         CoWAccount::Borrowed(_) => true,
         CoWAccount::Owned(_) => {
             // Mode changes still need persisted cleanup after borrowed data grows into owned data.
-            entry.1.mode().authoritative() || entry.1.markers().contains(DirtyMarkers::MODE)
+            entry.1.mode().is_authoritative() || entry.1.markers().contains(DirtyMarkers::MODE)
         }
     }
 }
@@ -431,7 +431,7 @@ fn persisted(entry: &&AccountEntry) -> bool {
 /// Returns `true` for entries that must touch volatile storage.
 fn volatile(entry: &&AccountEntry) -> bool {
     match entry.1.cow() {
-        CoWAccount::Borrowed(_) => !entry.1.mode().authoritative(),
+        CoWAccount::Borrowed(_) => !entry.1.mode().is_authoritative(),
         CoWAccount::Owned(_) => true,
     }
 }

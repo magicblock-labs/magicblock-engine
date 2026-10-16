@@ -129,7 +129,7 @@ impl AccountLease {
 
     /// Returns whether the observed account may be removed as a remote mirror.
     pub fn evictable(&self) -> bool {
-        self.observed.is_some_and(|(mode, _)| !mode.authoritative())
+        self.observed.is_some_and(|(mode, _)| !mode.is_authoritative())
     }
 
     /// Returns the local mode when the incoming image is older or duplicates
@@ -170,7 +170,7 @@ impl Drop for AccountLease {
 impl AccountCache {
     /// Tracks a materialized account and returns one displaced from recency.
     fn track(&self, pubkey: Pubkey, mode: AccountMode) -> Option<Pubkey> {
-        if !mode.authoritative() {
+        if !mode.is_authoritative() {
             return self.admit_recency(pubkey);
         }
         self.remove_recency(&pubkey);

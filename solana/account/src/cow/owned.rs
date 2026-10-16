@@ -72,7 +72,7 @@ impl OwnedAccount {
         self.core.lamports
     }
 
-    /// Returns the account's exact lifecycle mode.
+    /// Returns the account's complete kind and access mode.
     pub fn mode(&self) -> AccountMode {
         self.core.mode
     }
@@ -118,7 +118,7 @@ impl AccountBuilder {
         self
     }
 
-    /// Sets the lifecycle mode; the storage layer decides where to persist it.
+    /// Sets classification, access, and synchronization policy together.
     pub fn mode(mut self, mode: AccountMode) -> Self {
         self.0.core.mode = mode;
         self
