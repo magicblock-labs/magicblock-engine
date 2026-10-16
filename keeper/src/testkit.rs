@@ -23,7 +23,7 @@ use nucleus::{
     shutdown::ShutdownManager,
     testkit::signed_view as compose_view,
 };
-use solana_account::{AccountBuilder, AccountMode, ReadableAccount};
+use solana_account::{AccountBuilder, AccountState, ReadableAccount};
 use solana_hash::Hash;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_keypair::Keypair;
@@ -195,18 +195,18 @@ pub fn resolved(accounts: &[(Pubkey, bool)]) -> ResolvedTransaction {
 
 /// Configures a v42 account carrying an 8-byte little-endian `i64` and twice
 /// its rent-exempt minimum, leaving one reserve available for transfer tests.
-pub fn v42_builder(value: i64, mode: AccountMode) -> AccountBuilder {
+pub fn v42_builder(value: i64, state: AccountState) -> AccountBuilder {
     AccountBuilder::default()
         .lamports(Rent::default().minimum_balance(8) * 2)
         .owner(V42_ID)
-        .mode(mode)
+        .state(state)
         .data(value.to_le_bytes().to_vec())
 }
 
-/// Stores a funded v42 `i64` account in `mode` and returns its pubkey.
-pub fn store_v42(keeper: &Keeper, value: i64, mode: AccountMode) -> Pubkey {
+/// Stores a funded v42 `i64` account in `state` and returns its pubkey.
+pub fn store_v42(keeper: &Keeper, value: i64, state: AccountState) -> Pubkey {
     let key = Pubkey::new_unique();
-    keeper.accounts().store(&[(key, v42_builder(value, mode).build())]).unwrap();
+    keeper.accounts().store(&[(key, v42_builder(value, state).build())]).unwrap();
     key
 }
 

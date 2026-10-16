@@ -10,7 +10,7 @@ use keeper::testkit::{
     signed_view, store_v42, v42_padded_value, v42_sum,
 };
 use nucleus::KB;
-use solana_account::{AccountMode, ReadableAccount};
+use solana_account::{AccountState, ReadableAccount};
 use solana_instruction_error::InstructionError;
 use solana_packet::PACKET_DATA_SIZE;
 use solana_transaction::TransactionError;
@@ -29,10 +29,10 @@ async fn client_transaction_formats_execute_below_and_above_packet_limit() {
 
     let te = TestEngine::new().await;
     let operands: Vec<_> =
-        (0..WIDE_ACCOUNTS).map(|_| store_v42(&te, 1, AccountMode::Delegated)).collect();
+        (0..WIDE_ACCOUNTS).map(|_| store_v42(&te, 1, AccountState::Delegated)).collect();
 
     for version in [WireVersion::Legacy, WireVersion::V0, WireVersion::V1] {
-        let output = store_v42(&te, 0, AccountMode::Magic);
+        let output = store_v42(&te, 0, AccountState::ErLocal);
         let (_, small) = sign_versioned_instructions(
             te.signer(),
             version,
@@ -43,7 +43,7 @@ async fn client_transaction_formats_execute_below_and_above_packet_limit() {
         te.execute(small).await.expect("small v42 transaction succeeds");
         assert_eq!(load_v42_data(&te, output), Some(42));
 
-        let output = store_v42(&te, 0, AccountMode::Magic);
+        let output = store_v42(&te, 0, AccountState::ErLocal);
         let (_, wide) = sign_versioned_instructions(
             te.signer(),
             version,
@@ -55,7 +55,7 @@ async fn client_transaction_formats_execute_below_and_above_packet_limit() {
         te.execute(wide).await.expect("wide v42 transaction succeeds");
         assert_eq!(load_v42_data(&te, output), Some(WIDE_ACCOUNTS as i64));
 
-        let output = store_v42(&te, 0, AccountMode::Magic);
+        let output = store_v42(&te, 0, AccountState::ErLocal);
         let instructions: Vec<_> = (0..BATCHED_INSTRUCTIONS)
             .map(|value| v42_padded_value(output, value as i64, BATCHED_TERMS))
             .collect();
@@ -78,8 +78,8 @@ async fn client_transaction_formats_execute_below_and_above_packet_limit() {
 #[tokio::test(flavor = "multi_thread")]
 async fn simulate_does_not_commit_execute_does() {
     let te = TestEngine::new().await;
-    let source = store_v42(&te, 0, AccountMode::Delegated);
-    let recipient = store_v42(&te, 0, AccountMode::Magic);
+    let source = store_v42(&te, 0, AccountState::Delegated);
+    let recipient = store_v42(&te, 0, AccountState::ErLocal);
     let source_before = load_v42_lamports(&te, source).expect("source exists");
     let recipient_before = load_v42_lamports(&te, recipient).expect("recipient exists");
     let ixs = [transfer(source, recipient, 42)];
@@ -146,7 +146,7 @@ async fn processed_transaction_details_roundtrip() {
     let mut expected = Vec::new();
 
     for value in [7, 42, 99] {
-        let output = store_v42(&te, 0, AccountMode::Magic);
+        let output = store_v42(&te, 0, AccountState::ErLocal);
         let ix = E::lit(value).cpi().compose(output, &[]);
         let (signature, transaction) = signed_view(&te, None, ix.clone());
         let bytes = transaction.inner_data().as_ref().clone();
@@ -204,7 +204,7 @@ async fn processed_transaction_details_roundtrip() {
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_execution_surfaces_error_result() {
     let te = TestEngine::new().await;
-    let output = store_v42(&te, 5, AccountMode::Magic);
+    let output = store_v42(&te, 5, AccountState::ErLocal);
     // MIN - 1 overflows the program's checked_sub before any write.
     let ixs = [(E::lit(i64::MIN) - E::lit(1)).compose(output, &[])];
     let (signature, transaction) = signed_view(&te, None, ixs[0].clone());
@@ -234,7 +234,7 @@ async fn failed_execution_surfaces_error_result() {
 #[tokio::test(flavor = "multi_thread")]
 async fn schedule_is_fire_and_forget() {
     let te = TestEngine::new().await;
-    let output = store_v42(&te, 0, AccountMode::Magic);
+    let output = store_v42(&te, 0, AccountState::ErLocal);
     let mut updates = te.accounts().subscribe(output);
     let (signature, transaction) =
         signed_view(&te, None, (E::acc(0) + E::lit(7)).compose(output, &[]));

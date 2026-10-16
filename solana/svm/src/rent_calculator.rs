@@ -3,7 +3,7 @@
 //! Rent management for SVM.
 
 use {
-    solana_account::{AccountMode, AccountSharedData, ReadableAccount},
+    solana_account::{AccountSharedData, AccountState, ReadableAccount},
     solana_clock::Epoch,
     solana_pubkey::Pubkey,
     solana_rent::Rent,
@@ -70,13 +70,13 @@ pub fn check_rent_state_with_account(
 
 /// Determines the rent state of an account from lamports and data size.
 ///
-/// A nonzero-lamport Magic account is rent-exempt even below the normal
+/// A nonzero-lamport ErLocal account is rent-exempt even below the normal
 /// minimum. An account with zero lamports remains uninitialized.
 pub fn get_account_rent_state(rent: &Rent, acc: &AccountSharedData) -> RentState {
     let (lamports, len) = (acc.lamports(), acc.data().len());
     if lamports == 0 {
         RentState::Uninitialized
-    } else if rent.is_exempt(lamports, len) || acc.is(AccountMode::Magic) {
+    } else if rent.is_exempt(lamports, len) || acc.is(AccountState::ErLocal) {
         RentState::RentExempt
     } else {
         RentState::RentPaying { data_size: len, lamports }

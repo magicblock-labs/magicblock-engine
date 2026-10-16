@@ -19,7 +19,7 @@ use keeper::testkit::{
 use ledger::request::{BlockDetails, BlockParams, BlockResponse};
 use nucleus::{KB, Slot, config::Authority, ledger::BlockstorePosition, shutdown::ShutdownManager};
 use replicator::{ReplicationClient, ReplicationDispatcher};
-use solana_account::{AccountBuilder, AccountMode, ReadableAccount};
+use solana_account::{AccountBuilder, AccountState, ReadableAccount};
 use solana_keypair::{Keypair, Signer};
 use solana_pubkey::Pubkey;
 use solana_sysvar::rent::Rent;
@@ -29,7 +29,7 @@ use v42_calculator_interface::builder::Expr as E;
 /// Bound for every asynchronous replication assertion.
 const TIMEOUT: Duration = Duration::from_secs(4);
 
-type AccountSeed = (Pubkey, i64, AccountMode);
+type AccountSeed = (Pubkey, i64, AccountState);
 
 /// Returns an unused loopback address, released immediately after discovery.
 fn loopback_addr() -> SocketAddr {
@@ -51,8 +51,8 @@ async fn engine(authority: Authority, accounts: &[AccountSeed], pacing: Pacing) 
     let mut builder = keeper_builder(&dirs);
     builder.authority = authority;
     builder.blockstore.checkpoint = 2;
-    for &(key, value, mode) in accounts {
-        builder.accounts.insert(key, v42_builder(value, mode).build());
+    for &(key, value, state) in accounts {
+        builder.accounts.insert(key, v42_builder(value, state).build());
     }
     TestEngine::from_builder(dirs, builder, pacing).await
 }
@@ -131,7 +131,7 @@ async fn increment(engine: &TestEngine, state: Pubkey) {
 #[tokio::test(flavor = "multi_thread")]
 async fn checkpoint_mismatch_stops_replication() {
     let state = Pubkey::new_unique();
-    let seed = [(state, 0, AccountMode::Delegated)];
+    let seed = [(state, 0, AccountState::Delegated)];
     let (mut leader, mut follower) = engines(&seed, &seed).await;
     leader.advance(1).await;
     let expected = leader.sync().await;
@@ -144,7 +144,7 @@ async fn checkpoint_mismatch_stops_replication() {
     // A leader-only write is absent from the follower's execution stream.
     {
         let _guard = leader.barrier().await.unwrap();
-        keeper::testkit::store_v42(&leader, 7, AccountMode::Delegated);
+        keeper::testkit::store_v42(&leader, 7, AccountState::Delegated);
         // SAFETY: the execution barrier is held through sampling and append.
         unsafe { leader.checkpoint(None) }.unwrap();
     }
@@ -245,7 +245,7 @@ async fn replays_large_transactions_during_catch_up_and_live_streaming() {
     const ACCOUNT_SLOT: Slot = 42;
 
     let state = Pubkey::new_unique();
-    let seed = [(state, 0, AccountMode::Delegated)];
+    let seed = [(state, 0, AccountState::Delegated)];
     let (mut leader, mut follower) = engines(&seed, &seed).await;
     let account = Pubkey::new_unique();
     let owner = Pubkey::new_unique();
@@ -273,7 +273,7 @@ async fn replays_large_transactions_during_catch_up_and_live_streaming() {
     let created = AccountBuilder::default()
         .lamports(lamports)
         .owner(owner)
-        .mode(AccountMode::ReadOnly)
+        .state(AccountState::Mirrored)
         .slot(ACCOUNT_SLOT)
         .data(patterned_bytes(CREATE_DATA_LEN, 1));
     leader
@@ -311,7 +311,7 @@ async fn replays_large_transactions_during_catch_up_and_live_streaming() {
     let updated = AccountBuilder::default()
         .lamports(lamports)
         .owner(owner)
-        .mode(AccountMode::Delegated)
+        .state(AccountState::Delegated)
         .slot(ACCOUNT_SLOT + 1)
         .data(patterned_bytes(UPDATE_DATA_LEN, 2));
     leader
@@ -350,7 +350,7 @@ async fn batches_transactions_without_crossing_block_boundaries() {
     const CATCH_UP_TRANSACTIONS: i64 = 129;
 
     let state = Pubkey::new_unique();
-    let seed = [(state, 0, AccountMode::Delegated)];
+    let seed = [(state, 0, AccountState::Delegated)];
     let (mut leader, mut follower) = engines(&seed, &seed).await;
 
     // Distinct assignments make any cross-batch reordering observable in final state.
@@ -414,7 +414,7 @@ async fn batches_transactions_without_crossing_block_boundaries() {
 async fn internally_paced_replication_persists_across_restart() {
     let state = Pubkey::new_unique();
     let volatile = Pubkey::new_unique();
-    let seed = [(state, 0, AccountMode::Delegated), (volatile, 7, AccountMode::ReadOnly)];
+    let seed = [(state, 0, AccountState::Delegated), (volatile, 7, AccountState::Mirrored)];
     let leader_authority: Authority = Keypair::new().into();
     let follower_authority = Authority {
         local: Arc::new(Keypair::new()),
@@ -457,7 +457,7 @@ async fn streams_and_resumes_without_duplicate_application() {
     let state = Pubkey::new_unique();
     // Only reset may remove the read-only account; delegated state must survive it.
     let volatile = Pubkey::new_unique();
-    let seed = [(state, 0, AccountMode::Delegated), (volatile, 7, AccountMode::ReadOnly)];
+    let seed = [(state, 0, AccountState::Delegated), (volatile, 7, AccountState::Mirrored)];
     let (mut leader, mut follower) = engines(&seed, &seed).await;
 
     // Catch-up crosses two sealed superblocks and a live tail from byte zero.
@@ -514,7 +514,7 @@ async fn streams_and_resumes_without_duplicate_application() {
         .account(sponsored)
         .await
         .unwrap()
-        .materialize(v42_builder(0, AccountMode::Delegated), None)
+        .materialize(v42_builder(0, AccountState::Delegated), None)
         .await
         .expect("sponsored account creation commits");
     let authority_after = leader.get_account(authority).expect("leader sponsor remains").lamports();
@@ -567,7 +567,7 @@ async fn streams_and_resumes_without_duplicate_application() {
 #[tokio::test(flavor = "multi_thread")]
 async fn resumes_after_leader_restart() {
     let state = Pubkey::new_unique();
-    let seed = [(state, 0, AccountMode::Delegated)];
+    let seed = [(state, 0, AccountState::Delegated)];
     let (mut leader, mut follower) = engines(&seed, &seed).await;
 
     let addr = loopback_addr();
@@ -664,7 +664,7 @@ async fn graceful_shutdown_drains_to_next_block_and_reopens() {
 #[tokio::test(flavor = "multi_thread")]
 async fn restores_the_newest_snapshot_then_streams_its_tail() {
     let state = Pubkey::new_unique();
-    let seed = [(state, 0, AccountMode::Delegated)];
+    let seed = [(state, 0, AccountState::Delegated)];
     // The empty follower can acquire `state` only through snapshot restoration.
     let (mut leader, follower) = engines(&seed, &[]).await;
     let set = |value| E::lit(value).compose(state, &[]);
@@ -713,7 +713,7 @@ async fn restores_the_newest_snapshot_then_streams_its_tail() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cascades_replication_through_a_follower() {
     let state = Pubkey::new_unique();
-    let seed = [(state, 0, AccountMode::Delegated)];
+    let seed = [(state, 0, AccountState::Delegated)];
     let shared = Arc::new(Keypair::new());
     let leader_authority: Authority = shared.clone().into();
     let middle_authority = Authority {

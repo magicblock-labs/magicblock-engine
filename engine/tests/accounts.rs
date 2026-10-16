@@ -11,7 +11,7 @@ use keeper::testkit::{
 };
 use magic_root_interface::MagicRootInstruction;
 use solana_account::{
-    AccountBuilder, AccountMode, AccountSharedData, ReadableAccount, testkit::delegated_account,
+    AccountBuilder, AccountSharedData, AccountState, ReadableAccount, testkit::delegated_account,
 };
 use solana_instruction_error::InstructionError;
 use solana_pubkey::Pubkey;
@@ -27,26 +27,26 @@ const LAMPORTS: u64 = 2_000_000;
 const SLOT: u64 = 42;
 
 /// Account with explicit lifecycle state, funded at the shared rent-exempt balance.
-fn account(owner: Pubkey, data: Vec<u8>, mode: AccountMode, slot: u64) -> AccountBuilder {
+fn account(owner: Pubkey, data: Vec<u8>, state: AccountState, slot: u64) -> AccountBuilder {
     AccountBuilder::default()
         .lamports(LAMPORTS)
         .owner(owner)
-        .mode(mode)
+        .state(state)
         .slot(slot)
         .data(data)
 }
 
 /// Delegated account with `data` at `slot`.
 fn delegated(owner: Pubkey, data: Vec<u8>, slot: u64) -> AccountBuilder {
-    account(owner, data, AccountMode::Delegated, slot)
+    account(owner, data, AccountState::Delegated, slot)
 }
 
-/// Materializes `mode`, entering transient through its required delegated state.
-async fn materialize_with(engine: &Engine, key: Pubkey, owner: Pubkey, mode: AccountMode) {
-    let initial = if mode == AccountMode::Transient {
+/// Materializes `state`, entering undelegating through its required delegated state.
+async fn materialize_with(engine: &Engine, key: Pubkey, owner: Pubkey, state: AccountState) {
+    let initial = if state == AccountState::Undelegating {
         delegated(owner, vec![1], SLOT - 1)
     } else {
-        account(owner, vec![1], mode, SLOT)
+        account(owner, vec![1], state, SLOT)
     };
     engine
         .account(key)
@@ -55,14 +55,14 @@ async fn materialize_with(engine: &Engine, key: Pubkey, owner: Pubkey, mode: Acc
         .materialize(initial, None)
         .await
         .expect("initial account is created");
-    if mode == AccountMode::Transient {
+    if state == AccountState::Undelegating {
         engine
             .account(key)
             .await
             .unwrap()
-            .materialize(account(owner, vec![1], mode, SLOT), None)
+            .materialize(account(owner, vec![1], state, SLOT), None)
             .await
-            .expect("delegated account enters transient");
+            .expect("delegated account enters undelegating");
     }
 }
 
@@ -91,7 +91,7 @@ async fn account_crud_lifecycle() {
     let created = account(
         owner,
         vec![1, 2, 3, 4, 5, 6, 7, 8],
-        AccountMode::ReadOnly,
+        AccountState::Mirrored,
         10,
     );
     let authority_before = te.get_account(te.authority()).expect("sponsor exists").lamports();
@@ -106,10 +106,10 @@ async fn account_crud_lifecycle() {
     assert_eq!(acc.lamports(), LAMPORTS);
     assert_eq!(acc.owner(), &owner);
     assert_eq!(acc.data(), &[1, 2, 3, 4, 5, 6, 7, 8]);
-    assert!(acc.is(AccountMode::ReadOnly));
+    assert!(acc.is(AccountState::Mirrored));
     let accessor = te.account(key).await.unwrap();
     assert!(accessor.exists());
-    assert_eq!(accessor.observed(), Some((AccountMode::ReadOnly, 10)));
+    assert_eq!(accessor.observed(), Some((AccountState::Mirrored, 10)));
     drop(accessor);
 
     let authority_after = te.get_account(te.authority()).expect("sponsor exists").lamports();
@@ -125,13 +125,16 @@ async fn account_crud_lifecycle() {
     te.account(key)
         .await
         .unwrap()
-        .materialize(account(owner, vec![5; 16], AccountMode::ReadOnly, 11), None)
+        .materialize(
+            account(owner, vec![5; 16], AccountState::Mirrored, 11),
+            None,
+        )
         .await
         .unwrap();
     let acc = te.get_account(key).expect("still exists");
     assert_eq!(acc.data(), &[5; 16], "materialization replaced the data");
     assert_eq!(acc.owner(), &owner, "materialization replaced the owner");
-    assert!(acc.is(AccountMode::ReadOnly));
+    assert!(acc.is(AccountState::Mirrored));
 
     // delete: the account is gone from storage.
     te.account(key).await.unwrap().delete().await.unwrap();
@@ -182,7 +185,7 @@ async fn account_clone_materialization_accepts_large_data() {
         let account = AccountBuilder::default()
             .lamports(lamports)
             .owner(owner)
-            .mode(AccountMode::ReadOnly)
+            .state(AccountState::Mirrored)
             .slot(SLOT + index as u64)
             .data(data.clone());
 
@@ -191,7 +194,7 @@ async fn account_clone_materialization_accepts_large_data() {
         let stored = te.get_account(key).expect("large account exists");
         assert_eq!(stored.lamports(), lamports);
         assert_eq!(stored.owner(), &owner);
-        assert!(stored.is(AccountMode::ReadOnly));
+        assert!(stored.is(AccountState::Mirrored));
         assert_eq!(stored.slot(), SLOT + index as u64);
         assert_eq!(stored.data(), data);
     }
@@ -208,8 +211,8 @@ async fn account_materialization_accepts_max_data_with_post_finalize() {
 
     let te = TestEngine::new().await;
     let key = Pubkey::new_unique();
-    let source = store_v42(&te, 7, AccountMode::Delegated);
-    let output = store_v42(&te, 0, AccountMode::Magic);
+    let source = store_v42(&te, 7, AccountState::Delegated);
+    let output = store_v42(&te, 0, AccountState::ErLocal);
     let data = patterned_bytes(MAX_PERMITTED_DATA_LENGTH as usize, 42);
     let account = delegated_account(
         Rent::default().minimum_balance(data.len()),
@@ -288,7 +291,7 @@ async fn account_program_cache_tracks_v42_lifecycle() {
     let seeded = te.get_account(V42_ID).expect("v42 program is seeded");
     let program = Pubkey::new_unique();
     let closeable = AccountBuilder::from(seeded.clone())
-        .mode(AccountMode::Magic)
+        .state(AccountState::ErLocal)
         .slot(seeded.slot() + 1);
     te.account(program).await.unwrap().materialize(closeable, None).await.unwrap();
 
@@ -296,7 +299,7 @@ async fn account_program_cache_tracks_v42_lifecycle() {
     te.accounts()
         .store(&[(
             output,
-            v42_builder(0, AccountMode::Magic).owner(program).build(),
+            v42_builder(0, AccountState::ErLocal).owner(program).build(),
         )])
         .unwrap();
     let invoke = |value| {
@@ -336,7 +339,7 @@ async fn account_program_cache_tracks_v42_lifecycle() {
         "committed deletion removes the account"
     );
 
-    let invalid = AccountBuilder::from(seeded).mode(AccountMode::Magic).data(vec![0]);
+    let invalid = AccountBuilder::from(seeded).state(AccountState::ErLocal).data(vec![0]);
     te.accounts().store(&[(program, invalid.build())]).unwrap();
     assert_eq!(
         te.execute(&[invoke(9)]).await,
@@ -358,10 +361,14 @@ async fn account_replacement_slot_ordering() {
     let owner = Pubkey::new_unique();
 
     for (from, to, slot) in [
-        (AccountMode::ReadOnly, AccountMode::Delegated, SLOT),
-        (AccountMode::Transient, AccountMode::Delegated, SLOT + 1),
-        (AccountMode::Uninit, AccountMode::Magic, SLOT),
-        (AccountMode::ReadOnly, AccountMode::Magic, SLOT),
+        (AccountState::Mirrored, AccountState::Delegated, SLOT),
+        (
+            AccountState::Undelegating,
+            AccountState::Delegated,
+            SLOT + 1,
+        ),
+        (AccountState::Missing, AccountState::ErLocal, SLOT),
+        (AccountState::Mirrored, AccountState::ErLocal, SLOT),
     ] {
         let key = Pubkey::new_unique();
         materialize_with(&te, key, owner, from).await;
@@ -378,12 +385,16 @@ async fn account_replacement_slot_ordering() {
         );
     }
 
-    let output = store_v42(&te, 0, AccountMode::Magic);
+    let output = store_v42(&te, 0, AccountState::ErLocal);
     for (from, to, slot) in [
-        (AccountMode::ReadOnly, AccountMode::ReadOnly, SLOT),
-        (AccountMode::ReadOnly, AccountMode::Delegated, SLOT - 1),
-        (AccountMode::Transient, AccountMode::Delegated, SLOT - 1),
-        (AccountMode::Magic, AccountMode::Delegated, SLOT - 1),
+        (AccountState::Mirrored, AccountState::Mirrored, SLOT),
+        (AccountState::Mirrored, AccountState::Delegated, SLOT - 1),
+        (
+            AccountState::Undelegating,
+            AccountState::Delegated,
+            SLOT - 1,
+        ),
+        (AccountState::ErLocal, AccountState::Delegated, SLOT - 1),
     ] {
         let key = Pubkey::new_unique();
         te.accounts()
@@ -408,14 +419,18 @@ async fn account_replacement_slot_ordering() {
     }
 
     for (from, to, slot) in [
-        (AccountMode::Uninit, AccountMode::Transient, SLOT),
-        (AccountMode::System, AccountMode::ReadOnly, SLOT),
-        (AccountMode::Delegated, AccountMode::Delegated, SLOT + 1),
-        (AccountMode::Magic, AccountMode::Magic, SLOT + 1),
-        (AccountMode::Transient, AccountMode::Transient, SLOT + 1),
-        (AccountMode::Transient, AccountMode::Delegated, SLOT),
-        (AccountMode::Magic, AccountMode::Delegated, SLOT + 1),
-        (AccountMode::Magic, AccountMode::ReadOnly, SLOT + 1),
+        (AccountState::Missing, AccountState::Undelegating, SLOT),
+        (AccountState::Runtime, AccountState::Mirrored, SLOT),
+        (AccountState::Delegated, AccountState::Delegated, SLOT + 1),
+        (AccountState::ErLocal, AccountState::ErLocal, SLOT + 1),
+        (
+            AccountState::Undelegating,
+            AccountState::Undelegating,
+            SLOT + 1,
+        ),
+        (AccountState::Undelegating, AccountState::Delegated, SLOT),
+        (AccountState::ErLocal, AccountState::Delegated, SLOT + 1),
+        (AccountState::ErLocal, AccountState::Mirrored, SLOT + 1),
     ] {
         let key = Pubkey::new_unique();
         // Seed the source directly so only replacement validation is under test.
@@ -437,7 +452,7 @@ async fn account_replacement_slot_ordering() {
                 Some(post),
             )
             .await
-            .expect_err("forbidden mode or slot pair is rejected");
+            .expect_err("forbidden state or slot pair is rejected");
         assert_invalid_lifecycle(error);
         // The lamport patch precedes lifecycle validation: compare target,
         // action output, and sponsor to catch partial funding or action effects.
@@ -453,12 +468,12 @@ async fn account_replacement_slot_ordering() {
 async fn account_activation_is_atomic() {
     let te = TestEngine::new().await;
 
-    for initial in [None, Some(AccountMode::Transient)] {
+    for initial in [None, Some(AccountState::Undelegating)] {
         let key = Pubkey::new_unique();
-        if let Some(mode) = initial {
-            materialize_with(&te, key, Pubkey::new_unique(), mode).await;
+        if let Some(state) = initial {
+            materialize_with(&te, key, Pubkey::new_unique(), state).await;
         }
-        let output = store_v42(&te, 0, AccountMode::Magic);
+        let output = store_v42(&te, 0, AccountState::ErLocal);
         let state = || [key, output, te.authority()].map(|key| te.get_account(key));
         let before = state();
         let replacement =
@@ -553,7 +568,7 @@ async fn cancelled_activation_retains_ownership() {
     for fail in [false, true] {
         let te = TestEngine::new().await;
         let key = Pubkey::new_unique();
-        let output = store_v42(&te, 0, AccountMode::Magic);
+        let output = store_v42(&te, 0, AccountState::ErLocal);
         let state = || [key, output, te.authority()].map(|key| te.get_account(key));
         let before = state();
         let replacement = delegated(V42_ID, 10_i64.to_le_bytes().to_vec(), SLOT);

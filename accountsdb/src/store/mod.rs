@@ -6,7 +6,7 @@ use core::{hash::Hasher, slice};
 use std::sync::atomic::Ordering::{Acquire, Release};
 
 use solana_account::{
-    AccountMode, AccountSharedData, BorrowedAccount, CoWAccount::*, DirtyMarkers, OwnedAccount,
+    AccountSharedData, BorrowedAccount, CoWAccount::*, DirtyMarkers, OwnedAccount, StateAuthority,
 };
 use solana_pubkey::Pubkey;
 use tracing::{error, warn};
@@ -82,8 +82,8 @@ impl PersistedStore {
 
     /// Applies a batch of account updates to the persisted store.
     ///
-    /// Borrowed accounts in authoritative modes are committed in place. Owned
-    /// accounts in those modes are serialized into the mmap. Other modes delete
+    /// Borrowed accounts in ER-authoritative states are committed in place. Owned
+    /// accounts in those states are serialized into the mmap. Other states delete
     /// stale persisted entries. If the LMDB commit fails or database runs out of
     /// space, the borrowed images are rolled back so in-memory state stays
     /// aligned with the durable index.
@@ -155,9 +155,8 @@ impl PersistedStore {
     /// Applies one account state transition to the persisted backend.
     fn apply<'e>(&'e self, acc: &AccountEntry, txn: OptRwTxn<'_, 'e>) -> Result<()> {
         let (pubkey, account) = acc;
-        // An account that has moved to a non-authoritative mode, or has been
-        // closed, no longer belongs here, so drop any stale persisted entry.
-        if !account.mode().authoritative() || account.is(AccountMode::Closed) {
+        // Drop any stale persisted entry when the ER is no longer authoritative.
+        if account.state().authority() != Some(StateAuthority::Er) {
             self.delete(pubkey, txn)?;
             if let Borrowed(acc) = account.cow() {
                 acc.commit();

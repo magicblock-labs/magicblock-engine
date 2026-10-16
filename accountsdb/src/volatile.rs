@@ -10,7 +10,9 @@ use std::{
 use ahash::RandomState;
 use nucleus::Slot;
 use scc::HashMap;
-use solana_account::{AccountMode, AccountSharedData, OwnedAccount, ReadableAccount};
+use solana_account::{
+    AccountSharedData, AccountState, OwnedAccount, ReadableAccount, StateAuthority,
+};
 use solana_pubkey::Pubkey;
 use tracing::info;
 
@@ -63,13 +65,15 @@ impl VolatileStore {
         AC: IntoIterator<Item = &'a (Pubkey, AccountSharedData)>,
     {
         for (pubkey, account) in accounts {
-            // An account that has moved to an authoritative mode, or has been
+            // An account that has moved to an ER-authoritative state, or has been
             // closed, drops any stale volatile copy.
-            if account.mode().authoritative() || account.is(AccountMode::Closed) {
+            if account.state().authority() == Some(StateAuthority::Er)
+                || account.is(AccountState::Closed)
+            {
                 self.delete(pubkey);
                 continue;
             }
-            // Non-authoritative accounts stay volatile and update the program
+            // Accounts without ER authority stay volatile and update the program
             // mapping.
             let owner = *account.owner();
             {
@@ -95,9 +99,9 @@ impl VolatileStore {
         self.accounts.read_sync(pubkey, |_, account| account.clone())
     }
 
-    /// Reads mode and slot from one guarded image without cloning account data.
-    pub(crate) fn lifecycle(&self, pubkey: &Pubkey) -> Option<(AccountMode, Slot)> {
-        self.accounts.read_sync(pubkey, |_, account| (account.mode(), account.slot()))
+    /// Reads state and slot from one guarded image without cloning account data.
+    pub(crate) fn lifecycle(&self, pubkey: &Pubkey) -> Option<(AccountState, Slot)> {
+        self.accounts.read_sync(pubkey, |_, account| (account.state(), account.slot()))
     }
 
     /// Returns whether a volatile account exists for `pubkey`.
@@ -114,7 +118,7 @@ impl VolatileStore {
     pub(crate) fn reset(&self) {
         self.programs.clear_sync();
         self.accounts.retain_sync(|k, a| {
-            if !a.is(AccountMode::System) {
+            if !a.is(AccountState::Runtime) {
                 return false;
             }
             let mut set = self.programs.entry_sync(a.owner()).or_default();

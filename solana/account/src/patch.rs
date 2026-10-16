@@ -3,22 +3,22 @@ use core::fmt;
 use solana_clock::Slot;
 use solana_pubkey::Pubkey;
 
-use crate::{AccountMode, AccountSharedData, OwnedAccount, WritableAccount};
+use crate::{AccountSharedData, AccountState, OwnedAccount, WritableAccount};
 
 const MAX_DATA_CHUNK_SIZE: usize = (u16::MAX - 256) as usize;
 
 /// Failure to apply an account lifecycle or ordering patch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AccountPatchError {
-    /// The requested account mode transition is not part of the lifecycle.
-    #[error("invalid account mode transition: {from:?} -> {to:?}")]
-    InvalidModeTransition {
-        /// Current account mode.
-        from: AccountMode,
-        /// Requested account mode.
-        to: AccountMode,
+    /// The requested account state transition is not part of the lifecycle.
+    #[error("invalid account state transition: {from:?} -> {to:?}")]
+    InvalidStateTransition {
+        /// Current account state.
+        from: AccountState,
+        /// Requested account state.
+        to: AccountState,
     },
-    /// The requested slot regresses or fails the mode pair's advancement requirement.
+    /// The requested slot regresses or fails the state pair's advancement requirement.
     #[error("invalid account slot transition: {from} -> {to}")]
     InvalidSlotTransition {
         /// Current account slot.
@@ -44,8 +44,8 @@ pub enum AccountFieldPatch {
     },
     /// Replaces the account lifecycle.
     Lifecycle {
-        /// Requested lifecycle mode.
-        mode: AccountMode,
+        /// Requested lifecycle state.
+        state: AccountState,
         /// Requested lifecycle slot.
         slot: Slot,
     },
@@ -58,13 +58,13 @@ impl AccountFieldPatch {
     ///
     /// Tracks changed fields but does not authorize the caller or enforce
     /// instruction-level write permissions; the runtime must check those.
-    /// Invalid mode and slot transitions leave the account unchanged and return
+    /// Invalid state and slot transitions leave the account unchanged and return
     /// their transition context.
     pub fn apply(self, account: &mut AccountSharedData) -> Result<(), AccountPatchError> {
         match self {
             Self::Lamports(v) => account.set_lamports(v),
             Self::Owner(v) => account.set_owner(v),
-            Self::Lifecycle { mode, slot } => return account.set_lifecycle(mode, slot),
+            Self::Lifecycle { state, slot } => return account.set_lifecycle(state, slot),
             Self::DataAt { offset, data } => account.set_data_at(offset, &data),
             Self::DataLen(len) => account.resize(len, 0),
         }
@@ -75,19 +75,21 @@ impl AccountFieldPatch {
     /// reconstruct its non-flag fields: lamports, lifecycle, owner, the exact
     /// data length, then the data in `MAX_DATA_CHUNK_SIZE`-sized chunks.
     pub fn sequence(account: OwnedAccount) -> Vec<Self> {
-        let mut sequence = Vec::with_capacity(5);
-        sequence.push(Self::Lamports(account.core.lamports));
-        sequence.push(Self::Lifecycle {
-            mode: account.core.mode,
-            slot: account.core.slot,
-        });
-        sequence.push(Self::Owner(account.core.owner));
-        sequence.push(Self::DataLen(account.data.len()));
-        let mut offset = 0;
-        for data in account.data.chunks(MAX_DATA_CHUNK_SIZE) {
-            sequence.push(Self::DataAt { offset, data: data.into() });
-            offset += data.len();
-        }
+        let chunks = account.data.chunks(MAX_DATA_CHUNK_SIZE);
+        let mut sequence = Vec::with_capacity(4 + chunks.len());
+        sequence.extend([
+            Self::Lamports(account.core.lamports),
+            Self::Lifecycle {
+                state: account.core.state,
+                slot: account.core.slot,
+            },
+            Self::Owner(account.core.owner),
+            Self::DataLen(account.data.len()),
+        ]);
+        sequence.extend(chunks.enumerate().map(|(index, data)| Self::DataAt {
+            offset: index * MAX_DATA_CHUNK_SIZE,
+            data: data.into(),
+        }));
         sequence
     }
 }
@@ -99,7 +101,7 @@ impl fmt::Debug for AccountFieldPatch {
         match self {
             Self::Lamports(v) => write!(f, "lamports={v}"),
             Self::Owner(v) => write!(f, "owner={v}"),
-            Self::Lifecycle { mode, slot } => write!(f, "lifecycle={mode:?}@{slot}"),
+            Self::Lifecycle { state, slot } => write!(f, "lifecycle={state:?}@{slot}"),
             Self::DataAt { offset, data } => write!(f, "data@{offset}+{}", data.len()),
             Self::DataLen(len) => write!(f, "data_len={len}"),
         }
