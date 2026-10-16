@@ -551,7 +551,7 @@ mod tests {
         super::*,
         crate::with_mock_invoke_context,
         solana_account::{
-            Account, AccountBuilder, AccountMode, AccountSharedData, CoWAccount, ReadableAccount,
+            Account, AccountBuilder, AccountSharedData, AccountState, CoWAccount, ReadableAccount,
             testkit::{
                 active_borrowed_data, borrowed_shared_data, delegated_account,
                 serialize_account_buffer,
@@ -1331,15 +1331,15 @@ mod tests {
     fn deserialize_rejects_post_transition_credits() {
         for loader in [bpf_loader::id(), bpf_loader_deprecated::id()] {
             for (from, to) in [
-                (AccountMode::Delegated, AccountMode::Transient),
-                (AccountMode::Magic, AccountMode::Closed),
+                (AccountState::Delegated, AccountState::Undelegating),
+                (AccountState::ErLocal, AccountState::Closed),
             ] {
                 let program = Pubkey::new_unique();
                 let accounts = vec![
                     (program, AccountBuilder::default().owner(loader).build()),
                     (
                         Pubkey::new_unique(),
-                        AccountBuilder::default().owner(program).lamports(10).mode(from).build(),
+                        AccountBuilder::default().owner(program).lamports(10).state(from).build(),
                     ),
                 ];
                 let mut context = TransactionContext::new(accounts, Rent::default(), 1, 1, 1);
@@ -1375,7 +1375,7 @@ mod tests {
                 let account = context.accounts().try_borrow(1).unwrap();
                 assert_eq!(account.lamports(), 10);
                 assert_eq!(*account.markers(), markers);
-                assert!(account.mutable());
+                assert!(account.can_writeback());
             }
         }
     }

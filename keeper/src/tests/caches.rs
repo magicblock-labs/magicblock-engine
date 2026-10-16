@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use solana_account::AccountMode;
+use solana_account::AccountState;
 use solana_pubkey::Pubkey;
 
 use crate::cache::{AccountCache, EVICTION_LIMIT, ExpiringCache};
@@ -105,12 +105,12 @@ fn expiring_cache_lazy_eviction() {
 }
 
 /// Proves an accessor holds mutation ownership across materialization, while
-/// mode changes, deletion, and stale eviction checks keep recency coherent.
+/// state changes, deletion, and stale eviction checks keep recency coherent.
 #[tokio::test]
 async fn account_lease_coordinates_recency_and_waiters() {
-    use AccountMode::*;
-    let modes = [ReadOnly, Uninit, Delegated, Magic, Transient, System];
-    for mode in modes {
+    use AccountState::*;
+    let states = [Mirrored, Missing, Delegated, ErLocal, Undelegating, Runtime];
+    for state in states {
         let cache = Arc::new(AccountCache::new(256));
         let pk = Pubkey::new_unique();
         let mut lease = cache.lock(pk).await;
@@ -121,7 +121,7 @@ async fn account_lease_coordinates_recency_and_waiters() {
                 .is_err()
         );
 
-        lease.materialized(mode);
+        lease.materialized(state);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(1), &mut waiter)
                 .await
@@ -131,18 +131,18 @@ async fn account_lease_coordinates_recency_and_waiters() {
         drop(lease);
         drop(waiter.await);
 
-        let tracked = matches!(mode, ReadOnly | Uninit | System);
+        let tracked = matches!(state, Mirrored | Missing | Runtime);
         assert_eq!(cache.lru.get_sync(&pk).is_some(), tracked);
     }
 
     let cache = Arc::new(AccountCache::new(256));
     let pk = Pubkey::new_unique();
     let mut lease = cache.lock(pk).await;
-    lease.materialized(ReadOnly);
+    lease.materialized(Mirrored);
     drop(lease);
     assert!(cache.lru.get_sync(&pk).is_some(), "read-only is admitted");
     let mut eviction = cache.lock(pk).await;
-    eviction.observed = Some((ReadOnly, 0));
+    eviction.observed = Some((Mirrored, 0));
     assert!(
         !eviction.cached_eviction_applies(),
         "an older eviction is rejected after readmission"
@@ -162,12 +162,12 @@ async fn account_lease_coordinates_recency_and_waiters() {
     );
 
     let mut lease = cache.lock(pk).await;
-    lease.observed = Some((ReadOnly, 0));
+    lease.observed = Some((Mirrored, 0));
     assert!(
         lease.cached_eviction_applies(),
         "an account absent from recency remains eligible for eviction"
     );
-    lease.materialized(ReadOnly);
+    lease.materialized(Mirrored);
     lease.deleted();
     drop(lease);
     assert!(

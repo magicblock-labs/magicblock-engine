@@ -5,11 +5,11 @@ execution history. The store separates engine-authoritative state from rebuildab
 external-chain mirrors. Authoritative accounts are persisted, while mirrored state
 lives in memory and can be fetched again.
 
-Routing follows [lifecycle mode](../solana/account/README.md#account-lifecycle),
-not memory representation. Delegated, Magic, and transient accounts remain
-authoritative, including transient state that no longer permits user writes.
+Routing follows [lifecycle state](../solana/account/README.md#account-lifecycle),
+not memory representation. Delegated, ErLocal, and undelegating accounts remain
+authoritative, including undelegating state that no longer permits user writes.
 Closed accounts are removed. Reset discards mirrored state while preserving
-authoritative and internal system accounts.
+authoritative and internal runtime accounts.
 
 ## Storage access and writeback
 

@@ -16,7 +16,7 @@ Callback-based loading allows the same execution machinery to operate on borrowe
 accounts for execution or owned copies for simulation. Runtime execution retains
 Solana access, rent-state, and lamport-balance checks alongside Engine lifecycle
 permissions. Rent-transition relaxation follows supplied features while preserving
-Magic-account rules. Requested instruction sysvars that can't encode a transaction
+ER-local account rules. Requested instruction sysvars that can't encode a transaction
 fail loading rather than being replaced with empty data.
 
 The [transaction processor](src/transaction_processor.rs) connects the

@@ -12,7 +12,7 @@ owns instruction definitions; this crate owns authorization and runtime behavior
 ## Account operations
 
 Replacement applies bounded field patches followed by finalization. Patches
-validate [lifecycle mode and slot](../../solana/account/README.md#account-lifecycle)
+validate [lifecycle state and slot](../../solana/account/README.md#account-lifecycle)
 and balance lamport changes against the authority's sponsor account. Finalization
 installs the complete flags without changing lamports and loads executable state
 into the program cache. Closure marks the account for removal and immediately

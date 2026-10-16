@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering::{Relaxed, Release};
 use assert_matches::assert_matches;
 use nucleus::testkit::{TempDir, init_tracing, tempdir};
 use solana_account::{
-    AccountBuilder, AccountMode, AccountSharedData, ReadableAccount, WritableAccount,
+    AccountBuilder, AccountSharedData, AccountState, ReadableAccount, WritableAccount,
     testkit::delegated_account,
 };
 use solana_pubkey::Pubkey;
@@ -26,8 +26,8 @@ fn db() -> (TempDir, AccountsDB) {
     (dir, db)
 }
 
-fn transition(account: &mut AccountSharedData, mode: AccountMode) {
-    account.set_lifecycle(mode, account.slot()).unwrap();
+fn transition(account: &mut AccountSharedData, state: AccountState) {
+    account.set_lifecycle(state, account.slot()).unwrap();
 }
 
 /// Empty mutable (persisted) account; `owner` defaults to the system program.
@@ -74,17 +74,17 @@ fn reload(db: &AccountsDB, pubkey: &Pubkey) -> AccountSharedData {
 
 /// Closes `pubkey`, deleting it from whichever backend currently holds it.
 ///
-/// Loading before mutation preserves the mode-change marker needed to remove
+/// Loading before mutation preserves the state-change marker needed to remove
 /// the previous stored image, whether the result is borrowed or owned.
 fn close(db: &AccountsDB, pubkey: &Pubkey) {
     let mut acc = reload(db, pubkey);
-    if acc.is(AccountMode::Delegated) {
-        transition(&mut acc, AccountMode::Transient);
+    if acc.is(AccountState::Delegated) {
+        transition(&mut acc, AccountState::Undelegating);
     }
-    if acc.is(AccountMode::Transient) {
-        transition(&mut acc, AccountMode::ReadOnly);
+    if acc.is(AccountState::Undelegating) {
+        transition(&mut acc, AccountState::Mirrored);
     }
-    transition(&mut acc, AccountMode::Closed);
+    transition(&mut acc, AccountState::Closed);
     store(db, *pubkey, acc);
 }
 
@@ -162,27 +162,27 @@ fn test_routing_and_persistence_flips() {
     assert_eq!(program(&db, &p), vec![b]); // `a` left p's set
     assert_eq!(program(&db, &q), vec![a]); // and joined q's
 
-    // Transient is immutable to programs but remains persistent while its
+    // Undelegating is immutable to programs but remains persistent while its
     // lifecycle state is unresolved.
     let mut flip = reload(&db, &a);
-    transition(&mut flip, AccountMode::Transient);
+    transition(&mut flip, AccountState::Undelegating);
     flip.set_lamports(30);
     store(&db, a, flip);
-    let transient = reload(&db, &a);
-    assert!(!transient.mutable());
+    let undelegating = reload(&db, &a);
+    assert!(!undelegating.can_writeback());
     assert!(in_persisted(&db, &a) && !in_volatile(&db, &a));
     assert_eq!(lamports(&db, &a), 30);
 
-    // Resolving to ReadOnly evicts the persisted copy into volatile.
+    // Resolving to Mirrored evicts the persisted copy into volatile.
     let mut flip = reload(&db, &a);
-    transition(&mut flip, AccountMode::ReadOnly);
+    transition(&mut flip, AccountState::Mirrored);
     store(&db, a, flip);
     assert!(!in_persisted(&db, &a) && in_volatile(&db, &a));
     assert_eq!(lamports(&db, &a), 30);
 
-    // ReadOnly → Delegated evicts it back into persisted.
+    // Mirrored → Delegated evicts it back into persisted.
     let mut flip = reload(&db, &a);
-    transition(&mut flip, AccountMode::Delegated);
+    transition(&mut flip, AccountState::Delegated);
     store(&db, a, flip);
     assert!(in_persisted(&db, &a) && !in_volatile(&db, &a));
 
@@ -230,8 +230,8 @@ fn test_store_kind_migration_invariants() {
         let base = cursor(&db);
 
         let mut account = reload(&db, &key);
-        transition(&mut account, AccountMode::Transient);
-        transition(&mut account, AccountMode::ReadOnly);
+        transition(&mut account, AccountState::Undelegating);
+        transition(&mut account, AccountState::Mirrored);
         account.set_owner(volatile_owner);
         account.set_lamports(20);
         store(&db, key, account);
@@ -257,7 +257,7 @@ fn test_store_kind_migration_invariants() {
         assert!(program(&db, &persisted_owner).is_empty());
 
         let mut account = reload(&db, &key);
-        transition(&mut account, AccountMode::Delegated);
+        transition(&mut account, AccountState::Delegated);
         account.set_owner(persisted_owner);
         store(&db, key, account);
 
@@ -276,23 +276,23 @@ fn test_store_kind_migration_invariants() {
     assert_eq!(program(&db, &reuse_owner), vec![reuse]);
 }
 
-/// Proves delegated and Magic state survive reopen and compaction with their
-/// modes intact, and validate() accepts the synced checksum.
+/// Proves delegated and ErLocal state survive reopen and compaction with their
+/// states intact, and validate() accepts the synced checksum.
 #[test]
 fn test_persistence_reopen_and_validate() {
     let dir = tempdir();
     let accounts: [_; 8] = std::array::from_fn(|i| {
-        let mode = if i % 2 == 0 { AccountMode::Magic } else { AccountMode::Delegated };
-        (Pubkey::new_unique(), mode, 100 + i as u64)
+        let state = if i % 2 == 0 { AccountState::ErLocal } else { AccountState::Delegated };
+        (Pubkey::new_unique(), state, 100 + i as u64)
     });
 
     let (checksum, before) = {
         let db = AccountsDB::new(dir.path()).unwrap();
-        for (key, mode, balance) in accounts {
+        for (key, state, balance) in accounts {
             store(
                 &db,
                 key,
-                delegated_account(balance, vec![], Pubkey::default()).mode(mode).build(),
+                delegated_account(balance, vec![], Pubkey::default()).state(state).build(),
             );
         }
         let discarded = Pubkey::new_unique();
@@ -310,11 +310,11 @@ fn test_persistence_reopen_and_validate() {
     let reclaimed = db.compact().unwrap();
     assert_eq!(reclaimed, before - cursor(&db));
     assert!(reclaimed > 0);
-    for (key, mode, balance) in accounts {
+    for (key, state, balance) in accounts {
         assert_eq!(lamports(&db, &key), balance);
         assert_eq!(
-            db.loader().lifecycle(&key).unwrap().map(|(mode, _)| mode),
-            Some(mode)
+            db.loader().lifecycle(&key).unwrap().map(|(state, _)| state),
+            Some(state)
         );
     }
     assert_eq!(db.slot(), 42);
@@ -333,7 +333,7 @@ fn test_dump_restores_volatile_on_reopen() {
 
     {
         let db = AccountsDB::new(dir.path()).unwrap();
-        let account = AccountBuilder::default().lamports(42).mode(AccountMode::ReadOnly).build();
+        let account = AccountBuilder::default().lamports(42).state(AccountState::Mirrored).build();
         store(&db, key, account);
         db.dump(None).unwrap();
         assert!(dump.exists(), "dump is written into the active tree");
@@ -578,7 +578,7 @@ fn test_snapshot_export_and_volatile_restore() {
     let snapshot = {
         let db = AccountsDB::new(src.path()).unwrap();
         let aacc = delegated_account(10, vec![], Pubkey::default());
-        let bacc = AccountBuilder::default().lamports(20).mode(AccountMode::ReadOnly);
+        let bacc = AccountBuilder::default().lamports(20).state(AccountState::Mirrored);
         db.store(&[(a, aacc.build()), (b, bacc.build())]).unwrap();
         // SAFETY: the test holds exclusive access to the store.
         unsafe { db.snapshot(1) }.unwrap()

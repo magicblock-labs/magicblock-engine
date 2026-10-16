@@ -1080,7 +1080,7 @@ mod tests {
         },
         assert_matches::assert_matches,
         solana_account::{
-            Account, AccountBuilder, AccountMode, AccountSharedData, testkit::delegated_account,
+            Account, AccountBuilder, AccountSharedData, AccountState, testkit::delegated_account,
         },
         solana_program_entrypoint::MAX_PERMITTED_DATA_INCREASE,
         solana_sbpf::{
@@ -1259,13 +1259,13 @@ mod tests {
         ]
     }
 
-    /// Uses the same writable instruction meta but removes owner and mode permission.
+    /// Builds an instruction-writable account with readonly state and a foreign owner.
     fn transaction_with_foreign_account(data: Vec<u8>) -> Vec<TestTransactionAccount> {
         let mut accounts = transaction_with_owned_account(data);
         let (key, account, writable) = accounts.pop().unwrap();
         let account = AccountBuilder::from(account)
             .owner(Pubkey::new_unique())
-            .mode(AccountMode::Uninit)
+            .state(AccountState::Missing)
             .build();
         accounts.push((key, account, writable));
         accounts
@@ -1482,15 +1482,15 @@ mod tests {
         assert_eq!(caller_account.owner, callee_account.get_owner());
     }
 
-    /// Proves CPI synchronization accepts unchanged locked accounts but rejects
-    /// caller credits, and remapping revokes data writes after a mode transition.
+    /// Proves CPI accepts unchanged balances after freezing or closing an account,
+    /// but rejects balance changes and revokes writable data mappings.
     #[test]
     fn lifecycle_transition_revokes_caller_writes() {
-        for mode in [AccountMode::Transient, AccountMode::Closed] {
+        for state in [AccountState::Undelegating, AccountState::Closed] {
             let mut transaction_accounts = transaction_with_owned_account(vec![0]);
-            if mode == AccountMode::Closed {
+            if state == AccountState::Closed {
                 transaction_accounts[1].1 = AccountBuilder::from(transaction_accounts[1].1.clone())
-                    .mode(AccountMode::Magic)
+                    .state(AccountState::ErLocal)
                     .build();
             }
             let account = transaction_accounts[1].1.clone();
@@ -1520,9 +1520,9 @@ mod tests {
                 let mut raw =
                     invoke_context.transaction_context.accounts().try_borrow_mut(1).unwrap();
                 let slot = raw.slot();
-                raw.set_lifecycle(mode, slot).unwrap();
+                raw.set_lifecycle(state, slot).unwrap();
                 assert!(
-                    raw.mutable(),
+                    raw.can_writeback(),
                     "legal transition remains eligible for writeback"
                 );
             }

@@ -49,21 +49,21 @@ follow-up actions are atomic, so account activation uses the same ordering and
 rollback machinery as ordinary work rather than a separate storage-write path.
 
 Account accessors serialize materialization for a key, not ordinary transactions.
-Their presence, mode, and slot observations are captured after lease acquisition
+Their presence, state, and slot observations are captured after lease acquisition
 and can be superseded by execution. `missing_accounts` retains leases only for
 accounts still absent after acquisition; `account` also supports existing state.
 
-Materialization skips an image older than the observation or matching its mode
+Materialization skips an image older than the observation or matching its state
 and slot, without running follow-up actions. Success can therefore mean applied
-or skipped as already handled or superseded. A different mode at the same slot
+or skipped as already handled or superseded. A different state at the same slot
 still reaches [lifecycle validation](../solana/account/README.md#account-lifecycle).
 
 MBV validates source freshness, replacement eligibility, and action provenance.
-Engine enforces lifecycle transitions. Transient redelegation requires a new
+Engine enforces lifecycle transitions. Redelegation from `Undelegating` requires a new
 delegation at a strictly newer slot, not a newer observation of the old delegation.
-Delegated state can't be replaced in the same mode. Magic state remains authoritative
-until explicitly closed, regardless of token balance. Materialization and deletion
-require the local signer to match the effective authority.
+Delegated account images can't be refreshed while delegation remains active.
+`ErLocal` state remains authoritative until explicitly closed. Materialization
+and deletion require the local signer to match the configured Engine authority.
 
 After submission, the operation retains its lease through completion even if the
 waiter is cancelled. An uncertain outcome requires reacquiring the accessor and

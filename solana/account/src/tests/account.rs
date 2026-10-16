@@ -1,7 +1,7 @@
 use crate::{
-    Account, AccountBuilder, AccountFieldPatch, AccountMode, AccountPatchError, AccountSeqLock,
-    AccountSharedData, BorrowedAccount, CoWAccount, DirtyMarkers, OwnedAccount, ReadableAccount,
-    StorageUnit, WritableAccount, accounts_equal,
+    Account, AccountAccess, AccountBuilder, AccountFieldPatch, AccountKind, AccountPatchError,
+    AccountSeqLock, AccountSharedData, AccountState, BorrowedAccount, CoWAccount, DirtyMarkers,
+    OwnedAccount, ReadableAccount, StateAuthority, StorageUnit, WritableAccount, accounts_equal,
     testkit::{delegated_account, init_borrowed_account, serialize_account_buffer},
 };
 use bincode::ErrorKind;
@@ -145,42 +145,42 @@ fn test_account_patch_transition_errors() {
         .build::<AccountSharedData>();
 
     assert_eq!(
-        account.set_lifecycle(AccountMode::ReadOnly, 10),
-        Err(AccountPatchError::InvalidModeTransition {
-            from: AccountMode::Delegated,
-            to: AccountMode::ReadOnly,
+        account.set_lifecycle(AccountState::Mirrored, 10),
+        Err(AccountPatchError::InvalidStateTransition {
+            from: AccountState::Delegated,
+            to: AccountState::Mirrored,
         })
     );
-    assert!(account.is(AccountMode::Delegated));
+    assert!(account.is(AccountState::Delegated));
     assert!(account.markers().is_empty());
 
     assert_eq!(
         AccountFieldPatch::Lifecycle {
-            mode: AccountMode::Delegated,
+            state: AccountState::Delegated,
             slot: 10,
         }
         .apply(&mut account),
-        Err(AccountPatchError::InvalidModeTransition {
-            from: AccountMode::Delegated,
-            to: AccountMode::Delegated,
+        Err(AccountPatchError::InvalidStateTransition {
+            from: AccountState::Delegated,
+            to: AccountState::Delegated,
         })
     );
     assert_eq!(account.slot(), 10);
     assert!(account.markers().is_empty());
 
     AccountFieldPatch::Lifecycle {
-        mode: AccountMode::Transient,
+        state: AccountState::Undelegating,
         slot: 10,
     }
     .apply(&mut account)
     .unwrap();
-    assert!(account.markers().contains(DirtyMarkers::MODE));
+    assert!(account.markers().contains(DirtyMarkers::STATE));
     assert!(account.markers().contains(DirtyMarkers::SLOT));
 
     let markers = *account.markers();
     assert_eq!(
         AccountFieldPatch::Lifecycle {
-            mode: AccountMode::ReadOnly,
+            state: AccountState::Mirrored,
             slot: 9,
         }
         .apply(&mut account),
@@ -189,54 +189,68 @@ fn test_account_patch_transition_errors() {
     assert_eq!(account.slot(), 10);
     assert_eq!(*account.markers(), markers);
 
-    let mut magic = AccountBuilder::default().mode(AccountMode::Magic).build::<AccountSharedData>();
-    magic.set_lifecycle(AccountMode::Closed, 0).unwrap();
-    assert!(magic.is(AccountMode::Closed));
+    let mut local = AccountBuilder::default()
+        .state(AccountState::ErLocal)
+        .build::<AccountSharedData>();
+    local.set_lifecycle(AccountState::Closed, 0).unwrap();
+    assert!(local.is(AccountState::Closed));
 }
 
 /// Proves every lifecycle pair enforces slot ordering identically for owned and
 /// borrowed accounts, preserving rejected state and marking only accepted changes.
-/// Also pins mode classification, stored discriminants, and wire round-tripping.
+/// Also pins derived kind, access, and authority, stored discriminants, and wire round-tripping.
 #[test]
 fn test_lifecycle_matrix() {
-    use AccountMode::*;
+    use AccountAccess::{ReadOnly, Writable};
+    use AccountKind as Kind;
+    use AccountState::*;
+    use StateAuthority::{Chain, Er};
 
-    let modes = [Uninit, ReadOnly, System, Delegated, Magic, Transient, Closed];
-    for (index, mode) in modes.into_iter().enumerate() {
+    assert_eq!(AccountState::default(), Missing);
+    assert_eq!(size_of::<AccountState>(), 1);
+    let cases = [
+        (Missing, None, ReadOnly, None),
+        (Mirrored, Some(Kind::Mirrored), ReadOnly, Some(Chain)),
+        (Runtime, Some(Kind::Runtime), ReadOnly, None),
+        (Delegated, Some(Kind::Delegated), Writable, Some(Er)),
+        (ErLocal, Some(Kind::ErLocal), Writable, Some(Er)),
+        (Undelegating, Some(Kind::Delegated), ReadOnly, Some(Er)),
+        (Closed, None, ReadOnly, None),
+    ];
+    let states = cases.map(|(state, ..)| state);
+    for (index, (state, kind, access, authority)) in cases.into_iter().enumerate() {
         // Wire indices follow declaration order; mmap discriminants do not.
-        assert_eq!(mode as u8, [0, 1, 2, 3, 4, 5, 255][index]);
-        let bytes = bincode::serialize(&mode).unwrap();
+        assert_eq!(state as u8, [0, 1, 2, 3, 4, 5, 255][index]);
+        let bytes = bincode::serialize(&state).unwrap();
         assert_eq!(bytes, (index as u32).to_le_bytes());
-        assert_eq!(bincode::deserialize::<AccountMode>(&bytes).unwrap(), mode);
+        assert_eq!(bincode::deserialize::<AccountState>(&bytes).unwrap(), state);
         #[cfg(feature = "wincode")]
         {
-            assert_eq!(wincode::serialize(&mode).unwrap(), bytes);
-            assert_eq!(wincode::deserialize::<AccountMode>(&bytes).unwrap(), mode);
+            assert_eq!(wincode::serialize(&state).unwrap(), bytes);
+            assert_eq!(wincode::deserialize::<AccountState>(&bytes).unwrap(), state);
         }
-        assert_eq!(mode.mutable(), matches!(mode, Delegated | Magic));
-        assert_eq!(
-            mode.authoritative(),
-            matches!(mode, Delegated | Magic | Transient)
-        );
+        assert_eq!(state.kind(), kind);
+        assert_eq!(state.access(), access);
+        assert_eq!(state.authority(), authority);
     }
-    // Columns are destinations in `modes` order.
+    // Columns are destinations in `states` order.
     // 0 forbids the pair, 1 permits equal/newer slots, 2 requires a newer slot.
     let rules = [
-        (Uninit, [2, 1, 1, 1, 1, 0, 1]),
-        (ReadOnly, [2, 2, 0, 1, 1, 0, 1]),
-        (System, [0, 0, 2, 0, 0, 0, 0]),
+        (Missing, [2, 1, 1, 1, 1, 0, 1]),
+        (Mirrored, [2, 2, 0, 1, 1, 0, 1]),
+        (Runtime, [0, 0, 2, 0, 0, 0, 0]),
         (Delegated, [0, 0, 0, 0, 0, 1, 0]),
-        (Magic, [0, 0, 0, 0, 0, 0, 1]),
-        (Transient, [1, 1, 0, 2, 0, 0, 1]),
+        (ErLocal, [0, 0, 0, 0, 0, 0, 1]),
+        (Undelegating, [1, 1, 0, 2, 0, 0, 1]),
         (Closed, [0, 0, 0, 0, 0, 0, 0]),
     ];
     let owner = Pubkey::new_unique();
     let key = Pubkey::new_unique();
     for (from, row) in rules {
-        for (to, rule) in modes.into_iter().zip(row) {
+        for (to, rule) in states.into_iter().zip(row) {
             for (from_slot, to_slot) in [(10, 9), (10, 10), (10, 11), (0, 0), (0, 1)] {
                 let expected = if rule == 0 {
-                    Err(AccountPatchError::InvalidModeTransition { from, to })
+                    Err(AccountPatchError::InvalidStateTransition { from, to })
                 } else if to_slot < from_slot || (rule == 2 && to_slot == from_slot) {
                     Err(AccountPatchError::InvalidSlotTransition { from: from_slot, to: to_slot })
                 } else {
@@ -248,7 +262,7 @@ fn test_lifecycle_matrix() {
                 );
 
                 let original = AccountBuilder::default()
-                    .mode(from)
+                    .state(from)
                     .slot(from_slot)
                     .owner(owner)
                     .lamports(5)
@@ -259,10 +273,10 @@ fn test_lifecycle_matrix() {
                 let mut state = original.clone();
                 let mut markers = DirtyMarkers::empty();
                 if expected.is_ok() {
-                    state.core.mode = to;
+                    state.core.state = to;
                     state.core.slot = to_slot;
                     markers.insert(DirtyMarkers::SLOT);
-                    markers.set(DirtyMarkers::MODE, from != to);
+                    markers.set(DirtyMarkers::STATE, from != to);
                 }
                 for mut account in [AccountSharedData::from(original), borrowed] {
                     assert_eq!(

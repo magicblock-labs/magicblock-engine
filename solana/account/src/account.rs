@@ -111,7 +111,7 @@ impl fmt::Debug for AccountSharedData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         debug_fmt(self, f, |f| {
             f.field("slot", &self.slot())
-                .field("mode", &self.mode)
+                .field("state", &self.state)
                 .field("flags", self.flags())
                 .field("dirty", self.markers());
         })

@@ -1,6 +1,6 @@
 # Account model
 
-This fork extends Solana accounts with Engine lifecycle modes and copy-on-write
+This fork extends Solana accounts with Engine lifecycle states and copy-on-write
 access to borrowed storage. Lifecycle tracks whether the ER controls an account;
 storage representation lets execution work directly with external buffers. The
 type owns mutation rules, while [Accountsdb](../../accountsdb/README.md) owns
@@ -8,37 +8,42 @@ persistence and the host owns validation of imported state.
 
 ## Account lifecycle
 
-Lifecycle separates authority from mutability. `Delegated` accounts are delegated
-to this ER; `Magic` accounts are authoritative state created within it. Both allow
-user mutation. `Transient` accounts remain authoritative while awaiting lifecycle
-resolution but reject user writes. `Closed` marks state for storage removal.
+`AccountState` determines an account's kind, access level for user programs, and
+authority. Access and authority cannot be changed independently of state.
 
-Transitions to transient or closed revoke mutation immediately, including in CPI.
-The transaction-final writeback guard can accept a dirty transition into those
-modes without permitting further program writes. Other modes represent cached
-external absence (`Uninit`), a read-only mirror (`ReadOnly`), and internal sysvar,
-feature, or precompile state (`System`).
+`Delegated` accounts are delegated to this ER; `ErLocal` accounts are authoritative
+state created within it. Both allow user mutation. `Undelegating` accounts remain
+authoritative while awaiting lifecycle resolution but reject user writes. `Closed`
+marks state for storage removal.
 
-Privileged replacement validates mode and source slot together. Authoritative
-state can't be refreshed in the same mode, even at a newer slot; otherwise a later
-external image could overwrite local execution. Ordinary transaction mutations
-aren't replacements and don't follow that restriction.
+Entering `Undelegating` or `Closed` stops user-program writes immediately,
+including CPI. The transaction can still commit its earlier changes and the
+lifecycle transition.
+
+`Missing` caches the absence of a chain account; `Mirrored` holds a read-only
+chain image. `Runtime` covers internal sysvars, features, and precompiles.
+
+Privileged replacement validates state and source slot together. ER-authoritative
+images can't be refreshed without a lifecycle transition, even at a newer slot;
+otherwise a later external image could overwrite local execution. This restriction
+applies to imported images, not writes made by user programs.
 
 | From | Allowed at the same or a newer slot | Requires a strictly newer slot |
 | :-- | :-- | :-- |
-| Uninit | ReadOnly, System, Delegated, Magic, Closed | Uninit |
-| ReadOnly | Delegated, Magic, Closed | ReadOnly, Uninit |
-| System | — | System |
-| Delegated | Transient | — |
-| Magic | Closed | — |
-| Transient | ReadOnly, Uninit, Closed | Delegated |
+| Missing | Mirrored, Runtime, Delegated, ErLocal, Closed | Missing |
+| Mirrored | Delegated, ErLocal, Closed | Mirrored, Missing |
+| Runtime | — | Runtime |
+| Delegated | Undelegating | — |
+| ErLocal | Closed | — |
+| Undelegating | Mirrored, Missing, Closed | Delegated |
 | Closed | — | — |
 
 Unlisted transitions and slot regressions fail without changing state or dirty
-markers. Magic state must be explicitly closed before another image can occupy
-its key, regardless of token balance. The host validates creation and closure
-eligibility, including application-specific token rules. [Engine's import path](../../engine/README.md#account-replacement)
-owns observation-based deduplication and the evidence required for redelegation.
+markers. `ErLocal` state stays local and writable until explicitly closed; it
+cannot be frozen or delegated. It must be closed before another image can occupy
+its key. The host decides when an account may be created or closed.
+See [Engine's import contract](../../engine/README.md#account-replacement) for
+stale-image handling and redelegation requirements.
 
 ## Borrowed storage
 
@@ -59,7 +64,7 @@ The host remains responsible for source freshness. Equality compares account sta
 and bytes, not storage representation or dirty markers. Lifecycle semantics and
 binary encoding must agree across producers and consumers.
 
-[Modes and copy-on-write behavior](src/cow/mod.rs), the [borrowed layout](src/cow/borrowed.rs),
+[States and copy-on-write behavior](src/cow/mod.rs), the [borrowed layout](src/cow/borrowed.rs),
 and [field patches](src/patch.rs) define this model. The `testkit` feature supplies
 account and borrowed-storage fixtures. Representation changes also affect transaction
 context, VM mapping, and persistence; see the [runtime overview](../README.md).

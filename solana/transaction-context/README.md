@@ -20,14 +20,14 @@ indicates a lifetime bug.
 
 ## Lifecycle permissions
 
-Instruction writes require a currently mutable [account mode](../account/README.md#account-lifecycle)
-in addition to Solana ownership and writability checks. Transient and closed
-transitions take effect immediately across direct calls and CPI. Dirty lifecycle
-markers permit final writeback of the transition, not further writes.
+Instruction writes require writable [account access](../account/README.md#account-lifecycle)
+in addition to Solana ownership and instruction-writability checks. Entering
+`Undelegating` or `Closed` blocks further writes, including CPI, while allowing
+the transaction to commit the lifecycle transition.
 
-Setting an unchanged lamport, owner, or executable value doesn't require mode
-permission after the usual Solana checks pass. Privileged raw operations have a
-separate authorization boundary.
+Setting an unchanged balance, owner, or executable flag skips the account-access
+check after the usual Solana checks pass. For privileged account replacement, see
+[MagicRoot authorization](../../programs/magic-root-program/README.md#authorization).
 
 [Transaction state](src/transaction.rs) owns the VM access handler;
 [transaction accounts](src/transaction_accounts.rs) own borrowing, and

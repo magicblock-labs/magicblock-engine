@@ -468,7 +468,7 @@ impl<'ix_data> TransactionContext<'ix_data> {
                   access_type: AccessType,
                   vm_addr: u64,
                   len: u64| {
-                use solana_account::AccountMode;
+                use solana_account::AccountState;
 
                 if access_type == AccessType::Load {
                     return;
@@ -501,7 +501,7 @@ impl<'ix_data> TransactionContext<'ix_data> {
                     let new_len = requested_length;
                     if new_len > MAX_ACCOUNT_DATA_LEN as usize
                         || accounts.can_data_be_resized(old_len, new_len).is_err()
-                        || account.is(AccountMode::Magic)
+                        || account.is(AccountState::ErLocal)
                     {
                         return;
                     }

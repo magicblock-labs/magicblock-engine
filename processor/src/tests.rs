@@ -12,7 +12,7 @@ use nucleus::{
     ledger::Block,
     runtime::{ExecutionRequest, SequencerHandle, Simulation, barrier},
 };
-use solana_account::{AccountMode, ReadableAccount};
+use solana_account::{AccountState, ReadableAccount};
 use solana_hash::Hash;
 use solana_instruction::{Instruction, error::InstructionError};
 use solana_keypair::Keypair;
@@ -229,7 +229,7 @@ async fn v1_resource_config_is_honored() {
     ];
     let balance = load_v42_lamports(&harness, payer).unwrap();
     for (config, expected) in cases {
-        let output = store_v42(&harness, 0, AccountMode::Magic);
+        let output = store_v42(&harness, 0, AccountState::ErLocal);
         let tx = sign(output, config);
         let signature = tx.signatures()[0];
         let sim_tx = TransactionView::try_new_sanitized(tx.inner_data().clone(), true).unwrap();
@@ -263,8 +263,8 @@ async fn v1_resource_config_is_honored() {
 #[tokio::test(flavor = "current_thread")]
 async fn execution_commits_and_simulation_does_not() {
     let harness = Harness::new(false).await;
-    let output = store_v42(&harness, 0, AccountMode::Delegated);
-    let input = store_v42(&harness, 40, AccountMode::Delegated);
+    let output = store_v42(&harness, 0, AccountState::Delegated);
+    let input = store_v42(&harness, 40, AccountState::Delegated);
     let ix = (E::acc(1) + E::lit(2)).compose(output, &[input]);
     let (_, sim_tx) = signed_view(&harness, None, ix.clone());
 
@@ -289,7 +289,7 @@ async fn execution_commits_and_simulation_does_not() {
 async fn block_hash_includes_appended_transaction_signature() {
     let harness = Harness::new(false).await;
     let parent = harness.blockhash();
-    let output = store_v42(&harness, 0, AccountMode::Delegated);
+    let output = store_v42(&harness, 0, AccountState::Delegated);
     let (signature, tx) = signed_view(&harness, None, E::lit(42).compose(output, &[]));
     let mut hasher = blake3::Hasher::new();
     hasher.update(parent.as_ref());
@@ -321,7 +321,7 @@ async fn seeded_program_and_recursive_cpi_return_data_work() {
     assert_eq!(*account.owner(), loader_v4::ID);
     assert_eq!(account.data().get(..4), Some(&[0x7f, b'E', b'L', b'F'][..]));
 
-    let output = store_v42(&harness, 0, AccountMode::Delegated);
+    let output = store_v42(&harness, 0, AccountState::Delegated);
     let expr = E::lit(42) + (E::lit(31) * E::lit(4)).cpi() - E::lit(56);
     let (_, tx) = signed_view(&harness, None, expr.compose(output, &[]));
 
@@ -439,8 +439,8 @@ async fn block_transition_updates_execution_and_simulation_sysvars() {
 #[tokio::test(flavor = "current_thread")]
 async fn replay_mode_commits_state_and_caches_status() {
     let harness = Harness::new(true).await;
-    let source = store_v42(&harness, 0, AccountMode::Delegated);
-    let recipient = store_v42(&harness, 0, AccountMode::Delegated);
+    let source = store_v42(&harness, 0, AccountState::Delegated);
+    let recipient = store_v42(&harness, 0, AccountState::Delegated);
     let source_before = load_v42_lamports(&harness, source).expect("source exists");
     let recipient_before = load_v42_lamports(&harness, recipient).expect("recipient exists");
     let (signature, tx) = signed_view(&harness, None, transfer(source, recipient, 1));
@@ -475,7 +475,7 @@ async fn replay_mode_commits_state_and_caches_status() {
 #[tokio::test(flavor = "current_thread")]
 async fn failed_execution_records_an_error_status() {
     let harness = Harness::new(false).await;
-    let output = store_v42(&harness, 5, AccountMode::Delegated);
+    let output = store_v42(&harness, 5, AccountState::Delegated);
     // MIN - 1 overflows the program's checked_sub, so it returns an error before
     // ever writing the output account.
     let (signature, tx) = signed_view(
@@ -508,7 +508,7 @@ async fn prefilled_same_writable_account_backlog_drains() {
     const TRANSACTIONS: usize = 128;
 
     let (harness, sequencer) = Harness::unspawned(false).await;
-    let output = store_v42(&harness, 0, AccountMode::Delegated);
+    let output = store_v42(&harness, 0, AccountState::Delegated);
     let mut signatures = Vec::with_capacity(TRANSACTIONS);
 
     for i in 0..TRANSACTIONS {
@@ -542,7 +542,7 @@ async fn prefilled_mixed_read_write_contention_stress_drains() {
 
     let (harness, sequencer) = Harness::unspawned(false).await;
     let accounts: Vec<_> = (0..ACCOUNTS)
-        .map(|i| store_v42(&harness, i as i64 + 1, AccountMode::Delegated))
+        .map(|i| store_v42(&harness, i as i64 + 1, AccountState::Delegated))
         .collect();
     let mut signatures = Vec::with_capacity(TRANSACTIONS);
 

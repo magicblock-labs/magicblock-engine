@@ -16,21 +16,21 @@ impl ExecutedTransaction {
             // Sanitized transactions always carry a fee payer.
             return false;
         };
-        let logs = Arc::make_mut(self.execution_details.log_messages.get_or_insert_default());
+        let logs = self.execution_details.log_messages.get_or_insert_default();
         for (i, (pk, acc)) in accounts {
-            if !tx.is_writable(i) || acc.mutable() || privileged {
+            if !tx.is_writable(i) || acc.can_writeback() || privileged {
                 continue;
             }
             let error = format!("Program log: Immutable account {pk} has been modified");
-            logs.push(error);
+            Arc::make_mut(logs).push(error);
             self.execution_details.status = Err(TransactionError::InvalidWritableAccount);
             return false;
         }
         // The payer is writable in Solana messages even when fees are disabled
         // here; reject it only if execution actually changed immutable state.
-        if payer.1.dirty() && !payer.1.mutable() {
+        if payer.1.dirty() && !payer.1.can_writeback() {
             let error = format!("Program log: ({}) Feepayer account is readonly", payer.0);
-            logs.push(error);
+            Arc::make_mut(logs).push(error);
             self.execution_details.status = Err(TransactionError::InvalidAccountForFee);
             return false;
         }
@@ -51,7 +51,7 @@ mod tests {
             account_loader::LoadedTransaction,
             transaction_execution_result::{ExecutedTransaction, TransactionExecutionDetails},
         },
-        solana_account::{AccountBuilder, AccountMode, AccountSharedData},
+        solana_account::{AccountBuilder, AccountSharedData, AccountState},
         solana_hash::Hash,
         solana_message::{
             LegacyMessage, Message, MessageHeader, SanitizedMessage,
@@ -64,9 +64,9 @@ mod tests {
         std::collections::HashSet,
     };
 
-    /// A dirtied account in the requested mode.
-    fn account(mode: AccountMode) -> AccountSharedData {
-        let mut acc: AccountSharedData = AccountBuilder::default().mode(mode).build();
+    /// A dirtied account in the requested state.
+    fn account(state: AccountState) -> AccountSharedData {
+        let mut acc: AccountSharedData = AccountBuilder::default().state(state).build();
         acc.set_data_from_slice(&[1]);
         acc
     }
@@ -173,25 +173,24 @@ mod tests {
 
     #[test]
     fn writable_account_guard() {
-        let mut transitioned = account(AccountMode::Delegated);
+        let mut transitioned = account(AccountState::Delegated);
         let transitioned_slot = transitioned.slot();
-        transitioned.set_lifecycle(AccountMode::Transient, transitioned_slot).unwrap();
-        let mut closed = account(AccountMode::Magic);
+        transitioned
+            .set_lifecycle(AccountState::Undelegating, transitioned_slot)
+            .unwrap();
+        let mut closed = account(AccountState::ErLocal);
         let closed_slot = closed.slot();
-        closed.set_lifecycle(AccountMode::Closed, closed_slot).unwrap();
+        closed.set_lifecycle(AccountState::Closed, closed_slot).unwrap();
 
-        // A dirty, writable, immutable operand is rejected — unless the tx is
-        // privileged or it legally entered a transaction-final mode. Mutable or
-        // message-read-only operands are always fine.
         let cases = [
             // (target, writable, privileged, accepted)
-            (account(AccountMode::ReadOnly), true, false, false),
-            (account(AccountMode::Transient), true, false, false),
+            (account(AccountState::Mirrored), true, false, false),
+            (account(AccountState::Undelegating), true, false, false),
             (transitioned, true, false, true),
             (closed, true, false, true),
-            (account(AccountMode::Delegated), true, false, true),
-            (account(AccountMode::ReadOnly), false, false, true), // read-only in the message
-            (account(AccountMode::ReadOnly), true, true, true),   // MagicRoot bypass
+            (account(AccountState::Delegated), true, false, true),
+            (account(AccountState::Mirrored), false, false, true), // read-only in the message
+            (account(AccountState::Mirrored), true, true, true),   // MagicRoot bypass
         ];
         for (i, (target, writable, privileged, accepted)) in cases.into_iter().enumerate() {
             let (verdict, executed) = run(
@@ -217,9 +216,9 @@ mod tests {
         // payer is always accepted.
         let cases = [
             // (payer, privileged, accepted)
-            (account(AccountMode::ReadOnly), false, false),
-            (account(AccountMode::Transient), false, false),
-            (account(AccountMode::Delegated), false, true),
+            (account(AccountState::Mirrored), false, false),
+            (account(AccountState::Undelegating), false, false),
+            (account(AccountState::Delegated), false, true),
         ];
         for (i, (payer, privileged, accepted)) in cases.into_iter().enumerate() {
             let (verdict, executed) = run(
@@ -245,7 +244,7 @@ mod tests {
         // rewrite the original error into an access error.
         let (verdict, failed) = run(
             AccountSharedData::default(),
-            account(AccountMode::ReadOnly),
+            account(AccountState::Mirrored),
             true,
             false,
             Err(TransactionError::AccountInUse),

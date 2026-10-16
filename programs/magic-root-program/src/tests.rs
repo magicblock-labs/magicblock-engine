@@ -3,7 +3,7 @@ use {
     magic_root_interface::{MagicRootInstruction, PostFinalize},
     nucleus::tls::AUTHORITY,
     solana_account::{
-        AccountBuilder, AccountFieldPatch, AccountMode, AccountSharedData, ReadableAccount,
+        AccountBuilder, AccountFieldPatch, AccountSharedData, AccountState, ReadableAccount,
         WritableAccount,
     },
     solana_instruction::{AccountMeta, Instruction},
@@ -145,7 +145,10 @@ fn with_cpi(writable: bool, run: impl FnOnce(&mut InvokeContext<'_, '_>, Pubkey)
     let mut accounts = vec![
         (
             authority,
-            AccountBuilder::default().lamports(10_000_000).mode(AccountMode::Magic).build(),
+            AccountBuilder::default()
+                .lamports(10_000_000)
+                .state(AccountState::ErLocal)
+                .build(),
         ),
         (target, AccountSharedData::default()),
     ];
@@ -202,8 +205,8 @@ fn rejects_forwarded_magic_root_instructions() {
             );
         }
         assert_eq!(
-            ctx.transaction_context.accounts().try_borrow(1).unwrap().mode(),
-            AccountMode::Uninit
+            ctx.transaction_context.accounts().try_borrow(1).unwrap().state(),
+            AccountState::Missing
         );
     });
 }
@@ -215,7 +218,7 @@ fn explicit_invocation_creates_an_account() {
         let account = AccountBuilder::default()
             .lamports(2_000_000)
             .owner(CALLER)
-            .mode(AccountMode::Magic)
+            .state(AccountState::ErLocal)
             .slot(1)
             .data(vec![7, 8])
             .build();
@@ -228,11 +231,11 @@ fn explicit_invocation_creates_an_account() {
             (
                 target.lamports(),
                 target.owner(),
-                target.mode(),
+                target.state(),
                 target.slot(),
                 target.data()
             ),
-            (2_000_000, &CALLER, AccountMode::Magic, 1, &[7, 8][..])
+            (2_000_000, &CALLER, AccountState::ErLocal, 1, &[7, 8][..])
         );
         assert_eq!(
             ctx.transaction_context.accounts().try_borrow(0).unwrap().lamports(),
@@ -323,7 +326,7 @@ fn explicit_invocation_preserves_account_protections() {
     }
     with_cpi(true, |ctx, target| {
         let invalid = MagicRootInstruction::Patch(AccountFieldPatch::Lifecycle {
-            mode: AccountMode::Transient,
+            state: AccountState::Undelegating,
             slot: 1,
         })
         .compose(target)
