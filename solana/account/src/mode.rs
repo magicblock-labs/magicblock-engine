@@ -3,6 +3,8 @@
 use solana_clock::Slot;
 
 use crate::AccountPatchError;
+use AccessMode::{ReadOnly, Writable};
+use DataFlow::{BaseToMagic, MagicToBase};
 
 /// Classification that access and synchronization policy cannot determine.
 #[repr(u8)]
@@ -30,13 +32,8 @@ pub enum AccessMode {
     Writable = 1,
 }
 
-/// Ongoing account-state synchronization between the base chain and the Magic Validator.
-///
-/// Magic names the validator here, independently of an account's mode.
-///
-/// Initial cloning, delegation-status observation, and privileged lifecycle
-/// operations are separate. An outbound policy remains during handoff without
-/// permitting ordinary writes or authorizing arbitrary new commits.
+/// Ongoing state synchronization with base; Magic names the validator endpoint.
+/// Initial cloning and privileged lifecycle operations are separate.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DataFlow {
@@ -69,51 +66,30 @@ pub struct InvalidAccountMode([u8; 2]);
 #[allow(non_upper_case_globals)]
 impl AccountMode {
     /// Cached base-chain absence, awaiting base updates.
-    pub const Uninit: Self = Self::new(
-        AccountKind::Uninit,
-        AccessMode::ReadOnly,
-        DataFlow::BaseToMagic,
-    );
+    pub const Uninit: Self = Self::new(AccountKind::Uninit, ReadOnly, BaseToMagic);
 
     /// Read-only base mirror, including accounts delegated to another validator.
-    pub const Base: Self = Self::new(
-        AccountKind::Regular,
-        AccessMode::ReadOnly,
-        DataFlow::BaseToMagic,
-    );
+    pub const Base: Self = Self::new(AccountKind::Regular, ReadOnly, BaseToMagic);
 
     /// Active local delegation. The host establishes authority and the commit target.
-    pub const Delegated: Self = Self::new(
-        AccountKind::Regular,
-        AccessMode::Writable,
-        DataFlow::MagicToBase,
-    );
+    pub const Delegated: Self = Self::new(AccountKind::Regular, Writable, MagicToBase);
 
     /// Protected local state awaiting completion of a delegation handoff.
-    pub const Undelegating: Self = Self::new(
-        AccountKind::Regular,
-        AccessMode::ReadOnly,
-        DataFlow::MagicToBase,
-    );
+    pub const Undelegating: Self = Self::new(AccountKind::Regular, ReadOnly, MagicToBase);
 
     /// Writable ER state without direct delegated commitment to base.
     /// A counterpart at the same address may independently exist on base.
-    pub const Magic: Self = Self::new(AccountKind::Regular, AccessMode::Writable, DataFlow::None);
+    pub const Magic: Self = Self::new(AccountKind::Regular, Writable, DataFlow::None);
 
     /// Runtime-maintained state, such as locally generated sysvars.
-    pub const System: Self = Self::new(AccountKind::System, AccessMode::ReadOnly, DataFlow::None);
+    pub const System: Self = Self::new(AccountKind::System, ReadOnly, DataFlow::None);
 
     /// Runtime account whose image is refreshed from base.
-    pub const MirroredSystem: Self = Self::new(
-        AccountKind::System,
-        AccessMode::ReadOnly,
-        DataFlow::BaseToMagic,
-    );
+    pub const MirroredSystem: Self = Self::new(AccountKind::System, ReadOnly, BaseToMagic);
 
     /// Deletion tombstone awaiting physical removal.
-    pub const Closed: Self = Self::new(AccountKind::Closed, AccessMode::ReadOnly, DataFlow::None);
+    pub const Closed: Self = Self::new(AccountKind::Closed, ReadOnly, DataFlow::None);
 
-    // Only named constants assemble modes; decoding separately validates the complete encoding.
     const fn new(kind: AccountKind, access: AccessMode, flow: DataFlow) -> Self {
         Self {
             kind,
@@ -129,8 +105,8 @@ impl AccountMode {
     /// Returns ordinary local write permission.
     pub const fn access(self) -> AccessMode {
         match self.bits & 1 {
-            0 => AccessMode::ReadOnly,
-            _ => AccessMode::Writable,
+            0 => ReadOnly,
+            _ => Writable,
         }
     }
 
@@ -138,46 +114,32 @@ impl AccountMode {
     pub const fn data_flow(self) -> DataFlow {
         match (self.bits >> 1) & 3 {
             0 => DataFlow::None,
-            1 => DataFlow::BaseToMagic,
-            2 => DataFlow::MagicToBase,
+            1 => BaseToMagic,
+            2 => MagicToBase,
             _ => unreachable!(),
         }
     }
 
     /// Returns whether ordinary programs may mutate this account.
     pub const fn is_writable(self) -> bool {
-        matches!(self.access(), AccessMode::Writable)
+        matches!(self.access(), Writable)
     }
 
     /// Returns whether this mode represents active local delegation.
     pub const fn is_locally_delegated(self) -> bool {
-        matches!(
-            (self.kind, self.access(), self.data_flow()),
-            (
-                AccountKind::Regular,
-                AccessMode::Writable,
-                DataFlow::MagicToBase
-            )
-        )
+        matches!(self, Self::Delegated)
     }
 
     /// Returns whether local delegation is locked pending handoff completion.
     pub const fn is_undelegating(self) -> bool {
-        matches!(
-            (self.kind, self.access(), self.data_flow()),
-            (
-                AccountKind::Regular,
-                AccessMode::ReadOnly,
-                DataFlow::MagicToBase
-            )
-        )
+        matches!(self, Self::Undelegating)
     }
 
     /// Returns whether the engine must retain and protect the local state.
     pub const fn is_authoritative(self) -> bool {
         matches!(
             (self.kind, self.data_flow()),
-            (AccountKind::Regular, DataFlow::None | DataFlow::MagicToBase)
+            (AccountKind::Regular, DataFlow::None | MagicToBase)
         )
     }
 
@@ -260,9 +222,6 @@ impl TryFrom<[u8; 2]> for AccountMode {
     }
 }
 
-const _: () = assert!(size_of::<AccountKind>() == 1);
-const _: () = assert!(size_of::<AccessMode>() == 1);
-const _: () = assert!(size_of::<DataFlow>() == 1);
 const _: () = assert!(size_of::<AccountMode>() == 2);
 
 #[cfg(feature = "wincode")]

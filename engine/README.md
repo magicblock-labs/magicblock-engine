@@ -70,14 +70,9 @@ waiter is cancelled. An uncertain outcome requires reacquiring the accessor and
 reconciling state before retrying. A definitive execution failure rolls back the
 replacement and follow-up account changes.
 
-Account modes separate classification, local write access, and synchronization
-policy. Accounts delegated to other validators use the same mode as base mirrors.
-Magic and MagicToBase regular state retain local authority, including read-only
-Undelegating accounts. Complete mode changes include access and flow, so neither
-is deduplicated as an identical observation. The new encoding requires accountsdb
-and ledger format version 2 and fresh state; deploy matching producers and
-consumers. Replication protocol version 1 remains unchanged. Earlier lifecycle
-payloads are not replay-compatible.
+[Account modes](../solana/account/README.md#account-lifecycle) make access and
+synchronization explicit. Their new encoding requires fresh accountsdb and ledger
+state and matching replication peers.
 
 ## Startup and recovery
 

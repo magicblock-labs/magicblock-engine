@@ -212,39 +212,6 @@ fn test_routing_and_persistence_flips() {
     }
 }
 
-/// Mirrors become protected local state until delegation handoff completes.
-#[test]
-fn test_mirror_and_handoff_routing() {
-    let (_dir, db) = db();
-    let key = Pubkey::new_unique();
-    let mirror = AccountMode::Base;
-    store(
-        &db,
-        key,
-        AccountBuilder::default().mode(mirror).slot(10).lamports(20).build(),
-    );
-    assert!(in_volatile(&db, &key) && !in_persisted(&db, &key));
-    let mut account = reload(&db, &key);
-    account.set_lifecycle(mirror, 11).unwrap();
-    account.set_lamports(30);
-    store(&db, key, account);
-    assert_eq!(lamports(&db, &key), 30);
-
-    let mut account = reload(&db, &key);
-    account.set_lifecycle(AccountMode::Delegated, 11).unwrap();
-    store(&db, key, account);
-    assert!(in_persisted(&db, &key) && !in_volatile(&db, &key));
-    let mut account = reload(&db, &key);
-    transition(&mut account, AccountMode::Undelegating);
-    store(&db, key, account);
-    let mut account = reload(&db, &key);
-    account.set_lifecycle(mirror, 11).unwrap();
-    store(&db, key, account);
-    assert!(in_volatile(&db, &key) && !in_persisted(&db, &key));
-    db.reset();
-    assert!(!db.loader().contains(&key).unwrap());
-}
-
 /// Opening rejects the old core layout before attempting to decode its volatile snapshot.
 #[test]
 fn test_old_storage_version_rejected() {

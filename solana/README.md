@@ -37,13 +37,10 @@ borrowed capacity promotes to owned storage; shared owned data uses `Arc::make_m
 This representation lets execution borrow account data from storage while retaining
 transactional writeback.
 
-Write access and synchronization policy are explicit. Regular writable accounts
-with MagicToBase policy represent local delegation; writable accounts with None
-policy represent Magic. Accounts delegated elsewhere use the ordinary BaseToMagic
-mirror mode. Undelegating accounts retain MagicToBase policy and local protection
-while ordinary writes are blocked. Closed is a deletion tombstone. Transaction
-writeback also permits this transaction's validated transition into Undelegating
-or Closed, independently of ordinary write permission.
+[Account modes](account/README.md#account-lifecycle) separate classification,
+ordinary write access, and synchronization policy. Undelegating remains protected
+and persisted without ordinary write access; Closed is removed by storage.
+Transaction-final writeback accepts validated dirty transitions into these modes.
 
 The [account crate](account/README.md) owns those rules and the active/shadow layout.
 Dirty markers track data, owner, lamports, slot, mode, and flags; touched flags track

@@ -386,7 +386,7 @@ bitflags::bitflags! {
         const OWNER    = 1 << 0;
         /// Lamports changed.
         const LAMPORTS = 1 << 1;
-        /// Kind or access changed.
+        /// Kind, access, or data flow changed.
         const MODE     = 1 << 2;
         /// State flags changed.
         const FLAGS    = 1 << 3;

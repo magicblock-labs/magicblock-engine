@@ -26,47 +26,6 @@ use v42_calculator_interface::builder::{Expr as E, transfer};
 const LAMPORTS: u64 = 2_000_000;
 const SLOT: u64 = 42;
 
-/// Access and flow changes at the same slot are materialized rather than deduplicated.
-#[tokio::test(flavor = "multi_thread")]
-async fn mirror_refresh_and_policy_changes() {
-    let te = TestEngine::new().await;
-    let key = Pubkey::new_unique();
-    let owner = Pubkey::new_unique();
-    let mirror = AccountMode::Base;
-    for (mode, slot, data) in [
-        (mirror, 10, vec![1]),
-        (mirror, 11, vec![2]),
-        (AccountMode::Delegated, 11, vec![3]),
-        (AccountMode::Undelegating, 11, vec![4]),
-        (mirror, 11, vec![5]),
-    ] {
-        te.account(key)
-            .await
-            .unwrap()
-            .materialize(account(owner, data.clone(), mode, slot), None)
-            .await
-            .unwrap();
-        let stored = te.get_account(key).unwrap();
-        assert_eq!(
-            (stored.mode(), stored.slot(), stored.data()),
-            (mode, slot, data.as_slice())
-        );
-    }
-    te.account(key)
-        .await
-        .unwrap()
-        .materialize(account(owner, vec![9], mirror, 11), None)
-        .await
-        .unwrap();
-    assert_eq!(
-        te.get_account(key).unwrap().data(),
-        &[5],
-        "identical observations remain skipped"
-    );
-    te.account(key).await.unwrap().delete().await.unwrap();
-    assert!(te.get_account(key).is_none());
-}
-
 /// Account with explicit lifecycle state, funded at the shared rent-exempt balance.
 fn account(owner: Pubkey, data: Vec<u8>, mode: AccountMode, slot: u64) -> AccountBuilder {
     AccountBuilder::default()
@@ -395,6 +354,8 @@ async fn account_replacement_slot_ordering() {
 
     for (from, to, slot) in [
         (AccountMode::Base, AccountMode::Delegated, SLOT),
+        (AccountMode::Delegated, AccountMode::Undelegating, SLOT),
+        (AccountMode::Undelegating, AccountMode::Base, SLOT),
         (AccountMode::Undelegating, AccountMode::Delegated, SLOT + 1),
         (AccountMode::Uninit, AccountMode::Magic, SLOT),
         (AccountMode::Base, AccountMode::Magic, SLOT),

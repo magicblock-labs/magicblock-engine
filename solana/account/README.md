@@ -8,9 +8,8 @@ persistence and the host owns validation of imported state.
 
 ## Account lifecycle
 
-`AccountMode` combines residual classification (`AccountKind`), ordinary local
-access (`AccessMode`), and ongoing synchronization policy (`DataFlow`) in two
-bytes. Named constants expose the supported combinations:
+AccountMode stores AccountKind, AccessMode, and DataFlow in two bytes. The account
+core remains 56 bytes. Named constants select the supported combinations:
 
 | Constant | Kind | Access | DataFlow |
 | --- | --- | --- | --- |
@@ -23,29 +22,21 @@ bytes. Named constants expose the supported combinations:
 | `MirroredSystem` | System | ReadOnly | BaseToMagic |
 | `Closed` | Closed | ReadOnly | None |
 
-The default is `Uninit`. An account delegated to another validator uses `Base`;
-its delegation status is not separately retained by the mode. Callers can compare
-complete modes with `account.is(AccountMode::Magic)` or use typed getters and
-predicates. Mode fields are private, and decoding admits only supported states.
+Uninit is the default. Accounts delegated elsewhere use Base. Magic can coexist
+with an independent base account; its local state has no direct delegated commit
+relationship with base. System accounts are volatile and survive mirror reset.
 
-`is_writable()` controls ordinary program mutation. `can_writeback()` on shared
-account data also accepts this transaction's dirty transitions into Undelegating
-or Closed, without authorizing further writes, including across CPI.
+Access controls ordinary program writes. `can_writeback()` also accepts dirty
+transitions into Undelegating or Closed, without permitting subsequent program
+writes, including across CPI. Magic, Delegated, and Undelegating remain locally
+authoritative; Closed is a deletion tombstone removed by storage.
 
-`is_authoritative()` protects Regular accounts whose policy is None or MagicToBase:
-Magic, active local delegation, and undelegating state. Base mirrors remain
-refreshable and evictable. Both System modes remain volatile and survive mirror
-reset. The host establishes delegation authority, commit targets, and trusted
-lifecycle evidence; this type stores no keys or proof of that authority.
+DataFlow describes ongoing state sync with base; Magic names the validator here.
+Initial cloning and delegation-status observation are separate. The host supplies
+authority, commit targets, source freshness, and evidence permitting transitions.
 
-DataFlow describes ongoing account-state synchronization between the base chain
-and the Magic Validator. Magic names the validator here, independently of the
-account mode. Initial cloning and
-delegation-status observation are separate. MagicToBase remains the policy during
-handoff without authorizing ordinary writes or arbitrary new commits.
-
-Mode and slot are validated together. **System** below means either System
-constant; the slot requirement also applies when changing between their flows.
+Lifecycle changes validate the complete mode and source slot atomically. System
+below means either System constant, including changes between their flows.
 
 | From | Same or newer slot | Strictly newer slot |
 | --- | --- | --- |
@@ -57,34 +48,16 @@ constant; the slot requirement also applies when changing between their flows.
 | Undelegating | Base, Uninit, Closed | Delegated |
 | Closed | — | — |
 
-Unlisted transitions and slot regressions are rejected without changing state or
-dirty markers. Authoritative accounts cannot be replaced in the same mode, even
-at a newer slot; ordinary transaction mutations are unaffected. Access and flow
-changes are part of the complete lifecycle transition, not independent setters.
+Unlisted pairs and slot regressions fail without changing state or dirty markers.
+Authoritative images cannot be replaced in the same mode, even at a newer slot;
+ordinary execution is unaffected. Magic must be closed before replacement,
+regardless of token balance. See [Engine's import contract](../../engine/README.md#account-replacement)
+for deduplication and redelegation evidence.
 
-Magic represents locally authoritative ER state without direct base commitment
-through protocol delegation. A base counterpart may exist independently. Magic
-must be closed before another image can occupy its key; the host validates
-creation and closure eligibility. Empty token balances do not invalidate Magic
-accounts, and this crate does not interpret token data.
-
-[Engine's import path](../../engine/README.md#account-replacement) owns
-observation-based deduplication and the evidence required for redelegation.
-
-Closed is a deletion tombstone, retained in the transaction until storage removes
-the image. It means deletion has occurred, rather than eligibility for closure.
-
-The binary mode encoding is `[kind_byte, policy_byte]`: policy bit 0 is Access,
-bits 1–2 are DataFlow, and the remaining bits are reserved. Decoders reject
-invalid tags, reserved bits, and unsupported combinations before constructing a
-mode. The mode and mmap core remain two and 56 bytes respectively. This encoding
-replaces the unpublished kind/access prototype; existing prototype state must
-be discarded. Accountsdb and ledger format version 2 remain the new format of
-this unreleased refactor; replication protocol version 1 is unchanged.
-
-Flags are supplied as a complete value during privileged finalization, which
-does not change lamports. They are not evidence of source freshness. Producers
-and consumers must agree on lifecycle semantics as well as binary encoding.
+The encoding is `[kind, policy]`: policy bit 0 is access and bits 1–2 are flow.
+Decoders reject invalid tags, reserved bits, and unsupported combinations.
+Accountsdb and ledger format 2 require fresh state; there is no automatic migration.
+Replication protocol version remains 1, so peers must use the matching encoding.
 
 ## Borrowed storage
 
@@ -105,7 +78,7 @@ The host remains responsible for source freshness. Equality compares account sta
 and bytes, not storage representation or dirty markers. Lifecycle semantics and
 binary encoding must agree across producers and consumers.
 
-[Modes and copy-on-write behavior](src/cow/mod.rs), the [borrowed layout](src/cow/borrowed.rs),
+[Modes](src/mode.rs), [copy-on-write behavior](src/cow/mod.rs), the [borrowed layout](src/cow/borrowed.rs),
 and [field patches](src/patch.rs) define this model. The `testkit` feature supplies
 account and borrowed-storage fixtures. Representation changes also affect transaction
 context, VM mapping, and persistence; see the [runtime overview](../README.md).

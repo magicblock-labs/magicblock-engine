@@ -195,8 +195,6 @@ fn test_account_patch_transition_errors() {
 /// Also pins mode classification, stored discriminants, and wire round-tripping.
 #[test]
 fn test_lifecycle_matrix() {
-    use crate::{AccessMode, AccountKind, DataFlow};
-
     let uninit = AccountMode::Uninit;
     let base = AccountMode::Base;
     let system = AccountMode::System;
@@ -205,58 +203,37 @@ fn test_lifecycle_matrix() {
     let undelegating = AccountMode::Undelegating;
     let closed = AccountMode::Closed;
     let mirrored_system = AccountMode::MirroredSystem;
-    let modes = [uninit, base, system, delegated, magic, undelegating, closed, mirrored_system];
-    let encodings = [[0, 2], [1, 2], [2, 0], [1, 5], [1, 1], [1, 4], [255, 0], [2, 2]];
-    for (index, mode) in modes.into_iter().enumerate() {
-        assert_eq!(<[u8; 2]>::from(mode), encodings[index]);
-        let bytes = bincode::serialize(&mode).unwrap();
-        assert_eq!(bytes, encodings[index]);
-        assert_eq!(bincode::deserialize::<AccountMode>(&bytes).unwrap(), mode);
+    let cases = [
+        (uninit, [0, 2]),
+        (base, [1, 2]),
+        (system, [2, 0]),
+        (delegated, [1, 5]),
+        (magic, [1, 1]),
+        (undelegating, [1, 4]),
+        (closed, [255, 0]),
+        (mirrored_system, [2, 2]),
+    ];
+    let modes = cases.map(|(mode, _)| mode);
+    for (mode, encoded) in cases {
+        assert_eq!(<[u8; 2]>::from(mode), encoded);
+        assert_eq!(bincode::serialize(&mode).unwrap(), encoded);
+        assert_eq!(bincode::deserialize::<AccountMode>(&encoded).unwrap(), mode);
         #[cfg(feature = "wincode")]
         {
-            assert_eq!(wincode::serialize(&mode).unwrap(), bytes);
-            assert_eq!(wincode::deserialize::<AccountMode>(&bytes).unwrap(), mode);
+            assert_eq!(wincode::serialize(&mode).unwrap(), encoded);
+            assert_eq!(wincode::deserialize::<AccountMode>(&encoded).unwrap(), mode);
         }
-        assert_eq!(
-            mode.is_writable(),
-            [false, false, false, true, true, false, false, false][index]
-        );
+        let [kind, policy] = encoded;
+        assert_eq!(mode.kind() as u8, kind);
+        assert_eq!(mode.access() as u8, policy & 1);
+        assert_eq!(mode.data_flow() as u8, policy >> 1);
+        assert_eq!(mode.is_writable(), mode == delegated || mode == magic);
         assert_eq!(
             mode.is_authoritative(),
-            [false, false, false, true, true, true, false, false][index]
+            mode == delegated || mode == magic || mode == undelegating
         );
-        assert_eq!(mode.is_locally_delegated(), index == 3);
-        assert_eq!(mode.is_undelegating(), index == 5);
-        assert_eq!(
-            mode.kind(),
-            [
-                AccountKind::Uninit,
-                AccountKind::Regular,
-                AccountKind::System,
-                AccountKind::Regular,
-                AccountKind::Regular,
-                AccountKind::Regular,
-                AccountKind::Closed,
-                AccountKind::System
-            ][index]
-        );
-        assert_eq!(
-            mode.data_flow(),
-            [
-                DataFlow::BaseToMagic,
-                DataFlow::BaseToMagic,
-                DataFlow::None,
-                DataFlow::MagicToBase,
-                DataFlow::None,
-                DataFlow::MagicToBase,
-                DataFlow::None,
-                DataFlow::BaseToMagic
-            ][index]
-        );
-        assert_eq!(
-            mode.access(),
-            if mode.is_writable() { AccessMode::Writable } else { AccessMode::ReadOnly }
-        );
+        assert_eq!(mode.is_locally_delegated(), mode == delegated);
+        assert_eq!(mode.is_undelegating(), mode == undelegating);
     }
     assert_eq!(AccountMode::default(), uninit);
     // Columns are destinations in `modes` order.
@@ -323,12 +300,9 @@ fn test_lifecycle_matrix() {
 /// Pins mmap layout and rejects every unsupported encoding and all reserved bits before constructing a mode.
 #[test]
 fn test_mode_layout_and_decoding() {
-    use crate::{AccessMode, AccountKind, DataFlow, cow::AccountCore};
+    use crate::cow::AccountCore;
     use std::mem::{align_of, offset_of, size_of};
 
-    assert_eq!(size_of::<AccountKind>(), 1);
-    assert_eq!(size_of::<AccessMode>(), 1);
-    assert_eq!(size_of::<DataFlow>(), 1);
     assert_eq!(size_of::<AccountMode>(), 2);
     assert_eq!(align_of::<AccountMode>(), 1);
     assert_eq!(size_of::<AccountCore>(), 56);

@@ -5,11 +5,9 @@ execution history. The store separates engine-authoritative state from rebuildab
 external-chain mirrors. Authoritative accounts are persisted, while mirrored state
 lives in memory and can be fetched again.
 
-Storage follows the [account lifecycle](../solana/account/README.md). Regular
-accounts with None or MagicToBase policy remain authoritative: Magic, Delegated, and
-Undelegating. BaseToMagic mirrors remain volatile, including accounts delegated to
-another validator. Undelegating remains protected without write access. Closing an account removes it from storage. Resetting externally owned
-state preserves authoritative accounts and internal system accounts.
+[Account lifecycle](../solana/account/README.md#account-lifecycle) determines routing:
+Magic, Delegated, and Undelegating are persisted; mirrors are volatile. Closed
+accounts are removed. Reset preserves authoritative and both System modes.
 
 ## Storage access and writeback
 
@@ -46,9 +44,7 @@ volatile accounts, the transaction counter, and the chain slot. The cached check
 describes previously published state. Fresh sampling requires writes and metadata
 updates to be quiesced, but neither flushes storage nor refreshes that cache.
 
-Storage format version 2 uses the packed kind/access/flow mode. Version 1 databases
-and snapshots are rejected; deployment requires fresh state, without automatic
-conversion or deletion of old files.
+Storage format 2 requires fresh state; see the [encoding contract](../solana/account/README.md#account-lifecycle).
 
 [Store routing and loading](src/lib.rs) connect the [persisted store](src/store/mod.rs)
 and volatile backend. [Snapshots](src/snapshot.rs) handle recovery exports;
