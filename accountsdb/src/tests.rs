@@ -212,31 +212,6 @@ fn test_routing_and_persistence_flips() {
     }
 }
 
-/// Opening rejects the old core layout before attempting to decode its volatile snapshot.
-#[test]
-fn test_old_storage_version_rejected() {
-    use std::{fs, os::unix::fs::FileExt};
-
-    let (dir, db) = db();
-    db.flush(true).unwrap();
-    drop(db);
-    let active = AccountsDB::directory(dir.path());
-    let path = active.join(STORAGE_FILE);
-    let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
-    file.write_all_at(&1u64.to_ne_bytes(), 0).unwrap();
-    // A decoder error here would show that version validation happened too late.
-    let snapshot = active.join(VOLATILE_DB_FILE);
-    fs::write(&snapshot, b"invalid old snapshot").unwrap();
-    assert!(matches!(
-        AccountsDB::new(dir.path()),
-        Err(AccountsDBError::UnsupportedVersion(1))
-    ));
-    assert!(
-        path.exists() && snapshot.exists(),
-        "incompatible state is left intact"
-    );
-}
-
 // Both migration directions remove the source image and owner mapping, retain
 // the account contents across reopen, and recycle persisted storage.
 #[test]

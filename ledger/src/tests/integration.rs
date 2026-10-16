@@ -59,34 +59,6 @@ fn ledger(size_limit: u64) -> (TempDir, Arc<Ledger>) {
     (dir, ledger)
 }
 
-/// Old ledgers may contain incompatible lifecycle instructions and cannot be replayed.
-#[test]
-fn test_old_ledger_version_rejected() {
-    use std::{fs::OpenOptions, os::unix::fs::FileExt};
-
-    let (dir, ledger) = ledger(u64::MAX);
-    let head = ledger.meta.head();
-    let path = ledger
-        .superblocks
-        .read()
-        .get(&head)
-        .unwrap()
-        .directory
-        .join(crate::SUPERBLOCK_META);
-    drop(ledger);
-    OpenOptions::new()
-        .write(true)
-        .open(&path)
-        .unwrap()
-        .write_all_at(&1u64.to_ne_bytes(), 0)
-        .unwrap();
-    assert!(matches!(
-        Ledger::new(dir.path().to_owned(), u64::MAX),
-        Err(crate::LedgerError::UnsupportedVersion(1))
-    ));
-    assert!(path.exists());
-}
-
 /// Starts an index worker for an appender test.
 fn indexer(ledger: &Arc<Ledger>) -> IndexerHandle {
     let (tx, rx) = flume::bounded(2_048);

@@ -70,10 +70,6 @@ waiter is cancelled. An uncertain outcome requires reacquiring the accessor and
 reconciling state before retrying. A definitive execution failure rolls back the
 replacement and follow-up account changes.
 
-[Account modes](../solana/account/README.md#account-lifecycle) make access and
-synchronization explicit. Their new encoding requires fresh accountsdb and ledger
-state and matching replication peers.
-
 ## Startup and recovery
 
 [Keeper](../keeper/README.md#startup-and-recovery) opens and validates the stores,

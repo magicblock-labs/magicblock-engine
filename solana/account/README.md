@@ -56,8 +56,6 @@ for deduplication and redelegation evidence.
 
 The encoding is `[kind, policy]`: policy bit 0 is access and bits 1–2 are flow.
 Decoders reject invalid tags, reserved bits, and unsupported combinations.
-Accountsdb and ledger format 2 require fresh state; there is no automatic migration.
-Replication protocol version remains 1, so peers must use the matching encoding.
 
 ## Borrowed storage
 

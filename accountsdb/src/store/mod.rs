@@ -33,7 +33,7 @@ pub(crate) use defrag::MIN_REMAINDER;
 pub(crate) use mmap::Stats;
 
 /// Current on-disk storage format version.
-pub(crate) const VERSION: DatabaseVersion = 2;
+pub(crate) const VERSION: DatabaseVersion = 1;
 /// Version tag stored in the metadata header.
 pub(crate) type DatabaseVersion = u64;
 

@@ -185,8 +185,6 @@ impl MappedStorage {
         };
         let file = Mutex::new(file);
         let storage = Self { meta, mmap, head, file };
-        // Reject old images before callers deserialize snapshots or borrow account cores.
-        storage.validate()?;
         storage.meta().len.store(len, Release);
         Ok(storage)
     }

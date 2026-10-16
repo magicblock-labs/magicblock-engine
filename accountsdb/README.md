@@ -44,8 +44,6 @@ volatile accounts, the transaction counter, and the chain slot. The cached check
 describes previously published state. Fresh sampling requires writes and metadata
 updates to be quiesced, but neither flushes storage nor refreshes that cache.
 
-Storage format 2 requires fresh state; see the [encoding contract](../solana/account/README.md#account-lifecycle).
-
 [Store routing and loading](src/lib.rs) connect the [persisted store](src/store/mod.rs)
 and volatile backend. [Snapshots](src/snapshot.rs) handle recovery exports;
 [reader admission](src/readers.rs) coordinates relocation with active readers.
