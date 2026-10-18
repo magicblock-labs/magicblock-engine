@@ -114,7 +114,7 @@ impl VolatileStore {
     pub(crate) fn reset(&self) {
         self.programs.clear_sync();
         self.accounts.retain_sync(|k, a| {
-            if a.mode().kind() != solana_account::AccountKind::Runtime {
+            if !a.is_any([AccountMode::Runtime, AccountMode::MirroredRuntime]) {
                 return false;
             }
             let mut set = self.programs.entry_sync(a.owner()).or_default();

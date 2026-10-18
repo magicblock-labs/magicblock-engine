@@ -62,6 +62,11 @@ impl OwnedAccount {
         self.core.mode == mode
     }
 
+    /// Returns `true` when the account is in any of `modes`.
+    pub fn is_any<const N: usize>(&self, modes: [AccountMode; N]) -> bool {
+        modes.contains(&self.mode())
+    }
+
     /// Returns the owner pubkey.
     pub fn owner(&self) -> Pubkey {
         self.core.owner

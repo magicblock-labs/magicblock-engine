@@ -148,7 +148,7 @@ impl AccountSharedData {
     /// program mutation; instruction checks must use [`AccountMode::is_writable`].
     pub fn can_writeback(&self) -> bool {
         self.mode.is_writable()
-            || (self.is(AccountMode::Undelegating) || self.is(AccountMode::Closed))
+            || self.is_any([AccountMode::Undelegating, AccountMode::Closed])
                 && self.dirty.contains(DirtyMarkers::MODE)
     }
 
@@ -160,6 +160,11 @@ impl AccountSharedData {
     /// Returns `true` when the account is in `mode`.
     pub fn is(&self, mode: AccountMode) -> bool {
         self.mode == mode
+    }
+
+    /// Returns `true` when the account is in any of `modes`.
+    pub fn is_any<const N: usize>(&self, modes: [AccountMode; N]) -> bool {
+        modes.contains(&self.mode())
     }
 
     /// Returns the account modifier flags.
@@ -386,7 +391,7 @@ bitflags::bitflags! {
         const OWNER    = 1 << 0;
         /// Lamports changed.
         const LAMPORTS = 1 << 1;
-        /// Kind, access, or data flow changed.
+        /// Mode changed.
         const MODE     = 1 << 2;
         /// State flags changed.
         const FLAGS    = 1 << 3;
