@@ -37,10 +37,11 @@ borrowed capacity promotes to owned storage; shared owned data uses `Arc::make_m
 This representation lets execution borrow account data from storage while retaining
 transactional writeback.
 
-[Account modes](account/README.md#account-lifecycle) separate classification,
-ordinary write access, and synchronization policy. Undelegating remains protected
-and persisted without ordinary write access; Closed is removed by storage.
-Transaction-final writeback accepts validated dirty transitions into these modes.
+Engine mutation requires a permitted lifecycle mode in addition to Solana access
+checks. Delegated and Magic accounts allow user writes. Undelegating state remains
+authoritative and persisted but immutable; closed state is removed by the caller.
+Transitions to either revoke mutation immediately, including across CPI. Final
+writeback can accept a dirty transition without authorizing further writes.
 
 The [account crate](account/README.md) owns those rules and the active/shadow layout.
 Dirty markers track data, owner, lamports, slot, mode, and flags; touched flags track

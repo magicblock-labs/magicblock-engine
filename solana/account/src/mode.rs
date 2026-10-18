@@ -127,16 +127,6 @@ impl AccountMode {
         matches!(self.access(), Writable)
     }
 
-    /// Returns whether this mode represents active local delegation.
-    pub const fn is_locally_delegated(self) -> bool {
-        matches!(self, Self::Delegated)
-    }
-
-    /// Returns whether local delegation is locked pending handoff completion.
-    pub const fn is_undelegating(self) -> bool {
-        matches!(self, Self::Undelegating)
-    }
-
     /// Returns whether the engine must retain and protect the local state.
     pub const fn is_authoritative(self) -> bool {
         matches!(

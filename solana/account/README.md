@@ -8,56 +8,46 @@ persistence and the host owns validation of imported state.
 
 ## Account lifecycle
 
-AccountMode stores AccountKind, AccessMode, and DataFlow in two bytes in memory
-and serializes to one byte. The account core remains 56 bytes. Named constants
-select the supported combinations:
+`AccountMode` separates account kind, access, and ongoing sync with base.
+[Named constants](src/mode.rs) define the supported combinations.
 
-| Constant | Kind | Access | DataFlow |
-| --- | --- | --- | --- |
-| `Missing` | Missing | ReadOnly | BaseToMagic |
-| `Base` | Regular | ReadOnly | BaseToMagic |
-| `Delegated` | Regular | Writable | MagicToBase |
-| `Undelegating` | Regular | ReadOnly | MagicToBase |
-| `Magic` | Regular | Writable | None |
-| `Runtime` | Runtime | ReadOnly | None |
-| `MirroredRuntime` | Runtime | ReadOnly | BaseToMagic |
-| `Closed` | Closed | ReadOnly | None |
+`Delegated` accounts are delegated to this validator. `Magic` accounts are maintained
+locally, with no ongoing sync with base, even if a base counterpart exists. Both allow
+user mutation. `Undelegating` accounts remain authoritative while awaiting lifecycle
+resolution but reject user writes. `Closed` marks state for storage removal.
 
-Missing is the default. Accounts delegated elsewhere use Base. Magic can coexist
-with an independent base account; its local state has no direct delegated commit
-relationship with base. Runtime accounts are volatile and survive mirror reset.
+Transitions to undelegating or closed revoke mutation immediately, including in CPI.
+The transaction-final writeback guard can accept a dirty transition into those
+modes without permitting further program writes. Other modes represent cached
+external absence (`Missing`), a read-only mirror (`Base`), and internal sysvar,
+feature, or precompile state (`Runtime`).
 
-Access controls ordinary program writes. `can_writeback()` also accepts dirty
-transitions into Undelegating or Closed, without permitting subsequent program
-writes, including across CPI. Magic, Delegated, and Undelegating remain locally
-authoritative; Closed is a deletion tombstone removed by storage.
+`Runtime` has no base sync; `MirroredRuntime` is refreshed from base. Both are
+read-only runtime state and survive mirror reset.
 
-DataFlow describes ongoing state sync with base; Magic names the validator here.
-Initial cloning and delegation-status observation are separate. The host supplies
-authority, commit targets, source freshness, and evidence permitting transitions.
+Privileged replacement validates mode and source slot together. Authoritative
+state can't be refreshed in the same mode, even at a newer slot; otherwise a later
+external image could overwrite local execution. Ordinary transaction mutations
+aren't replacements and don't follow that restriction.
 
-Lifecycle changes validate the complete mode and source slot atomically. Runtime
-below means either Runtime constant, including changes between their flows.
-
-| From | Same or newer slot | Strictly newer slot |
-| --- | --- | --- |
-| Missing | Base, Runtime, Delegated, Magic, Closed | Missing |
+| From | Allowed at the same or a newer slot | Requires a strictly newer slot |
+| :-- | :-- | :-- |
+| Missing | Base, Runtime, MirroredRuntime, Delegated, Magic, Closed | Missing |
 | Base | Delegated, Magic, Closed | Base, Missing |
-| Runtime | — | Runtime |
+| Runtime | — | Runtime, MirroredRuntime |
+| MirroredRuntime | — | Runtime, MirroredRuntime |
 | Delegated | Undelegating | — |
 | Magic | Closed | — |
 | Undelegating | Base, Missing, Closed | Delegated |
 | Closed | — | — |
 
-Unlisted pairs and slot regressions fail without changing state or dirty markers.
-Authoritative images cannot be replaced in the same mode, even at a newer slot;
-ordinary execution is unaffected. Magic must be closed before replacement,
-regardless of token balance. See [Engine's import contract](../../engine/README.md#account-replacement)
-for deduplication and redelegation evidence.
+Unlisted transitions and slot regressions fail without changing state or dirty
+markers. Magic state must be explicitly closed before another image can occupy
+its key, regardless of token balance. The host validates creation and closure
+eligibility, including application-specific token rules. [Engine's import path](../../engine/README.md#account-replacement)
+owns observation-based deduplication and the evidence required for redelegation.
 
-The serialized mode is one byte: Missing=0, Base=1, Runtime=2, Delegated=3,
-Magic=4, Undelegating=5, MirroredRuntime=6, and Closed=255.
-Decoders reject every other code.
+Modes serialize as one byte; unsupported codes are rejected.
 
 ## Borrowed storage
 

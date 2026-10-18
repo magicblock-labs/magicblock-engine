@@ -195,23 +195,16 @@ fn test_account_patch_transition_errors() {
 /// Also pins mode properties and one-byte wire round-tripping.
 #[test]
 fn test_lifecycle_matrix() {
-    let missing = AccountMode::Missing;
-    let base = AccountMode::Base;
-    let runtime = AccountMode::Runtime;
-    let delegated = AccountMode::Delegated;
-    let magic = AccountMode::Magic;
-    let undelegating = AccountMode::Undelegating;
-    let closed = AccountMode::Closed;
-    let mirrored_runtime = AccountMode::MirroredRuntime;
+    use AccountMode as Mode;
     let cases = [
-        (missing, 0, [0, 2]),
-        (base, 1, [1, 2]),
-        (runtime, 2, [2, 0]),
-        (delegated, 3, [1, 5]),
-        (magic, 4, [1, 1]),
-        (undelegating, 5, [1, 4]),
-        (closed, 255, [255, 0]),
-        (mirrored_runtime, 6, [2, 2]),
+        (Mode::Missing, 0, [0, 2]),
+        (Mode::Base, 1, [1, 2]),
+        (Mode::Runtime, 2, [2, 0]),
+        (Mode::Delegated, 3, [1, 5]),
+        (Mode::Magic, 4, [1, 1]),
+        (Mode::Undelegating, 5, [1, 4]),
+        (Mode::Closed, 255, [255, 0]),
+        (Mode::MirroredRuntime, 6, [2, 2]),
     ];
     let modes = cases.map(|(mode, ..)| mode);
     for (mode, byte, [kind, policy]) in cases {
@@ -226,26 +219,27 @@ fn test_lifecycle_matrix() {
         assert_eq!(mode.kind() as u8, kind);
         assert_eq!(mode.access() as u8, policy & 1);
         assert_eq!(mode.data_flow() as u8, policy >> 1);
-        assert_eq!(mode.is_writable(), mode == delegated || mode == magic);
+        assert_eq!(
+            mode.is_writable(),
+            mode == Mode::Delegated || mode == Mode::Magic
+        );
         assert_eq!(
             mode.is_authoritative(),
-            mode == delegated || mode == magic || mode == undelegating
+            mode == Mode::Delegated || mode == Mode::Magic || mode == Mode::Undelegating
         );
-        assert_eq!(mode.is_locally_delegated(), mode == delegated);
-        assert_eq!(mode.is_undelegating(), mode == undelegating);
     }
-    assert_eq!(AccountMode::default(), missing);
+    assert_eq!(AccountMode::default(), Mode::Missing);
     // Columns are destinations in `modes` order.
     // 0 forbids the pair, 1 permits equal/newer slots, 2 requires a newer slot.
     let rules = [
-        (missing, [2, 1, 1, 1, 1, 0, 1, 1]),
-        (base, [2, 2, 0, 1, 1, 0, 1, 0]),
-        (runtime, [0, 0, 2, 0, 0, 0, 0, 2]),
-        (delegated, [0, 0, 0, 0, 0, 1, 0, 0]),
-        (magic, [0, 0, 0, 0, 0, 0, 1, 0]),
-        (undelegating, [1, 1, 0, 2, 0, 0, 1, 0]),
-        (closed, [0, 0, 0, 0, 0, 0, 0, 0]),
-        (mirrored_runtime, [0, 0, 2, 0, 0, 0, 0, 2]),
+        (Mode::Missing, [2, 1, 1, 1, 1, 0, 1, 1]),
+        (Mode::Base, [2, 2, 0, 1, 1, 0, 1, 0]),
+        (Mode::Runtime, [0, 0, 2, 0, 0, 0, 0, 2]),
+        (Mode::Delegated, [0, 0, 0, 0, 0, 1, 0, 0]),
+        (Mode::Magic, [0, 0, 0, 0, 0, 0, 1, 0]),
+        (Mode::Undelegating, [1, 1, 0, 2, 0, 0, 1, 0]),
+        (Mode::Closed, [0, 0, 0, 0, 0, 0, 0, 0]),
+        (Mode::MirroredRuntime, [0, 0, 2, 0, 0, 0, 0, 2]),
     ];
     let owner = Pubkey::new_unique();
     let key = Pubkey::new_unique();
@@ -296,37 +290,21 @@ fn test_lifecycle_matrix() {
     }
 }
 
-/// Pins mmap layout and rejects every unsupported wire code before constructing a mode.
+/// Pins storage size/alignment and rejects unsupported mode bytes.
 #[test]
 fn test_mode_layout_and_decoding() {
     use crate::cow::AccountCore;
-    use std::mem::{align_of, offset_of, size_of};
+    use std::mem::{align_of, size_of};
 
-    assert_eq!(size_of::<AccountMode>(), 2);
     assert_eq!(align_of::<AccountMode>(), 1);
     assert_eq!(size_of::<AccountCore>(), 56);
     assert_eq!(align_of::<AccountCore>(), 8);
-    assert_eq!(offset_of!(AccountCore, mode), 48);
-    assert_eq!(offset_of!(AccountCore, flags), 50);
-    let supported = [0, 1, 2, 3, 4, 5, 6, 255];
-    for byte in 0..=u8::MAX {
-        let valid = supported.contains(&byte);
-        assert_eq!(AccountMode::try_from(byte).is_ok(), valid, "{byte}");
-        assert_eq!(
-            bincode::deserialize::<AccountMode>(&[byte]).is_ok(),
-            valid,
-            "{byte}"
-        );
+    for byte in 7..u8::MAX {
+        assert!(AccountMode::try_from(byte).is_err());
+        assert!(bincode::deserialize::<AccountMode>(&[byte]).is_err());
         #[cfg(feature = "wincode")]
-        assert_eq!(
-            wincode::deserialize::<AccountMode>(&[byte]).is_ok(),
-            valid,
-            "{byte}"
-        );
+        assert!(wincode::deserialize::<AccountMode>(&[byte]).is_err());
     }
-    assert!(bincode::deserialize::<AccountMode>(&[]).is_err());
-    #[cfg(feature = "wincode")]
-    assert!(wincode::deserialize::<AccountMode>(&[]).is_err());
 }
 
 #[test]

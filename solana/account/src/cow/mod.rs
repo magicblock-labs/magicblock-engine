@@ -148,7 +148,7 @@ impl AccountSharedData {
     /// program mutation; instruction checks must use [`AccountMode::is_writable`].
     pub fn can_writeback(&self) -> bool {
         self.mode.is_writable()
-            || (self.mode.is_undelegating() || self.is(AccountMode::Closed))
+            || (self.is(AccountMode::Undelegating) || self.is(AccountMode::Closed))
                 && self.dirty.contains(DirtyMarkers::MODE)
     }
 
