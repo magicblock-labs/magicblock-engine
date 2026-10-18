@@ -110,12 +110,12 @@ fn expiring_cache_lazy_eviction() {
 async fn account_lease_coordinates_recency_and_waiters() {
     let modes = [
         AccountMode::Base,
-        AccountMode::Uninit,
+        AccountMode::Missing,
         AccountMode::Delegated,
         AccountMode::Magic,
         AccountMode::Undelegating,
-        AccountMode::System,
-        AccountMode::MirroredSystem,
+        AccountMode::Runtime,
+        AccountMode::MirroredRuntime,
     ];
     for (index, mode) in modes.into_iter().enumerate() {
         let cache = Arc::new(AccountCache::new(256));

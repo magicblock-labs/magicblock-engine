@@ -1265,7 +1265,7 @@ mod tests {
         let (key, account, writable) = accounts.pop().unwrap();
         let account = AccountBuilder::from(account)
             .owner(Pubkey::new_unique())
-            .mode(AccountMode::Uninit)
+            .mode(AccountMode::Missing)
             .build();
         accounts.push((key, account, writable));
         accounts

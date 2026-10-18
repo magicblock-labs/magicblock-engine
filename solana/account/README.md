@@ -8,23 +8,24 @@ persistence and the host owns validation of imported state.
 
 ## Account lifecycle
 
-AccountMode stores AccountKind, AccessMode, and DataFlow in two bytes. The account
-core remains 56 bytes. Named constants select the supported combinations:
+AccountMode stores AccountKind, AccessMode, and DataFlow in two bytes in memory
+and serializes to one byte. The account core remains 56 bytes. Named constants
+select the supported combinations:
 
 | Constant | Kind | Access | DataFlow |
 | --- | --- | --- | --- |
-| `Uninit` | Uninit | ReadOnly | BaseToMagic |
+| `Missing` | Missing | ReadOnly | BaseToMagic |
 | `Base` | Regular | ReadOnly | BaseToMagic |
 | `Delegated` | Regular | Writable | MagicToBase |
 | `Undelegating` | Regular | ReadOnly | MagicToBase |
 | `Magic` | Regular | Writable | None |
-| `System` | System | ReadOnly | None |
-| `MirroredSystem` | System | ReadOnly | BaseToMagic |
+| `Runtime` | Runtime | ReadOnly | None |
+| `MirroredRuntime` | Runtime | ReadOnly | BaseToMagic |
 | `Closed` | Closed | ReadOnly | None |
 
-Uninit is the default. Accounts delegated elsewhere use Base. Magic can coexist
+Missing is the default. Accounts delegated elsewhere use Base. Magic can coexist
 with an independent base account; its local state has no direct delegated commit
-relationship with base. System accounts are volatile and survive mirror reset.
+relationship with base. Runtime accounts are volatile and survive mirror reset.
 
 Access controls ordinary program writes. `can_writeback()` also accepts dirty
 transitions into Undelegating or Closed, without permitting subsequent program
@@ -35,17 +36,17 @@ DataFlow describes ongoing state sync with base; Magic names the validator here.
 Initial cloning and delegation-status observation are separate. The host supplies
 authority, commit targets, source freshness, and evidence permitting transitions.
 
-Lifecycle changes validate the complete mode and source slot atomically. System
-below means either System constant, including changes between their flows.
+Lifecycle changes validate the complete mode and source slot atomically. Runtime
+below means either Runtime constant, including changes between their flows.
 
 | From | Same or newer slot | Strictly newer slot |
 | --- | --- | --- |
-| Uninit | Base, System, Delegated, Magic, Closed | Uninit |
-| Base | Delegated, Magic, Closed | Base, Uninit |
-| System | — | System |
+| Missing | Base, Runtime, Delegated, Magic, Closed | Missing |
+| Base | Delegated, Magic, Closed | Base, Missing |
+| Runtime | — | Runtime |
 | Delegated | Undelegating | — |
 | Magic | Closed | — |
-| Undelegating | Base, Uninit, Closed | Delegated |
+| Undelegating | Base, Missing, Closed | Delegated |
 | Closed | — | — |
 
 Unlisted pairs and slot regressions fail without changing state or dirty markers.
@@ -54,8 +55,9 @@ ordinary execution is unaffected. Magic must be closed before replacement,
 regardless of token balance. See [Engine's import contract](../../engine/README.md#account-replacement)
 for deduplication and redelegation evidence.
 
-The encoding is `[kind, policy]`: policy bit 0 is access and bits 1–2 are flow.
-Decoders reject invalid tags, reserved bits, and unsupported combinations.
+The serialized mode is one byte: Missing=0, Base=1, Runtime=2, Delegated=3,
+Magic=4, Undelegating=5, MirroredRuntime=6, and Closed=255.
+Decoders reject every other code.
 
 ## Borrowed storage
 

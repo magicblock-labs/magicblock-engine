@@ -12,11 +12,11 @@ use DataFlow::{BaseToMagic, MagicToBase};
 pub enum AccountKind {
     /// Cached absence of an account on the base chain.
     #[default]
-    Uninit = 0,
+    Missing = 0,
     /// Ordinary account state, including mirrors, delegation, and independent ER state.
     Regular = 1,
     /// Internal runtime state, such as sysvars, features, and programs.
-    System = 2,
+    Runtime = 2,
     /// Deletion tombstone retained until storage removes the account image.
     Closed = 255,
 }
@@ -50,23 +50,23 @@ pub enum DataFlow {
 #[repr(C)]
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
-#[cfg_attr(feature = "serde", serde(try_from = "[u8; 2]", into = "[u8; 2]"))]
+#[cfg_attr(feature = "serde", serde(try_from = "u8", into = "u8"))]
 pub struct AccountMode {
     kind: AccountKind,
     /// Bit 0 is access; bits 1–2 are data flow. Other bits are reserved.
     bits: u8,
 }
 
-/// Encoded mode with an invalid tag, reserved bits, or unsupported combination.
+/// A byte that does not encode a supported account mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("invalid account mode bytes: {0:?}")]
-pub struct InvalidAccountMode([u8; 2]);
+#[error("invalid account mode byte: {0}")]
+pub struct InvalidAccountMode(u8);
 
 // These constants retain the familiar spelling of the original enum variants.
 #[allow(non_upper_case_globals)]
 impl AccountMode {
     /// Cached base-chain absence, awaiting base updates.
-    pub const Uninit: Self = Self::new(AccountKind::Uninit, ReadOnly, BaseToMagic);
+    pub const Missing: Self = Self::new(AccountKind::Missing, ReadOnly, BaseToMagic);
 
     /// Read-only base mirror, including accounts delegated to another validator.
     pub const Base: Self = Self::new(AccountKind::Regular, ReadOnly, BaseToMagic);
@@ -82,14 +82,16 @@ impl AccountMode {
     pub const Magic: Self = Self::new(AccountKind::Regular, Writable, DataFlow::None);
 
     /// Runtime-maintained state, such as locally generated sysvars.
-    pub const System: Self = Self::new(AccountKind::System, ReadOnly, DataFlow::None);
+    pub const Runtime: Self = Self::new(AccountKind::Runtime, ReadOnly, DataFlow::None);
 
     /// Runtime account whose image is refreshed from base.
-    pub const MirroredSystem: Self = Self::new(AccountKind::System, ReadOnly, BaseToMagic);
+    pub const MirroredRuntime: Self = Self::new(AccountKind::Runtime, ReadOnly, BaseToMagic);
 
     /// Deletion tombstone awaiting physical removal.
     pub const Closed: Self = Self::new(AccountKind::Closed, ReadOnly, DataFlow::None);
+}
 
+impl AccountMode {
     const fn new(kind: AccountKind, access: AccessMode, flow: DataFlow) -> Self {
         Self {
             kind,
@@ -156,15 +158,15 @@ impl AccountMode {
         to_slot: Slot,
     ) -> Result<(), AccountPatchError> {
         let require_newer = match (self, to) {
-            (Self::Uninit, Self::Uninit)
-            | (Self::Base, Self::Base | Self::Uninit)
-            | (Self::System | Self::MirroredSystem, Self::System | Self::MirroredSystem)
+            (Self::Missing, Self::Missing)
+            | (Self::Base, Self::Base | Self::Missing)
+            | (Self::Runtime | Self::MirroredRuntime, Self::Runtime | Self::MirroredRuntime)
             | (Self::Undelegating, Self::Delegated) => true,
             (
-                Self::Uninit,
+                Self::Missing,
                 Self::Base
-                | Self::System
-                | Self::MirroredSystem
+                | Self::Runtime
+                | Self::MirroredRuntime
                 | Self::Delegated
                 | Self::Magic
                 | Self::Closed,
@@ -172,7 +174,7 @@ impl AccountMode {
             | (Self::Base, Self::Delegated | Self::Magic | Self::Closed)
             | (Self::Delegated, Self::Undelegating)
             | (Self::Magic, Self::Closed)
-            | (Self::Undelegating, Self::Base | Self::Uninit | Self::Closed) => false,
+            | (Self::Undelegating, Self::Base | Self::Missing | Self::Closed) => false,
             _ => return Err(AccountPatchError::InvalidModeTransition { from: self, to }),
         };
         if to_slot < from_slot || (require_newer && to_slot == from_slot) {
@@ -184,7 +186,7 @@ impl AccountMode {
 
 impl Default for AccountMode {
     fn default() -> Self {
-        Self::Uninit
+        Self::Missing
     }
 }
 
@@ -198,26 +200,36 @@ impl std::fmt::Debug for AccountMode {
     }
 }
 
-impl From<AccountMode> for [u8; 2] {
+impl From<AccountMode> for u8 {
     fn from(mode: AccountMode) -> Self {
-        [mode.kind as u8, mode.bits]
+        match mode {
+            AccountMode::Missing => 0,
+            AccountMode::Base => 1,
+            AccountMode::Runtime => 2,
+            AccountMode::Delegated => 3,
+            AccountMode::Magic => 4,
+            AccountMode::Undelegating => 5,
+            AccountMode::MirroredRuntime => 6,
+            AccountMode::Closed => 255,
+            _ => unreachable!(),
+        }
     }
 }
 
-impl TryFrom<[u8; 2]> for AccountMode {
+impl TryFrom<u8> for AccountMode {
     type Error = InvalidAccountMode;
 
-    fn try_from(bytes: [u8; 2]) -> Result<Self, Self::Error> {
-        match bytes {
-            [0, 2] => Ok(Self::Uninit),
-            [1, 2] => Ok(Self::Base),
-            [1, 5] => Ok(Self::Delegated),
-            [1, 4] => Ok(Self::Undelegating),
-            [1, 1] => Ok(Self::Magic),
-            [2, 0] => Ok(Self::System),
-            [2, 2] => Ok(Self::MirroredSystem),
-            [255, 0] => Ok(Self::Closed),
-            _ => Err(InvalidAccountMode(bytes)),
+    fn try_from(byte: u8) -> Result<Self, Self::Error> {
+        match byte {
+            0 => Ok(Self::Missing),
+            1 => Ok(Self::Base),
+            2 => Ok(Self::Runtime),
+            3 => Ok(Self::Delegated),
+            4 => Ok(Self::Magic),
+            5 => Ok(Self::Undelegating),
+            6 => Ok(Self::MirroredRuntime),
+            255 => Ok(Self::Closed),
+            _ => Err(InvalidAccountMode(byte)),
         }
     }
 }
@@ -235,29 +247,29 @@ mod codec {
         io::{Reader, Writer},
     };
 
-    // SAFETY: the codec always writes exactly two bytes, without claiming zero-copy eligibility.
+    // SAFETY: the codec always writes exactly one byte, without claiming zero-copy eligibility.
     unsafe impl<C: ConfigCore> SchemaWrite<C> for AccountMode {
         type Src = Self;
-        const TYPE_META: TypeMeta = TypeMeta::Static { size: 2, zero_copy: false };
+        const TYPE_META: TypeMeta = TypeMeta::Static { size: 1, zero_copy: false };
 
         fn size_of(_src: &Self) -> WriteResult<usize> {
-            Ok(2)
+            Ok(1)
         }
 
         fn write(writer: impl Writer, src: &Self) -> WriteResult<()> {
-            <[u8; 2] as SchemaWrite<C>>::write(writer, &(*src).into())
+            <u8 as SchemaWrite<C>>::write(writer, &(*src).into())
         }
     }
 
-    // SAFETY: exactly two bytes are consumed and dst is initialized only after validation succeeds.
+    // SAFETY: exactly one byte is consumed and dst is initialized only after validation succeeds.
     unsafe impl<'de, C: ConfigCore> SchemaRead<'de, C> for AccountMode {
         type Dst = Self;
-        const TYPE_META: TypeMeta = TypeMeta::Static { size: 2, zero_copy: false };
+        const TYPE_META: TypeMeta = TypeMeta::Static { size: 1, zero_copy: false };
 
         fn read(reader: impl Reader<'de>, dst: &mut MaybeUninit<Self>) -> ReadResult<()> {
-            let bytes = <[u8; 2] as SchemaRead<'de, C>>::get(reader)?;
+            let byte = <u8 as SchemaRead<'de, C>>::get(reader)?;
             let mode =
-                AccountMode::try_from(bytes).map_err(|_| invalid_value("invalid account mode"))?;
+                AccountMode::try_from(byte).map_err(|_| invalid_value("invalid account mode"))?;
             dst.write(mode);
             Ok(())
         }

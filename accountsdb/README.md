@@ -7,7 +7,7 @@ lives in memory and can be fetched again.
 
 [Account lifecycle](../solana/account/README.md#account-lifecycle) determines routing:
 Magic, Delegated, and Undelegating are persisted; mirrors are volatile. Closed
-accounts are removed. Reset preserves authoritative and both System modes.
+accounts are removed. Reset preserves authoritative and both Runtime modes.
 
 ## Storage access and writeback
 

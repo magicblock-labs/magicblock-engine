@@ -188,7 +188,7 @@ mod tests {
         let cases = [
             // (target, writable, privileged, accepted)
             (account(AccountMode::Base), true, false, false),
-            (account(AccountMode::MirroredSystem), true, false, false),
+            (account(AccountMode::MirroredRuntime), true, false, false),
             (account(AccountMode::Undelegating), true, false, false),
             (transitioned, true, false, true),
             (closed, true, false, true),
@@ -221,7 +221,7 @@ mod tests {
         let cases = [
             // (payer, privileged, accepted)
             (account(AccountMode::Base), false, false),
-            (account(AccountMode::MirroredSystem), false, false),
+            (account(AccountMode::MirroredRuntime), false, false),
             (account(AccountMode::Undelegating), false, false),
             (account(AccountMode::Delegated), false, true),
         ];

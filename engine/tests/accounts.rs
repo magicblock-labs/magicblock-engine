@@ -357,7 +357,7 @@ async fn account_replacement_slot_ordering() {
         (AccountMode::Delegated, AccountMode::Undelegating, SLOT),
         (AccountMode::Undelegating, AccountMode::Base, SLOT),
         (AccountMode::Undelegating, AccountMode::Delegated, SLOT + 1),
-        (AccountMode::Uninit, AccountMode::Magic, SLOT),
+        (AccountMode::Missing, AccountMode::Magic, SLOT),
         (AccountMode::Base, AccountMode::Magic, SLOT),
     ] {
         let key = Pubkey::new_unique();
@@ -405,8 +405,8 @@ async fn account_replacement_slot_ordering() {
     }
 
     for (from, to, slot) in [
-        (AccountMode::Uninit, AccountMode::Undelegating, SLOT),
-        (AccountMode::System, AccountMode::Base, SLOT),
+        (AccountMode::Missing, AccountMode::Undelegating, SLOT),
+        (AccountMode::Runtime, AccountMode::Base, SLOT),
         (AccountMode::Delegated, AccountMode::Delegated, SLOT + 1),
         (AccountMode::Magic, AccountMode::Magic, SLOT + 1),
         (

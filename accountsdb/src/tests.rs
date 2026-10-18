@@ -193,7 +193,7 @@ fn test_routing_and_persistence_flips() {
     // reset() drops volatile mirror only; persisted state is authoritative.
     let c = Pubkey::new_unique();
     store(&db, c, delegated_account(50, vec![], p).build());
-    let systems = [AccountMode::System, AccountMode::MirroredSystem].map(|mode| {
+    let systems = [AccountMode::Runtime, AccountMode::MirroredRuntime].map(|mode| {
         let key = Pubkey::new_unique();
         store(
             &db,

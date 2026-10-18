@@ -203,7 +203,7 @@ fn rejects_forwarded_magic_root_instructions() {
         }
         assert_eq!(
             ctx.transaction_context.accounts().try_borrow(1).unwrap().mode(),
-            AccountMode::Uninit
+            AccountMode::Missing
         );
     });
 }
