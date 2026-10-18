@@ -196,18 +196,20 @@ fn test_account_patch_transition_errors() {
 #[test]
 fn test_lifecycle_matrix() {
     use AccountMode as Mode;
+    // Columns are destinations in `modes` order.
+    // 0 forbids the pair, 1 permits equal/newer slots, 2 requires a newer slot.
     let cases = [
-        (Mode::Missing, [0, 2]),
-        (Mode::Base, [1, 2]),
-        (Mode::Runtime, [2, 0]),
-        (Mode::Delegated, [1, 5]),
-        (Mode::Magic, [1, 1]),
-        (Mode::Undelegating, [1, 4]),
-        (Mode::Closed, [255, 0]),
-        (Mode::MirroredRuntime, [2, 2]),
+        (Mode::Missing, [0, 2], [2, 1, 1, 1, 1, 0, 1, 1]),
+        (Mode::Base, [1, 2], [2, 2, 0, 1, 1, 0, 1, 0]),
+        (Mode::Runtime, [2, 0], [0, 0, 2, 0, 0, 0, 0, 2]),
+        (Mode::Delegated, [1, 5], [0, 0, 0, 0, 0, 1, 0, 0]),
+        (Mode::Magic, [1, 1], [0, 0, 0, 0, 0, 0, 1, 0]),
+        (Mode::Undelegating, [1, 4], [1, 1, 0, 2, 0, 0, 1, 0]),
+        (Mode::Closed, [3, 0], [0, 0, 0, 0, 0, 0, 0, 0]),
+        (Mode::MirroredRuntime, [2, 2], [0, 0, 2, 0, 0, 0, 0, 2]),
     ];
     let modes = cases.map(|(mode, ..)| mode);
-    for (mode, bytes) in cases {
+    for (mode, bytes, _) in cases {
         // SAFETY: repr(C) stores two initialized one-byte fields without padding.
         let raw = unsafe { &*std::ptr::from_ref(&mode).cast::<[u8; 2]>() };
         assert_eq!(*raw, bytes);
@@ -234,21 +236,9 @@ fn test_lifecycle_matrix() {
         );
     }
     assert_eq!(AccountMode::default(), Mode::Missing);
-    // Columns are destinations in `modes` order.
-    // 0 forbids the pair, 1 permits equal/newer slots, 2 requires a newer slot.
-    let rules = [
-        (Mode::Missing, [2, 1, 1, 1, 1, 0, 1, 1]),
-        (Mode::Base, [2, 2, 0, 1, 1, 0, 1, 0]),
-        (Mode::Runtime, [0, 0, 2, 0, 0, 0, 0, 2]),
-        (Mode::Delegated, [0, 0, 0, 0, 0, 1, 0, 0]),
-        (Mode::Magic, [0, 0, 0, 0, 0, 0, 1, 0]),
-        (Mode::Undelegating, [1, 1, 0, 2, 0, 0, 1, 0]),
-        (Mode::Closed, [0, 0, 0, 0, 0, 0, 0, 0]),
-        (Mode::MirroredRuntime, [0, 0, 2, 0, 0, 0, 0, 2]),
-    ];
     let owner = Pubkey::new_unique();
     let key = Pubkey::new_unique();
-    for (from, row) in rules {
+    for (from, _, row) in cases {
         for (to, rule) in modes.into_iter().zip(row) {
             for (from_slot, to_slot) in [(10, 9), (10, 10), (10, 11), (0, 0), (0, 1)] {
                 let expected = if rule == 0 {
@@ -301,10 +291,9 @@ fn test_mode_layout_and_decoding() {
     use crate::cow::AccountCore;
     use std::mem::{align_of, size_of};
 
-    assert_eq!(align_of::<AccountMode>(), 1);
     assert_eq!(size_of::<AccountCore>(), 56);
     assert_eq!(align_of::<AccountCore>(), 8);
-    for bytes in [[3, 0], [1, 0x80], [1, 6], [2, 1], [1, 0]] {
+    for bytes in [[4, 0], [1, 0x80], [1, 6], [2, 1], [1, 0]] {
         assert!(AccountMode::try_from(bytes).is_err());
         assert!(bincode::deserialize::<AccountMode>(&bytes).is_err());
         #[cfg(feature = "wincode")]

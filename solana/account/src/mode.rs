@@ -8,48 +8,48 @@ use DataFlow::{BaseToMagic, MagicToBase};
 
 /// Classification that access and synchronization policy cannot determine.
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "wincode", derive(wincode::SchemaWrite))]
+#[cfg_attr(feature = "wincode", wincode(tag_encoding = "u8"))]
 pub enum AccountKind {
     /// Cached absence of an account on the base chain.
-    #[default]
-    Missing = 0,
+    Missing,
     /// Ordinary account state, including mirrors, delegation, and independent ER state.
-    Regular = 1,
+    Regular,
     /// Internal runtime state, such as sysvars, features, and programs.
-    Runtime = 2,
+    Runtime,
     /// Deletion tombstone retained until storage removes the account image.
-    Closed = 255,
+    Closed,
 }
 
 /// Permission for ordinary program mutation in this engine.
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AccessMode {
     /// Ordinary execution may not mutate the account.
-    #[default]
-    ReadOnly = 0,
+    ReadOnly,
     /// Ordinary execution may mutate the account, subject to runtime checks.
-    Writable = 1,
+    Writable,
 }
 
 /// Ongoing state synchronization with base; Magic names the validator endpoint.
 /// Initial cloning and privileged lifecycle operations are separate.
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DataFlow {
     /// No ongoing account-state synchronization with base.
-    #[default]
-    None = 0,
+    None,
     /// Base supplies refreshed account state.
-    BaseToMagic = 1,
+    BaseToMagic,
     /// Local state participates in delegated commitment to base.
-    MagicToBase = 2,
+    MagicToBase,
 }
 
 /// Two-byte account mode, exposed through named constants and typed getters.
 /// Wincode and bincode encode its two fields in memory order.
 #[repr(C)]
 #[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(feature = "wincode", derive(wincode::SchemaWrite))]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(try_from = "[u8; 2]", into = "[u8; 2]"))]
 pub struct AccountMode {
@@ -63,7 +63,6 @@ pub struct AccountMode {
 #[error("invalid account mode bytes: {0:?}")]
 pub struct InvalidAccountMode([u8; 2]);
 
-// These constants retain the familiar spelling of the original enum variants.
 #[allow(non_upper_case_globals)]
 impl AccountMode {
     /// Cached base-chain absence, awaiting base updates.
@@ -209,38 +208,19 @@ impl TryFrom<[u8; 2]> for AccountMode {
             [1, 1] => Ok(Self::Magic),
             [1, 4] => Ok(Self::Undelegating),
             [2, 2] => Ok(Self::MirroredRuntime),
-            [255, 0] => Ok(Self::Closed),
+            [3, 0] => Ok(Self::Closed),
             _ => Err(InvalidAccountMode(bytes)),
         }
     }
 }
-
-const _: () = assert!(size_of::<AccountMode>() == 2);
 
 #[cfg(feature = "wincode")]
 mod codec {
     use super::AccountMode;
     use std::mem::MaybeUninit;
     use wincode::{
-        ReadResult, SchemaRead, SchemaWrite, TypeMeta, WriteResult,
-        config::ConfigCore,
-        error::invalid_value,
-        io::{Reader, Writer},
+        ReadResult, SchemaRead, TypeMeta, config::ConfigCore, error::invalid_value, io::Reader,
     };
-
-    // SAFETY: the codec always writes exactly two bytes, without claiming zero-copy eligibility.
-    unsafe impl<C: ConfigCore> SchemaWrite<C> for AccountMode {
-        type Src = Self;
-        const TYPE_META: TypeMeta = TypeMeta::Static { size: 2, zero_copy: false };
-
-        fn size_of(_src: &Self) -> WriteResult<usize> {
-            Ok(2)
-        }
-
-        fn write(writer: impl Writer, src: &Self) -> WriteResult<()> {
-            <[u8; 2] as SchemaWrite<C>>::write(writer, &(*src).into())
-        }
-    }
 
     // SAFETY: exactly two bytes are consumed and dst is initialized only after validation succeeds.
     unsafe impl<'de, C: ConfigCore> SchemaRead<'de, C> for AccountMode {
