@@ -192,30 +192,35 @@ fn test_account_patch_transition_errors() {
 
 /// Proves every lifecycle pair enforces slot ordering identically for owned and
 /// borrowed accounts, preserving rejected state and marking only accepted changes.
-/// Also pins mode properties and one-byte wire round-tripping.
+/// Also pins mode properties and identical two-byte memory and wire representations.
 #[test]
 fn test_lifecycle_matrix() {
     use AccountMode as Mode;
     let cases = [
-        (Mode::Missing, 0, [0, 2]),
-        (Mode::Base, 1, [1, 2]),
-        (Mode::Runtime, 2, [2, 0]),
-        (Mode::Delegated, 3, [1, 5]),
-        (Mode::Magic, 4, [1, 1]),
-        (Mode::Undelegating, 5, [1, 4]),
-        (Mode::Closed, 255, [255, 0]),
-        (Mode::MirroredRuntime, 6, [2, 2]),
+        (Mode::Missing, [0, 2]),
+        (Mode::Base, [1, 2]),
+        (Mode::Runtime, [2, 0]),
+        (Mode::Delegated, [1, 5]),
+        (Mode::Magic, [1, 1]),
+        (Mode::Undelegating, [1, 4]),
+        (Mode::Closed, [255, 0]),
+        (Mode::MirroredRuntime, [2, 2]),
     ];
     let modes = cases.map(|(mode, ..)| mode);
-    for (mode, byte, [kind, policy]) in cases {
-        assert_eq!(u8::from(mode), byte);
-        assert_eq!(bincode::serialize(&mode).unwrap(), [byte]);
-        assert_eq!(bincode::deserialize::<AccountMode>(&[byte]).unwrap(), mode);
+    for (mode, bytes) in cases {
+        // SAFETY: repr(C) stores two initialized one-byte fields without padding.
+        let raw = unsafe { &*std::ptr::from_ref(&mode).cast::<[u8; 2]>() };
+        assert_eq!(*raw, bytes);
+        assert_eq!(<[u8; 2]>::from(mode), bytes);
+        assert_eq!(AccountMode::try_from(bytes).unwrap(), mode);
+        assert_eq!(bincode::serialize(&mode).unwrap(), bytes);
+        assert_eq!(bincode::deserialize::<AccountMode>(&bytes).unwrap(), mode);
         #[cfg(feature = "wincode")]
         {
-            assert_eq!(wincode::serialize(&mode).unwrap(), [byte]);
-            assert_eq!(wincode::deserialize::<AccountMode>(&[byte]).unwrap(), mode);
+            assert_eq!(wincode::serialize(&mode).unwrap(), bytes);
+            assert_eq!(wincode::deserialize::<AccountMode>(&bytes).unwrap(), mode);
         }
+        let [kind, policy] = bytes;
         assert_eq!(mode.kind() as u8, kind);
         assert_eq!(mode.access() as u8, policy & 1);
         assert_eq!(mode.data_flow() as u8, policy >> 1);
@@ -299,12 +304,15 @@ fn test_mode_layout_and_decoding() {
     assert_eq!(align_of::<AccountMode>(), 1);
     assert_eq!(size_of::<AccountCore>(), 56);
     assert_eq!(align_of::<AccountCore>(), 8);
-    for byte in 7..u8::MAX {
-        assert!(AccountMode::try_from(byte).is_err());
-        assert!(bincode::deserialize::<AccountMode>(&[byte]).is_err());
+    for bytes in [[3, 0], [1, 0x80], [1, 6], [2, 1], [1, 0]] {
+        assert!(AccountMode::try_from(bytes).is_err());
+        assert!(bincode::deserialize::<AccountMode>(&bytes).is_err());
         #[cfg(feature = "wincode")]
-        assert!(wincode::deserialize::<AccountMode>(&[byte]).is_err());
+        assert!(wincode::deserialize::<AccountMode>(&bytes).is_err());
     }
+    assert!(bincode::deserialize::<AccountMode>(&[1]).is_err());
+    #[cfg(feature = "wincode")]
+    assert!(wincode::deserialize::<AccountMode>(&[1]).is_err());
 }
 
 #[test]

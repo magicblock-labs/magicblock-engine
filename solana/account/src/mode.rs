@@ -47,20 +47,21 @@ pub enum DataFlow {
 }
 
 /// Two-byte account mode, exposed through named constants and typed getters.
+/// Wincode and bincode encode its two fields in memory order.
 #[repr(C)]
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
-#[cfg_attr(feature = "serde", serde(try_from = "u8", into = "u8"))]
+#[cfg_attr(feature = "serde", serde(try_from = "[u8; 2]", into = "[u8; 2]"))]
 pub struct AccountMode {
     kind: AccountKind,
     /// Bit 0 is access; bits 1–2 are data flow. Other bits are reserved.
     bits: u8,
 }
 
-/// A byte that does not encode a supported account mode.
+/// A byte pair that does not encode a supported account mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("invalid account mode byte: {0}")]
-pub struct InvalidAccountMode(u8);
+#[error("invalid account mode bytes: {0:?}")]
+pub struct InvalidAccountMode([u8; 2]);
 
 // These constants retain the familiar spelling of the original enum variants.
 #[allow(non_upper_case_globals)]
@@ -190,36 +191,26 @@ impl std::fmt::Debug for AccountMode {
     }
 }
 
-impl From<AccountMode> for u8 {
+impl From<AccountMode> for [u8; 2] {
     fn from(mode: AccountMode) -> Self {
-        match mode {
-            AccountMode::Missing => 0,
-            AccountMode::Base => 1,
-            AccountMode::Runtime => 2,
-            AccountMode::Delegated => 3,
-            AccountMode::Magic => 4,
-            AccountMode::Undelegating => 5,
-            AccountMode::MirroredRuntime => 6,
-            AccountMode::Closed => 255,
-            _ => unreachable!(),
-        }
+        [mode.kind as u8, mode.bits]
     }
 }
 
-impl TryFrom<u8> for AccountMode {
+impl TryFrom<[u8; 2]> for AccountMode {
     type Error = InvalidAccountMode;
 
-    fn try_from(byte: u8) -> Result<Self, Self::Error> {
-        match byte {
-            0 => Ok(Self::Missing),
-            1 => Ok(Self::Base),
-            2 => Ok(Self::Runtime),
-            3 => Ok(Self::Delegated),
-            4 => Ok(Self::Magic),
-            5 => Ok(Self::Undelegating),
-            6 => Ok(Self::MirroredRuntime),
-            255 => Ok(Self::Closed),
-            _ => Err(InvalidAccountMode(byte)),
+    fn try_from(bytes: [u8; 2]) -> Result<Self, Self::Error> {
+        match bytes {
+            [0, 2] => Ok(Self::Missing),
+            [1, 2] => Ok(Self::Base),
+            [2, 0] => Ok(Self::Runtime),
+            [1, 5] => Ok(Self::Delegated),
+            [1, 1] => Ok(Self::Magic),
+            [1, 4] => Ok(Self::Undelegating),
+            [2, 2] => Ok(Self::MirroredRuntime),
+            [255, 0] => Ok(Self::Closed),
+            _ => Err(InvalidAccountMode(bytes)),
         }
     }
 }
@@ -237,29 +228,29 @@ mod codec {
         io::{Reader, Writer},
     };
 
-    // SAFETY: the codec always writes exactly one byte, without claiming zero-copy eligibility.
+    // SAFETY: the codec always writes exactly two bytes, without claiming zero-copy eligibility.
     unsafe impl<C: ConfigCore> SchemaWrite<C> for AccountMode {
         type Src = Self;
-        const TYPE_META: TypeMeta = TypeMeta::Static { size: 1, zero_copy: false };
+        const TYPE_META: TypeMeta = TypeMeta::Static { size: 2, zero_copy: false };
 
         fn size_of(_src: &Self) -> WriteResult<usize> {
-            Ok(1)
+            Ok(2)
         }
 
         fn write(writer: impl Writer, src: &Self) -> WriteResult<()> {
-            <u8 as SchemaWrite<C>>::write(writer, &(*src).into())
+            <[u8; 2] as SchemaWrite<C>>::write(writer, &(*src).into())
         }
     }
 
-    // SAFETY: exactly one byte is consumed and dst is initialized only after validation succeeds.
+    // SAFETY: exactly two bytes are consumed and dst is initialized only after validation succeeds.
     unsafe impl<'de, C: ConfigCore> SchemaRead<'de, C> for AccountMode {
         type Dst = Self;
-        const TYPE_META: TypeMeta = TypeMeta::Static { size: 1, zero_copy: false };
+        const TYPE_META: TypeMeta = TypeMeta::Static { size: 2, zero_copy: false };
 
         fn read(reader: impl Reader<'de>, dst: &mut MaybeUninit<Self>) -> ReadResult<()> {
-            let byte = <u8 as SchemaRead<'de, C>>::get(reader)?;
+            let bytes = <[u8; 2] as SchemaRead<'de, C>>::get(reader)?;
             let mode =
-                AccountMode::try_from(byte).map_err(|_| invalid_value("invalid account mode"))?;
+                AccountMode::try_from(bytes).map_err(|_| invalid_value("invalid account mode"))?;
             dst.write(mode);
             Ok(())
         }

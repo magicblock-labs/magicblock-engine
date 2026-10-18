@@ -47,7 +47,7 @@ its key, regardless of token balance. The host validates creation and closure
 eligibility, including application-specific token rules. [Engine's import path](../../engine/README.md#account-replacement)
 owns observation-based deduplication and the evidence required for redelegation.
 
-Modes serialize as one byte; unsupported codes are rejected.
+Binary mode encoding matches its two-byte memory layout; unsupported pairs are rejected.
 
 ## Borrowed storage
 
