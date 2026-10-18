@@ -90,7 +90,7 @@ impl AccountAccessor<'_> {
         self.execute(&[instruction], None).await
     }
 
-    /// Keeps this accessor only for a present, non-authoritative account.
+    /// Keeps this accessor only for a present account that does not require persistence.
     pub fn into_eviction(self) -> Option<Self> {
         self.evictable().then_some(self)
     }

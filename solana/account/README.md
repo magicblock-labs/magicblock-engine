@@ -25,10 +25,10 @@ feature, or precompile state (`Runtime`).
 `Runtime` has no base sync; `MirroredRuntime` is refreshed from base. Both are
 read-only runtime state and survive mirror reset.
 
-Privileged replacement validates mode and source slot together. Authoritative
-state can't be refreshed in the same mode, even at a newer slot; otherwise a later
-external image could overwrite local execution. Ordinary transaction mutations
-aren't replacements and don't follow that restriction.
+Privileged replacement validates mode and source slot together. Delegated, Magic,
+and Undelegating state can't be refreshed in the same mode, even at a newer slot;
+otherwise a later external image could overwrite local execution. Ordinary
+transaction mutations aren't replacements and don't follow that restriction.
 
 | From | Allowed at the same or a newer slot | Requires a strictly newer slot |
 | :-- | :-- | :-- |

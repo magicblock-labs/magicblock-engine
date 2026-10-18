@@ -45,6 +45,15 @@ pub enum DataFlow {
     MagicToBase,
 }
 
+/// Side that supplies or maintains the account image.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StateAuthority {
+    /// The base chain supplies the account state.
+    Base,
+    /// This validator maintains the account state, including local runtime state.
+    Magic,
+}
+
 /// Two-byte account mode, exposed through named constants and typed getters.
 /// Wincode and bincode encode its two fields in memory order.
 #[repr(C)]
@@ -127,12 +136,19 @@ impl AccountMode {
         matches!(self.access(), Writable)
     }
 
-    /// Returns whether the engine must retain and protect the local state.
-    pub const fn is_authoritative(self) -> bool {
-        matches!(
-            (self.kind, self.data_flow()),
-            (AccountKind::Regular, DataFlow::None | MagicToBase)
-        )
+    /// Returns who maintains the account image, or `None` for missing and closed accounts.
+    pub const fn authority(self) -> Option<StateAuthority> {
+        match (self.kind, self.data_flow()) {
+            (AccountKind::Missing | AccountKind::Closed, _) => None,
+            (_, BaseToMagic) => Some(StateAuthority::Base),
+            (_, DataFlow::None | MagicToBase) => Some(StateAuthority::Magic),
+        }
+    }
+
+    /// Returns whether local state requires persistence. Runtime state is managed separately.
+    pub const fn requires_persistence(self) -> bool {
+        matches!(self.kind, AccountKind::Regular)
+            && matches!(self.authority(), Some(StateAuthority::Magic))
     }
 
     /// Returns whether a privileged operation may apply `to` at `to_slot`.
