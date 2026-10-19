@@ -299,12 +299,12 @@ fn test_mode_layout_and_decoding() {
     assert_eq!(offset_of!(AccountCore, flags), 50);
 
     let cases = [
-        (Mode::Missing, [0, 2], None),
-        (Mode::Mirrored, [1, 2], Some(Base)),
+        (Mode::Missing, [0, 4], None),
+        (Mode::Mirrored, [1, 4], Some(Base)),
         (Mode::Runtime, [2, 0], Some(Er)),
-        (Mode::Delegated, [1, 5], Some(Er)),
+        (Mode::Delegated, [1, 9], Some(Er)),
         (Mode::Magic, [1, 1], Some(Er)),
-        (Mode::Undelegating, [1, 4], Some(Er)),
+        (Mode::Undelegating, [1, 8], Some(Er)),
         (Mode::Closed, [3, 0], None),
     ];
     for (mode, bytes, authority) in cases {
@@ -322,8 +322,8 @@ fn test_mode_layout_and_decoding() {
         }
         let [kind, policy] = bytes;
         assert_eq!(mode.kind() as u8, kind);
-        assert_eq!(mode.access() as u8, policy & 1);
-        assert_eq!(mode.data_flow() as u8, policy >> 1);
+        assert_eq!(mode.access() as u8, policy & 3);
+        assert_eq!(mode.data_flow() as u8, policy >> 2);
         assert_eq!(mode.authority(), authority);
         assert_eq!(
             mode.is_writable(),
@@ -336,7 +336,7 @@ fn test_mode_layout_and_decoding() {
     }
     assert_eq!(Mode::default(), Mode::Missing);
 
-    for bytes in [[4, 0], [1, 0x80], [1, 6], [2, 1], [2, 2], [1, 0]] {
+    for bytes in [[4, 0], [1, 0x10], [1, 2], [1, 3], [1, 12], [2, 1], [1, 0]] {
         assert!(Mode::try_from(bytes).is_err());
         assert!(bincode::deserialize::<Mode>(&bytes).is_err());
         #[cfg(feature = "wincode")]
