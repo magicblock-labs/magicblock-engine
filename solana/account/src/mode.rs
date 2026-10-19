@@ -6,6 +6,14 @@ use crate::AccountPatchError;
 use AccessMode::{ReadOnly, Writable};
 use AccountKind::*;
 
+const KIND_OFFSET: u32 = 0;
+const ACCESS_OFFSET: u32 = 8;
+const FLOW_OFFSET: u32 = 10;
+
+const KIND_MASK: u16 = 0x00FF << KIND_OFFSET;
+const ACCESS_MASK: u16 = 0x0003 << ACCESS_OFFSET;
+const FLOW_MASK: u16 = 0x0003 << FLOW_OFFSET;
+
 /// Classification that access and synchronization policy cannot determine.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -20,11 +28,21 @@ pub(crate) enum AccountKind {
     Closed,
 }
 
-impl AccountKind {
-    const fn encode(self, access: AccessMode, flow: DataFlow) -> u16 {
-        // Keep raw mode bytes ordered as [kind, access | flow << 1].
-        u16::from_ne_bytes([self as u8, (access as u8) | ((flow as u8) << 1)])
-    }
+/// Encodes kind, access, and data flow into a 16-bit mode discriminant.
+///
+/// | Field    | Bit positions | Capacity   |
+/// | -------- | ------------- | ---------- |
+/// | Kind     | 0–7           | 256 values |
+/// | Access   | 8–9           | 4 values   |
+/// | Flow     | 10–11         | 4 values   |
+/// | Reserved | 12–15         | 16 values  |
+///
+/// Reserved bits must be zero.
+/// Little-endian bytes are `[kind, access | (flow << 2)]`.
+const fn encode(kind: AccountKind, access: AccessMode, flow: DataFlow) -> u16 {
+    ((kind as u16) << KIND_OFFSET)
+        | ((access as u16) << ACCESS_OFFSET)
+        | ((flow as u16) << FLOW_OFFSET)
 }
 
 /// Permission for ordinary program mutation in this engine.
@@ -68,26 +86,26 @@ pub(crate) enum StateAuthority {
 pub enum AccountMode {
     /// Cached base-chain absence, awaiting base updates.
     #[default]
-    Missing = Missing.encode(ReadOnly, DataFlow::BaseToEr),
+    Missing = encode(Missing, ReadOnly, DataFlow::BaseToEr),
 
     /// Read-only base mirror, including accounts delegated to another validator.
-    Mirrored = Regular.encode(ReadOnly, DataFlow::BaseToEr),
+    Mirrored = encode(Regular, ReadOnly, DataFlow::BaseToEr),
 
     /// Active local delegation. The host establishes authority and the commit target.
-    Delegated = Regular.encode(Writable, DataFlow::ErToBase),
+    Delegated = encode(Regular, Writable, DataFlow::ErToBase),
 
     /// Protected local state awaiting completion of a delegation handoff.
-    Undelegating = Regular.encode(ReadOnly, DataFlow::ErToBase),
+    Undelegating = encode(Regular, ReadOnly, DataFlow::ErToBase),
 
     /// Writable ER state without direct delegated commitment to base.
     /// A counterpart at the same address may independently exist on base.
-    Magic = Regular.encode(Writable, DataFlow::NoSync),
+    Magic = encode(Regular, Writable, DataFlow::NoSync),
 
     /// Runtime-maintained state, such as locally generated sysvars.
-    Runtime = Runtime.encode(ReadOnly, DataFlow::NoSync),
+    Runtime = encode(Runtime, ReadOnly, DataFlow::NoSync),
 
     /// Deletion tombstone awaiting physical removal.
-    Closed = Closed.encode(ReadOnly, DataFlow::NoSync),
+    Closed = encode(Closed, ReadOnly, DataFlow::NoSync),
 }
 
 /// A byte pair that does not encode a supported account mode.
@@ -99,7 +117,7 @@ pub struct InvalidAccountMode([u8; 2]);
 impl AccountMode {
     /// Returns the remaining runtime/lifecycle classification.
     pub(crate) const fn kind(self) -> AccountKind {
-        match (self as u16).to_ne_bytes()[0] {
+        match ((self as u16) & KIND_MASK) >> KIND_OFFSET {
             0 => AccountKind::Missing,
             1 => AccountKind::Regular,
             2 => AccountKind::Runtime,
@@ -110,15 +128,16 @@ impl AccountMode {
 
     /// Returns ordinary local write permission.
     pub(crate) const fn access(self) -> AccessMode {
-        match (self as u16).to_ne_bytes()[1] & 1 {
+        match ((self as u16) & ACCESS_MASK) >> ACCESS_OFFSET {
             0 => ReadOnly,
-            _ => Writable,
+            1 => Writable,
+            _ => unreachable!(),
         }
     }
 
     /// Returns the ongoing account-state synchronization policy.
     pub(crate) const fn data_flow(self) -> DataFlow {
-        match ((self as u16).to_ne_bytes()[1] >> 1) & 3 {
+        match ((self as u16) & FLOW_MASK) >> FLOW_OFFSET {
             0 => DataFlow::NoSync,
             1 => DataFlow::BaseToEr,
             2 => DataFlow::ErToBase,
@@ -209,7 +228,7 @@ impl AccountMode {
 
 impl From<AccountMode> for [u8; 2] {
     fn from(mode: AccountMode) -> Self {
-        (mode as u16).to_ne_bytes()
+        (mode as u16).to_le_bytes()
     }
 }
 
@@ -218,12 +237,12 @@ impl TryFrom<[u8; 2]> for AccountMode {
 
     fn try_from(bytes: [u8; 2]) -> Result<Self, Self::Error> {
         match bytes {
-            [0, 2] => Ok(Self::Missing),
-            [1, 2] => Ok(Self::Mirrored),
+            [0, 4] => Ok(Self::Missing),
+            [1, 4] => Ok(Self::Mirrored),
             [2, 0] => Ok(Self::Runtime),
-            [1, 5] => Ok(Self::Delegated),
+            [1, 9] => Ok(Self::Delegated),
             [1, 1] => Ok(Self::Magic),
-            [1, 4] => Ok(Self::Undelegating),
+            [1, 8] => Ok(Self::Undelegating),
             [3, 0] => Ok(Self::Closed),
             _ => Err(InvalidAccountMode(bytes)),
         }
