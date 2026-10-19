@@ -9,7 +9,7 @@ use AccountKind::*;
 /// Classification that access and synchronization policy cannot determine.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AccountKind {
+pub(crate) enum AccountKind {
     /// Cached absence of an account on the base chain.
     Missing,
     /// Ordinary account state, including mirrors, delegation, and independent ER state.
@@ -30,33 +30,33 @@ impl AccountKind {
 /// Permission for ordinary program mutation in this engine.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AccessMode {
+pub(crate) enum AccessMode {
     /// Ordinary execution may not mutate the account.
     ReadOnly,
     /// Ordinary execution may mutate the account, subject to runtime checks.
     Writable,
 }
 
-/// Ongoing state synchronization with base; Magic names the validator endpoint.
+/// Ongoing state synchronization between base and this ER.
 /// Initial cloning and privileged lifecycle operations are separate.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DataFlow {
+pub(crate) enum DataFlow {
     /// No ongoing account-state synchronization with base.
     NoSync,
     /// Base supplies refreshed account state.
-    BaseToMagic,
+    BaseToEr,
     /// Local state participates in delegated commitment to base.
-    MagicToBase,
+    ErToBase,
 }
 
 /// Side that supplies or maintains the account image.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum StateAuthority {
+pub(crate) enum StateAuthority {
     /// The base chain supplies the account state.
     Base,
-    /// This validator maintains the account state, including local runtime state.
-    Magic,
+    /// This ER maintains the account state.
+    Er,
 }
 
 /// Two-byte account mode whose variants declare kind, access, and synchronization policy.
@@ -68,16 +68,16 @@ pub enum StateAuthority {
 pub enum AccountMode {
     /// Cached base-chain absence, awaiting base updates.
     #[default]
-    Missing = Missing.encode(ReadOnly, DataFlow::BaseToMagic),
+    Missing = Missing.encode(ReadOnly, DataFlow::BaseToEr),
 
     /// Read-only base mirror, including accounts delegated to another validator.
-    Base = Regular.encode(ReadOnly, DataFlow::BaseToMagic),
+    Mirrored = Regular.encode(ReadOnly, DataFlow::BaseToEr),
 
     /// Active local delegation. The host establishes authority and the commit target.
-    Delegated = Regular.encode(Writable, DataFlow::MagicToBase),
+    Delegated = Regular.encode(Writable, DataFlow::ErToBase),
 
     /// Protected local state awaiting completion of a delegation handoff.
-    Undelegating = Regular.encode(ReadOnly, DataFlow::MagicToBase),
+    Undelegating = Regular.encode(ReadOnly, DataFlow::ErToBase),
 
     /// Writable ER state without direct delegated commitment to base.
     /// A counterpart at the same address may independently exist on base.
@@ -85,9 +85,6 @@ pub enum AccountMode {
 
     /// Runtime-maintained state, such as locally generated sysvars.
     Runtime = Runtime.encode(ReadOnly, DataFlow::NoSync),
-
-    /// Runtime account whose image is refreshed from base.
-    MirroredRuntime = Runtime.encode(ReadOnly, DataFlow::BaseToMagic),
 
     /// Deletion tombstone awaiting physical removal.
     Closed = Closed.encode(ReadOnly, DataFlow::NoSync),
@@ -101,7 +98,7 @@ pub struct InvalidAccountMode([u8; 2]);
 #[allow(unused_qualifications)]
 impl AccountMode {
     /// Returns the remaining runtime/lifecycle classification.
-    pub const fn kind(self) -> AccountKind {
+    pub(crate) const fn kind(self) -> AccountKind {
         match (self as u16).to_ne_bytes()[0] {
             0 => AccountKind::Missing,
             1 => AccountKind::Regular,
@@ -112,7 +109,7 @@ impl AccountMode {
     }
 
     /// Returns ordinary local write permission.
-    pub const fn access(self) -> AccessMode {
+    pub(crate) const fn access(self) -> AccessMode {
         match (self as u16).to_ne_bytes()[1] & 1 {
             0 => ReadOnly,
             _ => Writable,
@@ -120,11 +117,11 @@ impl AccountMode {
     }
 
     /// Returns the ongoing account-state synchronization policy.
-    pub const fn data_flow(self) -> DataFlow {
+    pub(crate) const fn data_flow(self) -> DataFlow {
         match ((self as u16).to_ne_bytes()[1] >> 1) & 3 {
             0 => DataFlow::NoSync,
-            1 => DataFlow::BaseToMagic,
-            2 => DataFlow::MagicToBase,
+            1 => DataFlow::BaseToEr,
+            2 => DataFlow::ErToBase,
             _ => unreachable!(),
         }
     }
@@ -135,23 +132,18 @@ impl AccountMode {
     }
 
     /// Returns who maintains the account image, or `None` for missing and closed accounts.
-    pub const fn authority(self) -> Option<StateAuthority> {
+    pub(crate) const fn authority(self) -> Option<StateAuthority> {
         match (self.kind(), self.data_flow()) {
             (AccountKind::Missing | AccountKind::Closed, _) => None,
-            (_, DataFlow::BaseToMagic) => Some(StateAuthority::Base),
-            (_, DataFlow::NoSync | DataFlow::MagicToBase) => Some(StateAuthority::Magic),
+            (_, DataFlow::BaseToEr) => Some(StateAuthority::Base),
+            (_, DataFlow::NoSync | DataFlow::ErToBase) => Some(StateAuthority::Er),
         }
     }
 
-    /// Returns whether local state requires persistence. Runtime state is managed separately.
+    /// Returns whether local state requires persistence.
     pub const fn requires_persistence(self) -> bool {
         matches!(self.kind(), AccountKind::Regular)
-            && matches!(self.authority(), Some(StateAuthority::Magic))
-    }
-
-    /// Returns whether a privileged operation may apply `to` at `to_slot`.
-    pub fn allows_transition(self, to: Self, from_slot: Slot, to_slot: Slot) -> bool {
-        self.validate_transition(to, from_slot, to_slot).is_ok()
+            && matches!(self.authority(), Some(StateAuthority::Er))
     }
 
     /// Validates lifecycle eligibility before slot freshness.
@@ -161,27 +153,54 @@ impl AccountMode {
         from_slot: Slot,
         to_slot: Slot,
     ) -> Result<(), AccountPatchError> {
-        let require_newer = match (self, to) {
-            (Self::Missing, Self::Missing)
-            | (Self::Base, Self::Base | Self::Missing)
-            | (Self::Runtime | Self::MirroredRuntime, Self::Runtime | Self::MirroredRuntime)
-            | (Self::Undelegating, Self::Delegated) => true,
-            (
-                Self::Missing,
-                Self::Base
-                | Self::Runtime
-                | Self::MirroredRuntime
-                | Self::Delegated
-                | Self::Magic
-                | Self::Closed,
-            )
-            | (Self::Base, Self::Delegated | Self::Magic | Self::Closed)
-            | (Self::Delegated, Self::Undelegating)
-            | (Self::Magic, Self::Closed)
-            | (Self::Undelegating, Self::Base | Self::Missing | Self::Closed) => false,
-            _ => return Err(AccountPatchError::InvalidModeTransition { from: self, to }),
+        use AccountMode::*;
+
+        enum TransitionRule {
+            Forbidden,
+            /// The lifecycle change may use the current image's slot.
+            SameOrNewer,
+            /// A fresh observation is required, not another update at the same slot.
+            Newer,
+        }
+        use TransitionRule::*;
+
+        let rule = match self {
+            Missing => match to {
+                Missing => Newer,
+                Mirrored | Runtime | Delegated | Magic | Closed => SameOrNewer,
+                Undelegating => Forbidden,
+            },
+            Mirrored => match to {
+                Missing | Mirrored => Newer,
+                Delegated | Magic | Closed => SameOrNewer,
+                Runtime | Undelegating => Forbidden,
+            },
+            Runtime => match to {
+                Runtime => Newer,
+                Missing | Mirrored | Delegated | Magic | Undelegating | Closed => Forbidden,
+            },
+            Delegated => match to {
+                Undelegating => SameOrNewer,
+                Missing | Mirrored | Runtime | Delegated | Magic | Closed => Forbidden,
+            },
+            Magic => match to {
+                Closed => SameOrNewer,
+                Missing | Mirrored | Runtime | Delegated | Magic | Undelegating => Forbidden,
+            },
+            Undelegating => match to {
+                Missing | Mirrored | Closed => SameOrNewer,
+                Delegated => Newer,
+                Runtime | Magic | Undelegating => Forbidden,
+            },
+            Closed => Forbidden,
         };
-        if to_slot < from_slot || (require_newer && to_slot == from_slot) {
+
+        let valid = match rule {
+            Forbidden => return Err(AccountPatchError::InvalidModeTransition { from: self, to }),
+            SameOrNewer => to_slot >= from_slot,
+            Newer => to_slot > from_slot,
+        };
+        if !valid {
             return Err(AccountPatchError::InvalidSlotTransition { from: from_slot, to: to_slot });
         }
         Ok(())
@@ -200,12 +219,11 @@ impl TryFrom<[u8; 2]> for AccountMode {
     fn try_from(bytes: [u8; 2]) -> Result<Self, Self::Error> {
         match bytes {
             [0, 2] => Ok(Self::Missing),
-            [1, 2] => Ok(Self::Base),
+            [1, 2] => Ok(Self::Mirrored),
             [2, 0] => Ok(Self::Runtime),
             [1, 5] => Ok(Self::Delegated),
             [1, 1] => Ok(Self::Magic),
             [1, 4] => Ok(Self::Undelegating),
-            [2, 2] => Ok(Self::MirroredRuntime),
             [3, 0] => Ok(Self::Closed),
             _ => Err(InvalidAccountMode(bytes)),
         }

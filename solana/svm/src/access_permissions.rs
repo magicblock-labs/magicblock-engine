@@ -171,30 +171,25 @@ mod tests {
         );
     }
 
+    /// Proves immutable writes require privilege or a legal lifecycle transition.
     #[test]
     fn writable_account_guard() {
         let mut transitioned = account(AccountMode::Delegated);
-        let transitioned_slot = transitioned.slot();
         transitioned
-            .set_lifecycle(AccountMode::Undelegating, transitioned_slot)
+            .set_lifecycle(AccountMode::Undelegating, transitioned.slot())
             .unwrap();
         let mut closed = account(AccountMode::Magic);
-        let closed_slot = closed.slot();
-        closed.set_lifecycle(AccountMode::Closed, closed_slot).unwrap();
+        closed.set_lifecycle(AccountMode::Closed, closed.slot()).unwrap();
 
-        // A dirty, writable, immutable operand is rejected — unless the tx is
-        // privileged or it legally entered a transaction-final mode. Mutable or
-        // message-read-only operands are always fine.
         let cases = [
             // (target, writable, privileged, accepted)
-            (account(AccountMode::Base), true, false, false),
-            (account(AccountMode::MirroredRuntime), true, false, false),
+            (account(AccountMode::Mirrored), true, false, false),
             (account(AccountMode::Undelegating), true, false, false),
             (transitioned, true, false, true),
             (closed, true, false, true),
             (account(AccountMode::Delegated), true, false, true),
-            (account(AccountMode::Base), false, false, true), // read-only in the message
-            (account(AccountMode::Base), true, true, true),   // MagicRoot bypass
+            (account(AccountMode::Mirrored), false, false, true), // read-only in the message
+            (account(AccountMode::Mirrored), true, true, true),   // MagicRoot bypass
         ];
         for (i, (target, writable, privileged, accepted)) in cases.into_iter().enumerate() {
             let (verdict, executed) = run(
@@ -214,29 +209,26 @@ mod tests {
         }
     }
 
+    /// Proves a dirty fee payer must permit writeback.
     #[test]
     fn fee_payer_guard() {
-        // A dirty immutable fee payer is rejected; a mutable
-        // payer is always accepted.
         let cases = [
-            // (payer, privileged, accepted)
-            (account(AccountMode::Base), false, false),
-            (account(AccountMode::MirroredRuntime), false, false),
-            (account(AccountMode::Undelegating), false, false),
-            (account(AccountMode::Delegated), false, true),
+            (AccountMode::Mirrored, false),
+            (AccountMode::Undelegating, false),
+            (AccountMode::Delegated, true),
         ];
-        for (i, (payer, privileged, accepted)) in cases.into_iter().enumerate() {
+        for (mode, accepted) in cases {
             let (verdict, executed) = run(
-                payer,
+                account(mode),
                 AccountSharedData::default(),
                 false,
-                privileged,
+                false,
                 Ok(()),
             );
-            assert_eq!(verdict, accepted, "case {i}");
+            assert_eq!(verdict, accepted, "{mode:?}");
             let expected =
                 if accepted { Ok(()) } else { Err(TransactionError::InvalidAccountForFee) };
-            assert_eq!(executed.execution_details.status, expected, "case {i}");
+            assert_eq!(executed.execution_details.status, expected, "{mode:?}");
             if !accepted {
                 assert_logged(&executed, "Feepayer account");
             }
@@ -249,7 +241,7 @@ mod tests {
         // rewrite the original error into an access error.
         let (verdict, failed) = run(
             AccountSharedData::default(),
-            account(AccountMode::Base),
+            account(AccountMode::Mirrored),
             true,
             false,
             Err(TransactionError::AccountInUse),

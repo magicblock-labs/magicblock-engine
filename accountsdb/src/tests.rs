@@ -82,7 +82,7 @@ fn close(db: &AccountsDB, pubkey: &Pubkey) {
         transition(&mut acc, AccountMode::Undelegating);
     }
     if acc.is(AccountMode::Undelegating) {
-        transition(&mut acc, AccountMode::Base);
+        transition(&mut acc, AccountMode::Mirrored);
     }
     transition(&mut acc, AccountMode::Closed);
     store(db, *pubkey, acc);
@@ -128,8 +128,8 @@ fn mutable_at_least(lamports: u64, units: u64, owner: &Pubkey) -> AccountSharedD
         .unwrap()
 }
 
-// Lifecycle changes move accounts between backends, update owner indexes, and
-// remove closed accounts. Reset must preserve authoritative state.
+/// Proves lifecycle changes route accounts and owner indexes between backends,
+/// while closing removes state and reset retains persisted and runtime accounts.
 #[test]
 fn test_routing_and_persistence_flips() {
     let (_dir, db) = db();
@@ -168,19 +168,19 @@ fn test_routing_and_persistence_flips() {
     transition(&mut flip, AccountMode::Undelegating);
     flip.set_lamports(30);
     store(&db, a, flip);
-    let transient = reload(&db, &a);
-    assert!(!transient.can_writeback());
+    let undelegating = reload(&db, &a);
+    assert!(!undelegating.can_writeback());
     assert!(in_persisted(&db, &a) && !in_volatile(&db, &a));
     assert_eq!(lamports(&db, &a), 30);
 
-    // Resolving to ReadOnly evicts the persisted copy into volatile.
+    // Resolving to Mirrored moves the persisted copy into volatile storage.
     let mut flip = reload(&db, &a);
-    transition(&mut flip, AccountMode::Base);
+    transition(&mut flip, AccountMode::Mirrored);
     store(&db, a, flip);
     assert!(!in_persisted(&db, &a) && in_volatile(&db, &a));
     assert_eq!(lamports(&db, &a), 30);
 
-    // ReadOnly → Delegated evicts it back into persisted.
+    // Mirrored → Delegated moves it back into persisted storage.
     let mut flip = reload(&db, &a);
     transition(&mut flip, AccountMode::Delegated);
     store(&db, a, flip);
@@ -190,26 +190,25 @@ fn test_routing_and_persistence_flips() {
     close(&db, &a);
     assert!(!in_persisted(&db, &a) && !in_volatile(&db, &a));
 
-    // reset() drops volatile mirror only; persisted state is authoritative.
+    // Reset drops cached accounts but preserves persisted and runtime state.
     let c = Pubkey::new_unique();
     store(&db, c, delegated_account(50, vec![], p).build());
-    let systems = [AccountMode::Runtime, AccountMode::MirroredRuntime].map(|mode| {
-        let key = Pubkey::new_unique();
-        store(
-            &db,
-            key,
-            AccountBuilder::default().owner(p).lamports(40).mode(mode).build(),
-        );
-        assert!(in_volatile(&db, &key) && !in_persisted(&db, &key));
-        key
-    });
+    let runtime = Pubkey::new_unique();
+    store(
+        &db,
+        runtime,
+        AccountBuilder::default()
+            .owner(p)
+            .lamports(40)
+            .mode(AccountMode::Runtime)
+            .build(),
+    );
+    assert!(in_volatile(&db, &runtime) && !in_persisted(&db, &runtime));
     db.reset();
     assert!(!in_volatile(&db, &b));
     assert!(in_persisted(&db, &c));
-    for key in systems {
-        assert!(in_volatile(&db, &key));
-        assert!(program(&db, &p).contains(&key));
-    }
+    assert!(in_volatile(&db, &runtime));
+    assert!(program(&db, &p).contains(&runtime));
 }
 
 // Both migration directions remove the source image and owner mapping, retain
@@ -245,7 +244,7 @@ fn test_store_kind_migration_invariants() {
 
         let mut account = reload(&db, &key);
         transition(&mut account, AccountMode::Undelegating);
-        transition(&mut account, AccountMode::Base);
+        transition(&mut account, AccountMode::Mirrored);
         account.set_owner(volatile_owner);
         account.set_lamports(20);
         store(&db, key, account);
@@ -347,7 +346,7 @@ fn test_dump_restores_volatile_on_reopen() {
 
     {
         let db = AccountsDB::new(dir.path()).unwrap();
-        let account = AccountBuilder::default().lamports(42).mode(AccountMode::Base).build();
+        let account = AccountBuilder::default().lamports(42).mode(AccountMode::Mirrored).build();
         store(&db, key, account);
         db.dump(None).unwrap();
         assert!(dump.exists(), "dump is written into the active tree");
@@ -592,7 +591,7 @@ fn test_snapshot_export_and_volatile_restore() {
     let snapshot = {
         let db = AccountsDB::new(src.path()).unwrap();
         let aacc = delegated_account(10, vec![], Pubkey::default());
-        let bacc = AccountBuilder::default().lamports(20).mode(AccountMode::Base);
+        let bacc = AccountBuilder::default().lamports(20).mode(AccountMode::Mirrored);
         db.store(&[(a, aacc.build()), (b, bacc.build())]).unwrap();
         // SAFETY: the test holds exclusive access to the store.
         unsafe { db.snapshot(1) }.unwrap()

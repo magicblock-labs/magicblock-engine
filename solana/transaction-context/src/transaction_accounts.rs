@@ -467,7 +467,7 @@ mod tests {
             .lamports(23)
             .data(vec![1, 2, 3])
             .owner(owner)
-            .mode(AccountMode::Base)
+            .mode(AccountMode::Mirrored)
             .slot(41)
             .executable(true)
             .build::<AccountSharedData>();

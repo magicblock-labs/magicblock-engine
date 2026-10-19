@@ -82,7 +82,7 @@ async fn immutable_writes_are_rejected_and_not_committed() {
 
     // The source's data mapping rejects the transfer before it can complete;
     // neither account's balance may change in storage.
-    let operand = store_v42(&te, 5, AccountMode::Base);
+    let operand = store_v42(&te, 5, AccountMode::Mirrored);
     let recipient = store_v42(&te, 0, AccountMode::Delegated);
     let operand_before = load_v42_lamports(&te, operand).expect("operand exists");
     let recipient_before = load_v42_lamports(&te, recipient).expect("recipient exists");
@@ -110,7 +110,7 @@ async fn immutable_writes_are_rejected_and_not_committed() {
     // into account 0. Fees are zero and this SVM does no fee-payer validation, so
     // a program-owned payer loads as-is.
     let payer = Keypair::new();
-    let acc = v42_builder(5, AccountMode::Base).build();
+    let acc = v42_builder(5, AccountMode::Mirrored).build();
     te.accounts().store(&[(payer.pubkey(), acc)]).unwrap();
     let (_sig, view) = signed_view(&te, Some(&payer), E::lit(9).compose(payer.pubkey(), &[]));
     let result = te.transaction(view).unwrap().execute().await.unwrap();
@@ -146,7 +146,7 @@ async fn post_finalize_immutable_action_is_rejected() {
     let te = TestEngine::new().await;
 
     let key = Pubkey::new_unique();
-    let mut ixs = compose_v42_replacement(key, AccountMode::Base, 1);
+    let mut ixs = compose_v42_replacement(key, AccountMode::Mirrored, 1);
     let post_finalize_idx = ixs.len();
     let post_finalize = MagicRootInstruction::PostFinalize(PostFinalize {
         source_program: Pubkey::new_unique(),
@@ -221,10 +221,10 @@ async fn mixed_foreign_write_on_created_readonly_is_rejected() {
     let te = TestEngine::new().await;
 
     let key = Pubkey::new_unique();
-    // A missing account starts as ReadOnly at slot zero. Advance the replacement
+    // A missing account starts at slot zero. Advance the replacement
     // slot so this test reaches the mutation check rather than MagicRoot's
     // duplicate-replacement guard.
-    let mut ixs = compose_v42_replacement(key, AccountMode::Base, 1);
+    let mut ixs = compose_v42_replacement(key, AccountMode::Mirrored, 1);
     // The foreign instruction that makes the whole transaction non-privileged.
     ixs.push(E::lit(9).compose(key, &[]));
 
