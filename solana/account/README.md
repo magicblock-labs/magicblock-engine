@@ -9,7 +9,7 @@ persistence and the host owns validation of imported state.
 ## Account lifecycle
 
 `AccountMode` separates account kind, access, and ongoing sync with base.
-[Named constants](src/mode.rs) define the supported combinations.
+[Enum variants](src/mode.rs) declare the supported combinations in their discriminants.
 
 `Delegated` accounts are delegated to this validator. `Magic` accounts are maintained
 locally, with no ongoing sync with base, even if a base counterpart exists. Both allow

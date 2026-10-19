@@ -4,13 +4,11 @@ use solana_clock::Slot;
 
 use crate::AccountPatchError;
 use AccessMode::{ReadOnly, Writable};
-use DataFlow::{BaseToMagic, MagicToBase};
+use AccountKind::*;
 
 /// Classification that access and synchronization policy cannot determine.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "wincode", derive(wincode::SchemaWrite))]
-#[cfg_attr(feature = "wincode", wincode(tag_encoding = "u8"))]
 pub enum AccountKind {
     /// Cached absence of an account on the base chain.
     Missing,
@@ -20,6 +18,13 @@ pub enum AccountKind {
     Runtime,
     /// Deletion tombstone retained until storage removes the account image.
     Closed,
+}
+
+impl AccountKind {
+    const fn encode(self, access: AccessMode, flow: DataFlow) -> u16 {
+        // Keep raw mode bytes ordered as [kind, access | flow << 1].
+        u16::from_ne_bytes([self as u8, (access as u8) | ((flow as u8) << 1)])
+    }
 }
 
 /// Permission for ordinary program mutation in this engine.
@@ -38,7 +43,7 @@ pub enum AccessMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DataFlow {
     /// No ongoing account-state synchronization with base.
-    None,
+    NoSync,
     /// Base supplies refreshed account state.
     BaseToMagic,
     /// Local state participates in delegated commitment to base.
@@ -54,17 +59,38 @@ pub enum StateAuthority {
     Magic,
 }
 
-/// Two-byte account mode, exposed through named constants and typed getters.
-/// Wincode and bincode encode its two fields in memory order.
-#[repr(C)]
-#[derive(Clone, Copy, Eq, PartialEq)]
-#[cfg_attr(feature = "wincode", derive(wincode::SchemaWrite))]
+/// Two-byte account mode whose variants declare kind, access, and synchronization policy.
+/// Wincode and bincode encode the same bytes as its in-memory discriminant.
+#[repr(u16)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(try_from = "[u8; 2]", into = "[u8; 2]"))]
-pub struct AccountMode {
-    kind: AccountKind,
-    /// Bit 0 is access; bits 1–2 are data flow. Other bits are reserved.
-    bits: u8,
+pub enum AccountMode {
+    /// Cached base-chain absence, awaiting base updates.
+    #[default]
+    Missing = Missing.encode(ReadOnly, DataFlow::BaseToMagic),
+
+    /// Read-only base mirror, including accounts delegated to another validator.
+    Base = Regular.encode(ReadOnly, DataFlow::BaseToMagic),
+
+    /// Active local delegation. The host establishes authority and the commit target.
+    Delegated = Regular.encode(Writable, DataFlow::MagicToBase),
+
+    /// Protected local state awaiting completion of a delegation handoff.
+    Undelegating = Regular.encode(ReadOnly, DataFlow::MagicToBase),
+
+    /// Writable ER state without direct delegated commitment to base.
+    /// A counterpart at the same address may independently exist on base.
+    Magic = Regular.encode(Writable, DataFlow::NoSync),
+
+    /// Runtime-maintained state, such as locally generated sysvars.
+    Runtime = Runtime.encode(ReadOnly, DataFlow::NoSync),
+
+    /// Runtime account whose image is refreshed from base.
+    MirroredRuntime = Runtime.encode(ReadOnly, DataFlow::BaseToMagic),
+
+    /// Deletion tombstone awaiting physical removal.
+    Closed = Closed.encode(ReadOnly, DataFlow::NoSync),
 }
 
 /// A byte pair that does not encode a supported account mode.
@@ -72,50 +98,22 @@ pub struct AccountMode {
 #[error("invalid account mode bytes: {0:?}")]
 pub struct InvalidAccountMode([u8; 2]);
 
-#[allow(non_upper_case_globals)]
+#[allow(unused_qualifications)]
 impl AccountMode {
-    /// Cached base-chain absence, awaiting base updates.
-    pub const Missing: Self = Self::new(AccountKind::Missing, ReadOnly, BaseToMagic);
-
-    /// Read-only base mirror, including accounts delegated to another validator.
-    pub const Base: Self = Self::new(AccountKind::Regular, ReadOnly, BaseToMagic);
-
-    /// Active local delegation. The host establishes authority and the commit target.
-    pub const Delegated: Self = Self::new(AccountKind::Regular, Writable, MagicToBase);
-
-    /// Protected local state awaiting completion of a delegation handoff.
-    pub const Undelegating: Self = Self::new(AccountKind::Regular, ReadOnly, MagicToBase);
-
-    /// Writable ER state without direct delegated commitment to base.
-    /// A counterpart at the same address may independently exist on base.
-    pub const Magic: Self = Self::new(AccountKind::Regular, Writable, DataFlow::None);
-
-    /// Runtime-maintained state, such as locally generated sysvars.
-    pub const Runtime: Self = Self::new(AccountKind::Runtime, ReadOnly, DataFlow::None);
-
-    /// Runtime account whose image is refreshed from base.
-    pub const MirroredRuntime: Self = Self::new(AccountKind::Runtime, ReadOnly, BaseToMagic);
-
-    /// Deletion tombstone awaiting physical removal.
-    pub const Closed: Self = Self::new(AccountKind::Closed, ReadOnly, DataFlow::None);
-}
-
-impl AccountMode {
-    const fn new(kind: AccountKind, access: AccessMode, flow: DataFlow) -> Self {
-        Self {
-            kind,
-            bits: (access as u8) | ((flow as u8) << 1),
-        }
-    }
-
     /// Returns the remaining runtime/lifecycle classification.
     pub const fn kind(self) -> AccountKind {
-        self.kind
+        match (self as u16).to_ne_bytes()[0] {
+            0 => AccountKind::Missing,
+            1 => AccountKind::Regular,
+            2 => AccountKind::Runtime,
+            3 => AccountKind::Closed,
+            _ => unreachable!(),
+        }
     }
 
     /// Returns ordinary local write permission.
     pub const fn access(self) -> AccessMode {
-        match self.bits & 1 {
+        match (self as u16).to_ne_bytes()[1] & 1 {
             0 => ReadOnly,
             _ => Writable,
         }
@@ -123,10 +121,10 @@ impl AccountMode {
 
     /// Returns the ongoing account-state synchronization policy.
     pub const fn data_flow(self) -> DataFlow {
-        match (self.bits >> 1) & 3 {
-            0 => DataFlow::None,
-            1 => BaseToMagic,
-            2 => MagicToBase,
+        match ((self as u16).to_ne_bytes()[1] >> 1) & 3 {
+            0 => DataFlow::NoSync,
+            1 => DataFlow::BaseToMagic,
+            2 => DataFlow::MagicToBase,
             _ => unreachable!(),
         }
     }
@@ -138,16 +136,16 @@ impl AccountMode {
 
     /// Returns who maintains the account image, or `None` for missing and closed accounts.
     pub const fn authority(self) -> Option<StateAuthority> {
-        match (self.kind, self.data_flow()) {
+        match (self.kind(), self.data_flow()) {
             (AccountKind::Missing | AccountKind::Closed, _) => None,
-            (_, BaseToMagic) => Some(StateAuthority::Base),
-            (_, DataFlow::None | MagicToBase) => Some(StateAuthority::Magic),
+            (_, DataFlow::BaseToMagic) => Some(StateAuthority::Base),
+            (_, DataFlow::NoSync | DataFlow::MagicToBase) => Some(StateAuthority::Magic),
         }
     }
 
     /// Returns whether local state requires persistence. Runtime state is managed separately.
     pub const fn requires_persistence(self) -> bool {
-        matches!(self.kind, AccountKind::Regular)
+        matches!(self.kind(), AccountKind::Regular)
             && matches!(self.authority(), Some(StateAuthority::Magic))
     }
 
@@ -190,25 +188,9 @@ impl AccountMode {
     }
 }
 
-impl Default for AccountMode {
-    fn default() -> Self {
-        Self::Missing
-    }
-}
-
-impl std::fmt::Debug for AccountMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AccountMode")
-            .field("kind", &self.kind())
-            .field("access", &self.access())
-            .field("data_flow", &self.data_flow())
-            .finish()
-    }
-}
-
 impl From<AccountMode> for [u8; 2] {
     fn from(mode: AccountMode) -> Self {
-        [mode.kind as u8, mode.bits]
+        (mode as u16).to_ne_bytes()
     }
 }
 
@@ -235,8 +217,25 @@ mod codec {
     use super::AccountMode;
     use std::mem::MaybeUninit;
     use wincode::{
-        ReadResult, SchemaRead, TypeMeta, config::ConfigCore, error::invalid_value, io::Reader,
+        ReadResult, SchemaRead, SchemaWrite, TypeMeta, WriteResult,
+        config::ConfigCore,
+        error::invalid_value,
+        io::{Reader, Writer},
     };
+
+    // SAFETY: each variant writes exactly two initialized discriminant bytes.
+    unsafe impl<C: ConfigCore> SchemaWrite<C> for AccountMode {
+        type Src = Self;
+        const TYPE_META: TypeMeta = TypeMeta::Static { size: 2, zero_copy: false };
+
+        fn size_of(_src: &Self) -> WriteResult<usize> {
+            Ok(2)
+        }
+
+        fn write(writer: impl Writer, src: &Self) -> WriteResult<()> {
+            <[u8; 2] as SchemaWrite<C>>::write(writer, &(*src).into())
+        }
+    }
 
     // SAFETY: exactly two bytes are consumed and dst is initialized only after validation succeeds.
     unsafe impl<'de, C: ConfigCore> SchemaRead<'de, C> for AccountMode {

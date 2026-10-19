@@ -195,30 +195,25 @@ fn test_account_patch_transition_errors() {
 /// Also pins mode properties and identical two-byte memory and wire representations.
 #[test]
 fn test_lifecycle_matrix() {
-    use crate::StateAuthority::{Base, Magic};
-    use AccountMode as Mode;
-    let base = Some(Base);
-    let magic = Some(Magic);
+    use crate::StateAuthority;
+    use AccountMode::*;
+    let base = Some(StateAuthority::Base);
+    let magic = Some(StateAuthority::Magic);
     // Columns are destinations in `modes` order.
     // 0 forbids the pair, 1 permits equal/newer slots, 2 requires a newer slot.
     let cases = [
-        (Mode::Missing, [0, 2], None, [2, 1, 1, 1, 1, 0, 1, 1]),
-        (Mode::Base, [1, 2], base, [2, 2, 0, 1, 1, 0, 1, 0]),
-        (Mode::Runtime, [2, 0], magic, [0, 0, 2, 0, 0, 0, 0, 2]),
-        (Mode::Delegated, [1, 5], magic, [0, 0, 0, 0, 0, 1, 0, 0]),
-        (Mode::Magic, [1, 1], magic, [0, 0, 0, 0, 0, 0, 1, 0]),
-        (Mode::Undelegating, [1, 4], magic, [1, 1, 0, 2, 0, 0, 1, 0]),
-        (Mode::Closed, [3, 0], None, [0, 0, 0, 0, 0, 0, 0, 0]),
-        (
-            Mode::MirroredRuntime,
-            [2, 2],
-            base,
-            [0, 0, 2, 0, 0, 0, 0, 2],
-        ),
+        (Missing, [0, 2], None, [2, 1, 1, 1, 1, 0, 1, 1]),
+        (Base, [1, 2], base, [2, 2, 0, 1, 1, 0, 1, 0]),
+        (Runtime, [2, 0], magic, [0, 0, 2, 0, 0, 0, 0, 2]),
+        (Delegated, [1, 5], magic, [0, 0, 0, 0, 0, 1, 0, 0]),
+        (Magic, [1, 1], magic, [0, 0, 0, 0, 0, 0, 1, 0]),
+        (Undelegating, [1, 4], magic, [1, 1, 0, 2, 0, 0, 1, 0]),
+        (Closed, [3, 0], None, [0, 0, 0, 0, 0, 0, 0, 0]),
+        (MirroredRuntime, [2, 2], base, [0, 0, 2, 0, 0, 0, 0, 2]),
     ];
     let modes = cases.map(|(mode, ..)| mode);
     for (mode, bytes, authority, _) in cases {
-        // SAFETY: repr(C) stores two initialized one-byte fields without padding.
+        // SAFETY: repr(u16) stores a two-byte discriminant initialized for every variant.
         let raw = unsafe { &*std::ptr::from_ref(&mode).cast::<[u8; 2]>() };
         assert_eq!(*raw, bytes);
         assert_eq!(<[u8; 2]>::from(mode), bytes);
@@ -235,16 +230,13 @@ fn test_lifecycle_matrix() {
         assert_eq!(mode.access() as u8, policy & 1);
         assert_eq!(mode.data_flow() as u8, policy >> 1);
         assert_eq!(mode.authority(), authority);
-        assert_eq!(
-            mode.is_writable(),
-            mode == Mode::Delegated || mode == Mode::Magic
-        );
+        assert_eq!(mode.is_writable(), mode == Delegated || mode == Magic);
         assert_eq!(
             mode.requires_persistence(),
-            mode == Mode::Delegated || mode == Mode::Magic || mode == Mode::Undelegating
+            mode == Delegated || mode == Magic || mode == Undelegating
         );
     }
-    assert_eq!(AccountMode::default(), Mode::Missing);
+    assert_eq!(AccountMode::default(), Missing);
     let owner = Pubkey::new_unique();
     let key = Pubkey::new_unique();
     for (from, _, _, row) in cases {
