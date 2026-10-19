@@ -6,6 +6,14 @@ use crate::AccountPatchError;
 use AccessMode::{ReadOnly, Writable};
 use AccountKind::*;
 
+const KIND_OFFSET: u32 = 0;
+const ACCESS_OFFSET: u32 = 8;
+const FLOW_OFFSET: u32 = 10;
+
+const KIND_MASK: u16 = 0x00FF << KIND_OFFSET;
+const ACCESS_MASK: u16 = 0x0003 << ACCESS_OFFSET;
+const FLOW_MASK: u16 = 0x0003 << FLOW_OFFSET;
+
 /// Classification that access and synchronization policy cannot determine.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -32,7 +40,9 @@ pub(crate) enum AccountKind {
 /// Reserved bits must be zero.
 /// Little-endian bytes are `[kind, access | (flow << 2)]`.
 const fn encode(kind: AccountKind, access: AccessMode, flow: DataFlow) -> u16 {
-    u16::from_le_bytes([kind as u8, (access as u8) | ((flow as u8) << 2)])
+    ((kind as u16) << KIND_OFFSET)
+        | ((access as u16) << ACCESS_OFFSET)
+        | ((flow as u16) << FLOW_OFFSET)
 }
 
 /// Permission for ordinary program mutation in this engine.
@@ -107,7 +117,7 @@ pub struct InvalidAccountMode([u8; 2]);
 impl AccountMode {
     /// Returns the remaining runtime/lifecycle classification.
     pub(crate) const fn kind(self) -> AccountKind {
-        match (self as u16) & 0x00FF {
+        match ((self as u16) & KIND_MASK) >> KIND_OFFSET {
             0 => AccountKind::Missing,
             1 => AccountKind::Regular,
             2 => AccountKind::Runtime,
@@ -118,7 +128,7 @@ impl AccountMode {
 
     /// Returns ordinary local write permission.
     pub(crate) const fn access(self) -> AccessMode {
-        match ((self as u16) & 0x0300) >> 8 {
+        match ((self as u16) & ACCESS_MASK) >> ACCESS_OFFSET {
             0 => ReadOnly,
             1 => Writable,
             _ => unreachable!(),
@@ -127,7 +137,7 @@ impl AccountMode {
 
     /// Returns the ongoing account-state synchronization policy.
     pub(crate) const fn data_flow(self) -> DataFlow {
-        match ((self as u16) & 0x0C00) >> 10 {
+        match ((self as u16) & FLOW_MASK) >> FLOW_OFFSET {
             0 => DataFlow::NoSync,
             1 => DataFlow::BaseToEr,
             2 => DataFlow::ErToBase,
