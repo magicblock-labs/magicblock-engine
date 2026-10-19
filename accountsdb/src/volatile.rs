@@ -63,14 +63,12 @@ impl VolatileStore {
         AC: IntoIterator<Item = &'a (Pubkey, AccountSharedData)>,
     {
         for (pubkey, account) in accounts {
-            // An account that has moved to an authoritative mode, or has been
-            // closed, drops any stale volatile copy.
-            if account.mode().authoritative() || account.is(AccountMode::Closed) {
+            // Accounts requiring persistence and closed accounts drop stale volatile copies.
+            if account.mode().requires_persistence() || account.is(AccountMode::Closed) {
                 self.delete(pubkey);
                 continue;
             }
-            // Non-authoritative accounts stay volatile and update the program
-            // mapping.
+            // Keep remaining accounts volatile and update the program ownership mapping.
             let owner = *account.owner();
             {
                 let mut set = self.programs.entry_sync(owner).or_default();
@@ -114,7 +112,7 @@ impl VolatileStore {
     pub(crate) fn reset(&self) {
         self.programs.clear_sync();
         self.accounts.retain_sync(|k, a| {
-            if !a.is(AccountMode::System) {
+            if !a.is_any([AccountMode::Runtime, AccountMode::MirroredRuntime]) {
                 return false;
             }
             let mut set = self.programs.entry_sync(a.owner()).or_default();

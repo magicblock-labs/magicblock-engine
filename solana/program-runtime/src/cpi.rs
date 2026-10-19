@@ -1265,7 +1265,7 @@ mod tests {
         let (key, account, writable) = accounts.pop().unwrap();
         let account = AccountBuilder::from(account)
             .owner(Pubkey::new_unique())
-            .mode(AccountMode::Uninit)
+            .mode(AccountMode::Missing)
             .build();
         accounts.push((key, account, writable));
         accounts
@@ -1486,7 +1486,7 @@ mod tests {
     /// caller credits, and remapping revokes data writes after a mode transition.
     #[test]
     fn lifecycle_transition_revokes_caller_writes() {
-        for mode in [AccountMode::Transient, AccountMode::Closed] {
+        for mode in [AccountMode::Undelegating, AccountMode::Closed] {
             let mut transaction_accounts = transaction_with_owned_account(vec![0]);
             if mode == AccountMode::Closed {
                 transaction_accounts[1].1 = AccountBuilder::from(transaction_accounts[1].1.clone())
@@ -1522,7 +1522,7 @@ mod tests {
                 let slot = raw.slot();
                 raw.set_lifecycle(mode, slot).unwrap();
                 assert!(
-                    raw.mutable(),
+                    raw.can_writeback(),
                     "legal transition remains eligible for writeback"
                 );
             }

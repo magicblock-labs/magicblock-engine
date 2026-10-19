@@ -348,9 +348,9 @@ impl BorrowedInstructionAccount<'_, '_> {
         self.check_mutable()
     }
 
-    /// Requires a currently mutable mode, regardless of transaction dirty markers.
+    /// Requires current write access, regardless of transaction dirty markers.
     fn check_mutable(&self) -> Result<(), InstructionError> {
-        if self.account.mode().mutable() {
+        if self.account.mode().is_writable() {
             Ok(())
         } else {
             Err(InstructionError::Immutable)
@@ -410,12 +410,18 @@ mod tests {
     /// state or lamport deltas, while no-ops preserve legal lifecycle markers.
     #[test]
     fn immutable_modes_reject_mutations() {
-        use AccountMode::*;
-        for mode in [Uninit, ReadOnly, System, Transient, Closed] {
+        for mode in [
+            AccountMode::Missing,
+            AccountMode::Base,
+            AccountMode::Runtime,
+            AccountMode::Undelegating,
+            AccountMode::Closed,
+            AccountMode::MirroredRuntime,
+        ] {
             let owner = Pubkey::new_unique();
             let initial = match mode {
-                Transient => Delegated,
-                Closed => Magic,
+                AccountMode::Undelegating => AccountMode::Delegated,
+                AccountMode::Closed => AccountMode::Magic,
                 _ => mode,
             };
             let mut account = AccountBuilder::default()
@@ -426,7 +432,10 @@ mod tests {
             if initial != mode {
                 account.set_lifecycle(mode, account.slot()).unwrap();
                 assert!(account.markers().contains(DirtyMarkers::MODE));
-                assert!(account.mutable(), "the transition still permits writeback");
+                assert!(
+                    account.can_writeback(),
+                    "the transition still permits writeback"
+                );
             }
             let before = account.clone();
             let mut context = TransactionContext::new(

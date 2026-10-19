@@ -9,7 +9,7 @@ mod owned;
 pub use borrowed::BorrowedAccount;
 pub use owned::{AccountBuilder, OwnedAccount};
 
-use crate::{Account, ReadableAccount, WritableAccount, patch::AccountPatchError};
+use crate::{Account, AccountMode, ReadableAccount, WritableAccount, patch::AccountPatchError};
 use solana_clock::{Epoch, Slot};
 use solana_pubkey::Pubkey;
 use std::{
@@ -33,7 +33,7 @@ pub struct StorageUnit(pub u64);
 /// Copy-on-write account state backed by owned data or an aligned external buffer.
 /// Borrowed writes use the shadow image until growth exceeds its capacity.
 ///
-/// Instruction mutation checks use [`AccountMode::mutable`]; [`Self::mutable`]
+/// Instruction mutation checks use [`AccountMode::is_writable`]; [`Self::can_writeback`]
 /// is the separate transaction-final writeback guard.
 #[cfg_attr(feature = "serde", derive(serde::Deserialize), serde(from = "Account"))]
 #[derive(Clone, Default)]
@@ -55,12 +55,12 @@ pub struct AccountCore {
     pub(crate) owner: Pubkey,
     /// Source slot associated with the latest privileged lifecycle update.
     pub(crate) slot: Slot,
-    /// Lifecycle mode governing mutability and authority.
+    /// Classification, ordinary local access, and synchronization policy.
     pub(crate) mode: AccountMode,
     /// Account state modifier flags.
     pub(crate) flags: StateFlags,
     /// Reserved bytes that make the serialized representation deterministic.
-    _padding: [u8; 6],
+    _padding: [u8; 5],
 }
 
 impl Deref for AccountSharedData {
@@ -142,17 +142,17 @@ impl AccountSharedData {
 
     /// Returns whether the current transaction may leave the account modified.
     ///
-    /// Mutable modes are always accepted. `Transient` and `Closed` are accepted
+    /// Writable modes are always accepted. `Undelegating` and `Closed` are accepted
     /// only when this transaction performed the corresponding mode transition.
     /// This is a transaction-final writeback predicate, not permission for a new
-    /// program mutation; instruction checks must use [`AccountMode::mutable`].
-    pub fn mutable(&self) -> bool {
-        self.mode.mutable()
-            || matches!(self.mode, AccountMode::Transient | AccountMode::Closed)
+    /// program mutation; instruction checks must use [`AccountMode::is_writable`].
+    pub fn can_writeback(&self) -> bool {
+        self.mode.is_writable()
+            || self.is_any([AccountMode::Undelegating, AccountMode::Closed])
                 && self.dirty.contains(DirtyMarkers::MODE)
     }
 
-    /// Returns the account's exact lifecycle mode.
+    /// Returns the account's complete classification, access, and flow.
     pub fn mode(&self) -> AccountMode {
         self.mode
     }
@@ -160,6 +160,11 @@ impl AccountSharedData {
     /// Returns `true` when the account is in `mode`.
     pub fn is(&self, mode: AccountMode) -> bool {
         self.mode == mode
+    }
+
+    /// Returns `true` when the account is in any of `modes`.
+    pub fn is_any<const N: usize>(&self, modes: [AccountMode; N]) -> bool {
+        modes.contains(&self.mode())
     }
 
     /// Returns the account modifier flags.
@@ -566,106 +571,6 @@ impl CoWAccount {
                 data_buf.extend_from_slice(data);
             }
         }
-    }
-}
-
-/// Mutually exclusive modes an account can occupy in the ephemeral rollup (ER).
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
-#[repr(u8)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
-#[cfg_attr(feature = "wincode", derive(wincode::SchemaRead, wincode::SchemaWrite))]
-pub enum AccountMode {
-    /// Cached absence of an external account, allowing callers to avoid repeated fetches.
-    #[default]
-    Uninit = 0,
-    /// Mirrored external account that user programs may read but not mutate.
-    ReadOnly,
-    /// Internal account used for sysvars, features, and precompiles.
-    System,
-    /// Account delegated to the current ER node instance.
-    Delegated,
-    /// User-mutable, engine-authoritative account created inside the ER.
-    Magic,
-    /// Engine-authoritative but user-immutable state awaiting lifecycle resolution.
-    Transient,
-    /// Closed account that should be removed from storage.
-    Closed = 255,
-}
-
-impl AccountMode {
-    /// Returns whether a privileged lifecycle operation may apply `to` at
-    /// `to_slot`, including same-mode refreshes and slot ordering.
-    ///
-    /// Only uninitialized, read-only, and system accounts permit same-mode
-    /// refreshes, and those require a newer slot. Slots may never regress.
-    pub fn allows_transition(self, to: Self, from_slot: Slot, to_slot: Slot) -> bool {
-        self.validate_transition(to, from_slot, to_slot).is_ok()
-    }
-
-    /// Validates mode and slot together, preserving distinct errors for a
-    /// forbidden transition and an insufficiently fresh slot.
-    fn validate_transition(
-        self,
-        to: Self,
-        from_slot: Slot,
-        to_slot: Slot,
-    ) -> Result<(), AccountPatchError> {
-        use AccountMode::*;
-
-        /// Slot freshness required by an otherwise permitted mode transition.
-        enum SlotRequirement {
-            AllowSameSlot,    // to_slot >= from_slot
-            RequireNewerSlot, // to_slot > from_slot
-        }
-
-        let requirement = match (self, to) {
-            // --- Uninit ---
-            (Uninit, Uninit) => SlotRequirement::RequireNewerSlot,
-            (Uninit, ReadOnly | System | Delegated | Magic | Closed) => {
-                SlotRequirement::AllowSameSlot
-            }
-
-            // --- ReadOnly ---
-            (ReadOnly, ReadOnly | Uninit) => SlotRequirement::RequireNewerSlot,
-            (ReadOnly, Delegated | Magic | Closed) => SlotRequirement::AllowSameSlot,
-
-            // --- System ---
-            (System, System) => SlotRequirement::RequireNewerSlot,
-
-            // --- Delegated ---
-            (Delegated, Transient) => SlotRequirement::AllowSameSlot,
-
-            // --- Transient ---
-            (Transient, Delegated) => SlotRequirement::RequireNewerSlot,
-            (Transient, ReadOnly | Uninit | Closed) => SlotRequirement::AllowSameSlot,
-
-            // --- Magic ---
-            (Magic, Closed) => SlotRequirement::AllowSameSlot,
-
-            _ => return Err(AccountPatchError::InvalidModeTransition { from: self, to }),
-        };
-
-        let valid = match requirement {
-            SlotRequirement::AllowSameSlot => to_slot >= from_slot,
-            SlotRequirement::RequireNewerSlot => to_slot > from_slot,
-        };
-
-        if !valid {
-            Err(AccountPatchError::InvalidSlotTransition { from: from_slot, to: to_slot })?;
-        }
-        Ok(())
-    }
-
-    /// Returns `true` for modes that may be mutated by user programs.
-    pub fn mutable(&self) -> bool {
-        use AccountMode::*;
-        matches!(self, Delegated | Magic)
-    }
-
-    /// Returns `true` for modes whose state is authoritative in this engine.
-    pub fn authoritative(&self) -> bool {
-        use AccountMode::*;
-        matches!(self, Delegated | Magic | Transient)
     }
 }
 

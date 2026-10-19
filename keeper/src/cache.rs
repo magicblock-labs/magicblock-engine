@@ -73,7 +73,7 @@ impl Caches {
 
 /// Account access cache along with per-account mutation reservations.
 pub(crate) struct AccountCache {
-    /// Non-authoritative accounts, ordered by recent access.
+    /// Accounts that do not require persistence, ordered by recent access.
     pub(crate) lru: HashCache<Pubkey, (), RandomState>,
     /// In-flight account mutations keyed by account pubkey.
     pub(crate) reservations: HashMap<Pubkey, Arc<EventNotifier>, RandomState>,
@@ -127,9 +127,9 @@ impl AccountLease {
         self.observed
     }
 
-    /// Returns whether the observed account may be removed as a remote mirror.
+    /// Returns whether the observed account may be evicted from the cache.
     pub fn evictable(&self) -> bool {
-        self.observed.is_some_and(|(mode, _)| !mode.authoritative())
+        self.observed.is_some_and(|(mode, _)| !mode.requires_persistence())
     }
 
     /// Returns the local mode when the incoming image is older or duplicates
@@ -170,7 +170,7 @@ impl Drop for AccountLease {
 impl AccountCache {
     /// Tracks a materialized account and returns one displaced from recency.
     fn track(&self, pubkey: Pubkey, mode: AccountMode) -> Option<Pubkey> {
-        if !mode.authoritative() {
+        if !mode.requires_persistence() {
             return self.admit_recency(pubkey);
         }
         self.remove_recency(&pubkey);

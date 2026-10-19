@@ -108,9 +108,16 @@ fn expiring_cache_lazy_eviction() {
 /// mode changes, deletion, and stale eviction checks keep recency coherent.
 #[tokio::test]
 async fn account_lease_coordinates_recency_and_waiters() {
-    use AccountMode::*;
-    let modes = [ReadOnly, Uninit, Delegated, Magic, Transient, System];
-    for mode in modes {
+    let modes = [
+        (AccountMode::Base, true),
+        (AccountMode::Missing, true),
+        (AccountMode::Delegated, false),
+        (AccountMode::Magic, false),
+        (AccountMode::Undelegating, false),
+        (AccountMode::Runtime, true),
+        (AccountMode::MirroredRuntime, true),
+    ];
+    for (mode, tracked) in modes {
         let cache = Arc::new(AccountCache::new(256));
         let pk = Pubkey::new_unique();
         let mut lease = cache.lock(pk).await;
@@ -131,18 +138,17 @@ async fn account_lease_coordinates_recency_and_waiters() {
         drop(lease);
         drop(waiter.await);
 
-        let tracked = matches!(mode, ReadOnly | Uninit | System);
         assert_eq!(cache.lru.get_sync(&pk).is_some(), tracked);
     }
 
     let cache = Arc::new(AccountCache::new(256));
     let pk = Pubkey::new_unique();
     let mut lease = cache.lock(pk).await;
-    lease.materialized(ReadOnly);
+    lease.materialized(AccountMode::Base);
     drop(lease);
     assert!(cache.lru.get_sync(&pk).is_some(), "read-only is admitted");
     let mut eviction = cache.lock(pk).await;
-    eviction.observed = Some((ReadOnly, 0));
+    eviction.observed = Some((AccountMode::Base, 0));
     assert!(
         !eviction.cached_eviction_applies(),
         "an older eviction is rejected after readmission"
@@ -154,7 +160,7 @@ async fn account_lease_coordinates_recency_and_waiters() {
     );
 
     let mut lease = cache.lock(pk).await;
-    lease.materialized(Delegated);
+    lease.materialized(AccountMode::Delegated);
     drop(lease);
     assert!(
         cache.lru.get_sync(&pk).is_none(),
@@ -162,12 +168,12 @@ async fn account_lease_coordinates_recency_and_waiters() {
     );
 
     let mut lease = cache.lock(pk).await;
-    lease.observed = Some((ReadOnly, 0));
+    lease.observed = Some((AccountMode::Base, 0));
     assert!(
         lease.cached_eviction_applies(),
         "an account absent from recency remains eligible for eviction"
     );
-    lease.materialized(ReadOnly);
+    lease.materialized(AccountMode::Base);
     lease.deleted();
     drop(lease);
     assert!(

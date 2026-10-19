@@ -8,30 +8,37 @@ persistence and the host owns validation of imported state.
 
 ## Account lifecycle
 
-Lifecycle separates authority from mutability. `Delegated` accounts are delegated
-to this ER; `Magic` accounts are authoritative state created within it. Both allow
-user mutation. `Transient` accounts remain authoritative while awaiting lifecycle
+`AccountMode` separates account kind, access, and ongoing sync with base.
+[Enum variants](src/mode.rs) declare the supported combinations in their discriminants.
+
+`Delegated` accounts are delegated to this validator. `Magic` accounts are maintained
+locally, with no ongoing sync with base, even if a base counterpart exists. Both allow
+user mutation. `Undelegating` accounts remain authoritative while awaiting lifecycle
 resolution but reject user writes. `Closed` marks state for storage removal.
 
-Transitions to transient or closed revoke mutation immediately, including in CPI.
+Transitions to undelegating or closed revoke mutation immediately, including in CPI.
 The transaction-final writeback guard can accept a dirty transition into those
 modes without permitting further program writes. Other modes represent cached
-external absence (`Uninit`), a read-only mirror (`ReadOnly`), and internal sysvar,
-feature, or precompile state (`System`).
+external absence (`Missing`), a read-only mirror (`Base`), and internal sysvar,
+feature, or precompile state (`Runtime`).
 
-Privileged replacement validates mode and source slot together. Authoritative
-state can't be refreshed in the same mode, even at a newer slot; otherwise a later
-external image could overwrite local execution. Ordinary transaction mutations
-aren't replacements and don't follow that restriction.
+`Runtime` has no base sync; `MirroredRuntime` is refreshed from base. Both are
+read-only runtime state and survive mirror reset.
+
+Privileged replacement validates mode and source slot together. Delegated, Magic,
+and Undelegating state can't be refreshed in the same mode, even at a newer slot;
+otherwise a later external image could overwrite local execution. Ordinary
+transaction mutations aren't replacements and don't follow that restriction.
 
 | From | Allowed at the same or a newer slot | Requires a strictly newer slot |
 | :-- | :-- | :-- |
-| Uninit | ReadOnly, System, Delegated, Magic, Closed | Uninit |
-| ReadOnly | Delegated, Magic, Closed | ReadOnly, Uninit |
-| System | — | System |
-| Delegated | Transient | — |
+| Missing | Base, Runtime, MirroredRuntime, Delegated, Magic, Closed | Missing |
+| Base | Delegated, Magic, Closed | Base, Missing |
+| Runtime | — | Runtime, MirroredRuntime |
+| MirroredRuntime | — | Runtime, MirroredRuntime |
+| Delegated | Undelegating | — |
 | Magic | Closed | — |
-| Transient | ReadOnly, Uninit, Closed | Delegated |
+| Undelegating | Base, Missing, Closed | Delegated |
 | Closed | — | — |
 
 Unlisted transitions and slot regressions fail without changing state or dirty
@@ -39,6 +46,8 @@ markers. Magic state must be explicitly closed before another image can occupy
 its key, regardless of token balance. The host validates creation and closure
 eligibility, including application-specific token rules. [Engine's import path](../../engine/README.md#account-replacement)
 owns observation-based deduplication and the evidence required for redelegation.
+
+Binary mode encoding matches its two-byte memory layout; unsupported pairs are rejected.
 
 ## Borrowed storage
 
@@ -59,7 +68,7 @@ The host remains responsible for source freshness. Equality compares account sta
 and bytes, not storage representation or dirty markers. Lifecycle semantics and
 binary encoding must agree across producers and consumers.
 
-[Modes and copy-on-write behavior](src/cow/mod.rs), the [borrowed layout](src/cow/borrowed.rs),
+[Modes](src/mode.rs), [copy-on-write behavior](src/cow/mod.rs), the [borrowed layout](src/cow/borrowed.rs),
 and [field patches](src/patch.rs) define this model. The `testkit` feature supplies
 account and borrowed-storage fixtures. Representation changes also affect transaction
 context, VM mapping, and persistence; see the [runtime overview](../README.md).

@@ -203,7 +203,7 @@ fn rejects_forwarded_magic_root_instructions() {
         }
         assert_eq!(
             ctx.transaction_context.accounts().try_borrow(1).unwrap().mode(),
-            AccountMode::Uninit
+            AccountMode::Missing
         );
     });
 }
@@ -323,7 +323,7 @@ fn explicit_invocation_preserves_account_protections() {
     }
     with_cpi(true, |ctx, target| {
         let invalid = MagicRootInstruction::Patch(AccountFieldPatch::Lifecycle {
-            mode: AccountMode::Transient,
+            mode: AccountMode::Undelegating,
             slot: 1,
         })
         .compose(target)

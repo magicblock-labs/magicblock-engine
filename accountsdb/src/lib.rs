@@ -36,9 +36,9 @@ const ACTIVE_DIR: &str = "CURRENT";
 
 /// Top-level account store backed by persisted and volatile backends.
 pub struct AccountsDB {
-    /// On-disk store for engine-authoritative account modes.
+    /// On-disk store for account modes that require persistence.
     persisted: PersistedStore,
-    /// Rebuildable in-memory store for non-authoritative account modes.
+    /// Rebuildable in-memory store for mirrors and runtime accounts.
     volatile: VolatileStore,
     /// Database root directory.
     root: PathBuf,
@@ -235,8 +235,7 @@ impl AccountsDB {
     ///
     /// Chain-owned accounts can be fetched again when synchronization resumes.
     /// System accounts hold internal runtime state and survive the reset; their
-    /// volatile owner indexes are rebuilt. Persisted, engine-authoritative state
-    /// is never reset.
+    /// volatile owner indexes are rebuilt. Persisted state is never reset.
     pub fn reset(&self) {
         self.volatile.reset();
     }
@@ -365,17 +364,17 @@ struct ProgramIter<'a> {
 
 impl<'a> Iterator for ProgramIter<'a> {
     type Item = AccountEntry;
-    /// Yields authoritative accounts first, then volatile ones.
+    /// Yields persisted accounts first, then volatile ones.
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(persisted) = &mut self.persisted {
-            // Yield authoritative entries first.
+            // Yield persisted entries first.
             if let Some(item) = persisted.next() {
                 return Some(item);
             }
         }
         // Release the persisted read txn before draining volatile entries.
         let _ = self.persisted.take();
-        // Then drain the in-memory set of non-authoritative accounts.
+        // Then drain the volatile accounts.
         while let Some(pubkey) = self.volatile.pop_first() {
             if let Some(account) = self.db.volatile.load(&pubkey) {
                 return Some((pubkey, account.into()));
@@ -423,7 +422,7 @@ fn persisted(entry: &&AccountEntry) -> bool {
         CoWAccount::Borrowed(_) => true,
         CoWAccount::Owned(_) => {
             // Mode changes still need persisted cleanup after borrowed data grows into owned data.
-            entry.1.mode().authoritative() || entry.1.markers().contains(DirtyMarkers::MODE)
+            entry.1.mode().requires_persistence() || entry.1.markers().contains(DirtyMarkers::MODE)
         }
     }
 }
@@ -431,7 +430,7 @@ fn persisted(entry: &&AccountEntry) -> bool {
 /// Returns `true` for entries that must touch volatile storage.
 fn volatile(entry: &&AccountEntry) -> bool {
     match entry.1.cow() {
-        CoWAccount::Borrowed(_) => !entry.1.mode().authoritative(),
+        CoWAccount::Borrowed(_) => !entry.1.mode().requires_persistence(),
         CoWAccount::Owned(_) => true,
     }
 }

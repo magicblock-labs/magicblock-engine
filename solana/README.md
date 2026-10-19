@@ -38,7 +38,7 @@ This representation lets execution borrow account data from storage while retain
 transactional writeback.
 
 Engine mutation requires a permitted lifecycle mode in addition to Solana access
-checks. Delegated and Magic accounts allow user writes. Transient state remains
+checks. Delegated and Magic accounts allow user writes. Undelegating state remains
 authoritative and persisted but immutable; closed state is removed by the caller.
 Transitions to either revoke mutation immediately, including across CPI. Final
 writeback can accept a dirty transition without authorizing further writes.

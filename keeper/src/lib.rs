@@ -244,8 +244,7 @@ impl Keeper {
     /// Appends a reset marker before discarding chain-synchronized volatile
     /// accounts and restoring the authority sponsor's initial balance.
     ///
-    /// Internal system accounts and persisted engine-authoritative state remain
-    /// available.
+    /// Internal runtime accounts and persisted state remain available.
     pub fn reset(&self, slot: Slot) -> Result<()> {
         self.append_reset(Signed::new(Reset(slot), self.signer()))
     }

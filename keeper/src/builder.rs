@@ -185,7 +185,7 @@ impl KeeperBuilder {
             let lamports = self.rent.minimum_balance(elf.len());
             let account = AccountBuilder::default()
                 .lamports(lamports)
-                .mode(AccountMode::System)
+                .mode(AccountMode::Runtime)
                 .owner(solana_sdk_ids::loader_v4::ID)
                 .executable(true)
                 .data(elf.clone());
@@ -323,7 +323,7 @@ impl KeeperBuilder {
         let account =
             AccountSharedData::new_data(0, state, owner).map_err(AccountsDBError::from)?;
         let lamports = self.rent.minimum_balance(account.data().len());
-        Ok(AccountBuilder::from(account).lamports(lamports).mode(AccountMode::System))
+        Ok(AccountBuilder::from(account).lamports(lamports).mode(AccountMode::Runtime))
     }
 
     /// Opens accountsdb, restoring the newest archived snapshot after corruption.

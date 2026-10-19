@@ -82,11 +82,11 @@ impl PersistedStore {
 
     /// Applies a batch of account updates to the persisted store.
     ///
-    /// Borrowed accounts in authoritative modes are committed in place. Owned
-    /// accounts in those modes are serialized into the mmap. Other modes delete
-    /// stale persisted entries. If the LMDB commit fails or database runs out of
-    /// space, the borrowed images are rolled back so in-memory state stays
-    /// aligned with the durable index.
+    /// Accounts requiring persistence are committed in place when borrowed, or
+    /// serialized into the mmap when owned. Other modes delete stale persisted
+    /// entries. If the LMDB commit fails or the database runs out of space,
+    /// borrowed images are rolled back so in-memory state stays aligned with
+    /// the durable index.
     pub(crate) fn upsert<'a, AC>(&self, accounts: AC) -> Result<()>
     where
         AC: IntoIterator<Item = &'a AccountEntry> + Clone,
@@ -155,9 +155,8 @@ impl PersistedStore {
     /// Applies one account state transition to the persisted backend.
     fn apply<'e>(&'e self, acc: &AccountEntry, txn: OptRwTxn<'_, 'e>) -> Result<()> {
         let (pubkey, account) = acc;
-        // An account that has moved to a non-authoritative mode, or has been
-        // closed, no longer belongs here, so drop any stale persisted entry.
-        if !account.mode().authoritative() || account.is(AccountMode::Closed) {
+        // Drop any stale persisted entry when the mode no longer requires persistence.
+        if !account.mode().requires_persistence() || account.is(AccountMode::Closed) {
             self.delete(pubkey, txn)?;
             if let Borrowed(acc) = account.cow() {
                 acc.commit();
