@@ -138,111 +138,84 @@ fn test_account_field_patch_data_at() {
     assert_eq!(account.data(), &[1, 9, 8, 7, 6, 0, 5, 4]);
 }
 
+/// Proves lifecycle patches preserve state on errors and mark accepted changes.
 #[test]
 fn test_account_patch_transition_errors() {
+    use AccountMode as Mode;
+
     let mut account = delegated_account(0, vec![], Pubkey::default())
         .slot(10)
         .build::<AccountSharedData>();
 
     assert_eq!(
-        account.set_lifecycle(AccountMode::Base, 10),
+        account.set_lifecycle(Mode::Mirrored, 10),
         Err(AccountPatchError::InvalidModeTransition {
-            from: AccountMode::Delegated,
-            to: AccountMode::Base,
+            from: Mode::Delegated,
+            to: Mode::Mirrored,
         })
     );
-    assert!(account.is(AccountMode::Delegated));
+    assert!(account.is(Mode::Delegated));
     assert!(account.markers().is_empty());
 
     assert_eq!(
-        AccountFieldPatch::Lifecycle {
-            mode: AccountMode::Delegated,
-            slot: 10,
-        }
-        .apply(&mut account),
+        AccountFieldPatch::Lifecycle { mode: Mode::Delegated, slot: 10 }.apply(&mut account),
         Err(AccountPatchError::InvalidModeTransition {
-            from: AccountMode::Delegated,
-            to: AccountMode::Delegated,
+            from: Mode::Delegated,
+            to: Mode::Delegated,
         })
     );
     assert_eq!(account.slot(), 10);
     assert!(account.markers().is_empty());
 
     AccountFieldPatch::Lifecycle {
-        mode: AccountMode::Undelegating,
+        mode: Mode::Undelegating,
         slot: 10,
     }
     .apply(&mut account)
     .unwrap();
-    assert!(account.markers().contains(DirtyMarkers::MODE));
-    assert!(account.markers().contains(DirtyMarkers::SLOT));
+    assert!(account.markers().contains(DirtyMarkers::MODE | DirtyMarkers::SLOT));
 
     let markers = *account.markers();
     assert_eq!(
-        AccountFieldPatch::Lifecycle { mode: AccountMode::Base, slot: 9 }.apply(&mut account),
+        AccountFieldPatch::Lifecycle { mode: Mode::Mirrored, slot: 9 }.apply(&mut account),
         Err(AccountPatchError::InvalidSlotTransition { from: 10, to: 9 })
     );
     assert_eq!(account.slot(), 10);
     assert_eq!(*account.markers(), markers);
 
-    let mut magic = AccountBuilder::default().mode(AccountMode::Magic).build::<AccountSharedData>();
-    magic.set_lifecycle(AccountMode::Closed, 0).unwrap();
-    assert!(magic.is(AccountMode::Closed));
+    let mut magic = AccountBuilder::default().mode(Mode::Magic).build::<AccountSharedData>();
+    magic.set_lifecycle(Mode::Closed, 0).unwrap();
+    assert!(magic.is(Mode::Closed));
 }
 
 /// Proves every lifecycle pair enforces slot ordering identically for owned and
 /// borrowed accounts, preserving rejected state and marking only accepted changes.
-/// Also pins mode properties and identical two-byte memory and wire representations.
+/// Publishing a borrowed transition preserves the complete account image.
 #[test]
 fn test_lifecycle_matrix() {
-    use crate::StateAuthority;
-    use AccountMode::*;
-    let base = Some(StateAuthority::Base);
-    let magic = Some(StateAuthority::Magic);
+    use AccountMode as Mode;
+
     // Columns are destinations in `modes` order.
     // 0 forbids the pair, 1 permits equal/newer slots, 2 requires a newer slot.
     let cases = [
-        (Missing, [0, 2], None, [2, 1, 1, 1, 1, 0, 1, 1]),
-        (Base, [1, 2], base, [2, 2, 0, 1, 1, 0, 1, 0]),
-        (Runtime, [2, 0], magic, [0, 0, 2, 0, 0, 0, 0, 2]),
-        (Delegated, [1, 5], magic, [0, 0, 0, 0, 0, 1, 0, 0]),
-        (Magic, [1, 1], magic, [0, 0, 0, 0, 0, 0, 1, 0]),
-        (Undelegating, [1, 4], magic, [1, 1, 0, 2, 0, 0, 1, 0]),
-        (Closed, [3, 0], None, [0, 0, 0, 0, 0, 0, 0, 0]),
-        (MirroredRuntime, [2, 2], base, [0, 0, 2, 0, 0, 0, 0, 2]),
+        (Mode::Missing, [2, 1, 1, 1, 1, 0, 1]),
+        (Mode::Mirrored, [2, 2, 0, 1, 1, 0, 1]),
+        (Mode::Runtime, [0, 0, 2, 0, 0, 0, 0]),
+        (Mode::Delegated, [0, 0, 0, 0, 0, 1, 0]),
+        (Mode::Magic, [0, 0, 0, 0, 0, 0, 1]),
+        (Mode::Undelegating, [1, 1, 0, 2, 0, 0, 1]),
+        (Mode::Closed, [0, 0, 0, 0, 0, 0, 0]),
     ];
-    let modes = cases.map(|(mode, ..)| mode);
-    for (mode, bytes, authority, _) in cases {
-        // SAFETY: repr(u16) stores a two-byte discriminant initialized for every variant.
-        let raw = unsafe { &*std::ptr::from_ref(&mode).cast::<[u8; 2]>() };
-        assert_eq!(*raw, bytes);
-        assert_eq!(<[u8; 2]>::from(mode), bytes);
-        assert_eq!(AccountMode::try_from(bytes).unwrap(), mode);
-        assert_eq!(bincode::serialize(&mode).unwrap(), bytes);
-        assert_eq!(bincode::deserialize::<AccountMode>(&bytes).unwrap(), mode);
-        #[cfg(feature = "wincode")]
-        {
-            assert_eq!(wincode::serialize(&mode).unwrap(), bytes);
-            assert_eq!(wincode::deserialize::<AccountMode>(&bytes).unwrap(), mode);
-        }
-        let [kind, policy] = bytes;
-        assert_eq!(mode.kind() as u8, kind);
-        assert_eq!(mode.access() as u8, policy & 1);
-        assert_eq!(mode.data_flow() as u8, policy >> 1);
-        assert_eq!(mode.authority(), authority);
-        assert_eq!(mode.is_writable(), mode == Delegated || mode == Magic);
-        assert_eq!(
-            mode.requires_persistence(),
-            mode == Delegated || mode == Magic || mode == Undelegating
-        );
-    }
-    assert_eq!(AccountMode::default(), Missing);
+    let modes = cases.map(|(mode, _)| mode);
+    let slot_pairs =
+        [(10, 9), (10, 10), (10, 11), (0, 0), (0, 1), (u64::MAX, 0), (u64::MAX, u64::MAX)];
     let owner = Pubkey::new_unique();
     let key = Pubkey::new_unique();
-    for (from, _, _, row) in cases {
+    for (from, row) in cases {
+        assert_eq!(row.len(), modes.len());
         for (to, rule) in modes.into_iter().zip(row) {
-            for (from_slot, to_slot) in [(10, 9), (10, 10), (10, 11), (0, 0), (0, 1)] {
-                let expected = if rule == 0 {
+            for (from_slot, to_slot) in slot_pairs {
+                let expected_result = if rule == 0 {
                     Err(AccountPatchError::InvalidModeTransition { from, to })
                 } else if to_slot < from_slot || (rule == 2 && to_slot == from_slot) {
                     Err(AccountPatchError::InvalidSlotTransition { from: from_slot, to: to_slot })
@@ -250,8 +223,9 @@ fn test_lifecycle_matrix() {
                     Ok(())
                 };
                 assert_eq!(
-                    from.allows_transition(to, from_slot, to_slot),
-                    expected.is_ok()
+                    from.validate_transition(to, from_slot, to_slot),
+                    expected_result,
+                    "{from:?}@{from_slot} -> {to:?}@{to_slot}"
                 );
 
                 let original = AccountBuilder::default()
@@ -260,49 +234,117 @@ fn test_lifecycle_matrix() {
                     .owner(owner)
                     .lamports(5)
                     .data(vec![1, 2, 3])
+                    .executable(true)
                     .build::<OwnedAccount>();
                 let mut buffer = serialize_account_buffer(&original, &key);
                 let borrowed = AccountSharedData::from(init_borrowed_account(&mut buffer));
-                let mut state = original.clone();
-                let mut markers = DirtyMarkers::empty();
-                if expected.is_ok() {
-                    state.core.mode = to;
-                    state.core.slot = to_slot;
-                    markers.insert(DirtyMarkers::SLOT);
-                    markers.set(DirtyMarkers::MODE, from != to);
+                let mut expected_account = original.clone();
+                let mut expected_markers = DirtyMarkers::empty();
+                if expected_result.is_ok() {
+                    expected_account.core.mode = to;
+                    expected_account.core.slot = to_slot;
+                    expected_markers.insert(DirtyMarkers::SLOT);
+                    expected_markers.set(DirtyMarkers::MODE, from != to);
                 }
-                for mut account in [AccountSharedData::from(original), borrowed] {
+                for (storage, mut account) in
+                    [("owned", AccountSharedData::from(original)), ("borrowed", borrowed)]
+                {
                     assert_eq!(
                         account.set_lifecycle(to, to_slot),
-                        expected,
-                        "{from:?}@{from_slot} -> {to:?}@{to_slot}"
+                        expected_result,
+                        "{storage}: {from:?}@{from_slot} -> {to:?}@{to_slot}"
                     );
-                    assert_eq!(*account.markers(), markers);
+                    assert_eq!(
+                        *account.markers(),
+                        expected_markers,
+                        "{storage}: {from:?}@{from_slot} -> {to:?}@{to_slot}"
+                    );
                     // Equality covers the complete core and data, independently of storage.
-                    assert!(account == state, "{from:?}@{from_slot} -> {to:?}@{to_slot}");
+                    assert!(
+                        account == expected_account,
+                        "{storage}: {from:?}@{from_slot} -> {to:?}@{to_slot}"
+                    );
+                    if let CoWAccount::Borrowed(borrowed) = account.cow() {
+                        // Publishing and reopening must preserve mode, flags, and data together.
+                        borrowed.commit();
+                        let active = AccountSharedData::from(init_borrowed_account(&mut buffer));
+                        assert!(
+                            active == expected_account,
+                            "published: {from:?}@{from_slot} -> {to:?}@{to_slot}"
+                        );
+                    }
                 }
             }
         }
     }
 }
 
-/// Pins storage size/alignment and rejects unsupported mode bytes.
+/// Pins mode properties, memory and wire encodings, and core field offsets.
+/// Unsupported and truncated mode encodings must be rejected.
 #[test]
 fn test_mode_layout_and_decoding() {
     use crate::cow::AccountCore;
-    use std::mem::{align_of, size_of};
+    use crate::mode::StateAuthority::{Base, Er};
+    use AccountMode as Mode;
+    use std::mem::{align_of, offset_of, size_of};
 
+    assert_eq!(size_of::<Mode>(), 2);
+    assert_eq!(align_of::<Mode>(), 2);
     assert_eq!(size_of::<AccountCore>(), 56);
     assert_eq!(align_of::<AccountCore>(), 8);
-    for bytes in [[4, 0], [1, 0x80], [1, 6], [2, 1], [1, 0]] {
-        assert!(AccountMode::try_from(bytes).is_err());
-        assert!(bincode::deserialize::<AccountMode>(&bytes).is_err());
+    assert_eq!(offset_of!(AccountCore, lamports), 0);
+    assert_eq!(offset_of!(AccountCore, owner), 8);
+    assert_eq!(offset_of!(AccountCore, slot), 40);
+    assert_eq!(offset_of!(AccountCore, mode), 48);
+    assert_eq!(offset_of!(AccountCore, flags), 50);
+
+    let cases = [
+        (Mode::Missing, [0, 2], None),
+        (Mode::Mirrored, [1, 2], Some(Base)),
+        (Mode::Runtime, [2, 0], Some(Er)),
+        (Mode::Delegated, [1, 5], Some(Er)),
+        (Mode::Magic, [1, 1], Some(Er)),
+        (Mode::Undelegating, [1, 4], Some(Er)),
+        (Mode::Closed, [3, 0], None),
+    ];
+    for (mode, bytes, authority) in cases {
+        // SAFETY: repr(u16) stores a two-byte discriminant initialized for every variant.
+        let raw = unsafe { &*std::ptr::from_ref(&mode).cast::<[u8; 2]>() };
+        assert_eq!(*raw, bytes);
+        assert_eq!(<[u8; 2]>::from(mode), bytes);
+        assert_eq!(Mode::try_from(bytes).unwrap(), mode);
+        assert_eq!(bincode::serialize(&mode).unwrap(), bytes);
+        assert_eq!(bincode::deserialize::<Mode>(&bytes).unwrap(), mode);
         #[cfg(feature = "wincode")]
-        assert!(wincode::deserialize::<AccountMode>(&bytes).is_err());
+        {
+            assert_eq!(wincode::serialize(&mode).unwrap(), bytes);
+            assert_eq!(wincode::deserialize::<Mode>(&bytes).unwrap(), mode);
+        }
+        let [kind, policy] = bytes;
+        assert_eq!(mode.kind() as u8, kind);
+        assert_eq!(mode.access() as u8, policy & 1);
+        assert_eq!(mode.data_flow() as u8, policy >> 1);
+        assert_eq!(mode.authority(), authority);
+        assert_eq!(
+            mode.is_writable(),
+            mode == Mode::Delegated || mode == Mode::Magic
+        );
+        assert_eq!(
+            mode.requires_persistence(),
+            mode == Mode::Delegated || mode == Mode::Magic || mode == Mode::Undelegating
+        );
     }
-    assert!(bincode::deserialize::<AccountMode>(&[1]).is_err());
+    assert_eq!(Mode::default(), Mode::Missing);
+
+    for bytes in [[4, 0], [1, 0x80], [1, 6], [2, 1], [2, 2], [1, 0]] {
+        assert!(Mode::try_from(bytes).is_err());
+        assert!(bincode::deserialize::<Mode>(&bytes).is_err());
+        #[cfg(feature = "wincode")]
+        assert!(wincode::deserialize::<Mode>(&bytes).is_err());
+    }
+    assert!(bincode::deserialize::<Mode>(&[1]).is_err());
     #[cfg(feature = "wincode")]
-    assert!(wincode::deserialize::<AccountMode>(&[1]).is_err());
+    assert!(wincode::deserialize::<Mode>(&[1]).is_err());
 }
 
 #[test]

@@ -412,11 +412,10 @@ mod tests {
     fn immutable_modes_reject_mutations() {
         for mode in [
             AccountMode::Missing,
-            AccountMode::Base,
+            AccountMode::Mirrored,
             AccountMode::Runtime,
             AccountMode::Undelegating,
             AccountMode::Closed,
-            AccountMode::MirroredRuntime,
         ] {
             let owner = Pubkey::new_unique();
             let initial = match mode {

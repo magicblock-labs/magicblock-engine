@@ -417,20 +417,14 @@ type Result<T> = std::result::Result<T, AccountsDBError>;
 pub type AccountEntry = (Pubkey, AccountSharedData);
 
 /// Returns `true` for entries that must touch persisted storage.
-fn persisted(entry: &&AccountEntry) -> bool {
-    match entry.1.cow() {
-        CoWAccount::Borrowed(_) => true,
-        CoWAccount::Owned(_) => {
-            // Mode changes still need persisted cleanup after borrowed data grows into owned data.
-            entry.1.mode().requires_persistence() || entry.1.markers().contains(DirtyMarkers::MODE)
-        }
-    }
+fn persisted((_, account): &&AccountEntry) -> bool {
+    // Mode changes still need persisted cleanup after borrowed data grows into owned data.
+    matches!(account.cow(), CoWAccount::Borrowed(_))
+        || account.mode().requires_persistence()
+        || account.markers().contains(DirtyMarkers::MODE)
 }
 
 /// Returns `true` for entries that must touch volatile storage.
-fn volatile(entry: &&AccountEntry) -> bool {
-    match entry.1.cow() {
-        CoWAccount::Borrowed(_) => !entry.1.mode().requires_persistence(),
-        CoWAccount::Owned(_) => true,
-    }
+fn volatile((_, account): &&AccountEntry) -> bool {
+    matches!(account.cow(), CoWAccount::Owned(_)) || !account.mode().requires_persistence()
 }

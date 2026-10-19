@@ -19,11 +19,10 @@ resolution but reject user writes. `Closed` marks state for storage removal.
 Transitions to undelegating or closed revoke mutation immediately, including in CPI.
 The transaction-final writeback guard can accept a dirty transition into those
 modes without permitting further program writes. Other modes represent cached
-external absence (`Missing`), a read-only mirror (`Base`), and internal sysvar,
+external absence (`Missing`), a read-only mirror (`Mirrored`), and internal sysvar,
 feature, or precompile state (`Runtime`).
 
-`Runtime` has no base sync; `MirroredRuntime` is refreshed from base. Both are
-read-only runtime state and survive mirror reset.
+`Runtime` has no base sync, is read-only, and survives mirror reset.
 
 Privileged replacement validates mode and source slot together. Delegated, Magic,
 and Undelegating state can't be refreshed in the same mode, even at a newer slot;
@@ -32,13 +31,12 @@ transaction mutations aren't replacements and don't follow that restriction.
 
 | From | Allowed at the same or a newer slot | Requires a strictly newer slot |
 | :-- | :-- | :-- |
-| Missing | Base, Runtime, MirroredRuntime, Delegated, Magic, Closed | Missing |
-| Base | Delegated, Magic, Closed | Base, Missing |
-| Runtime | — | Runtime, MirroredRuntime |
-| MirroredRuntime | — | Runtime, MirroredRuntime |
+| Missing | Mirrored, Runtime, Delegated, Magic, Closed | Missing |
+| Mirrored | Delegated, Magic, Closed | Mirrored, Missing |
+| Runtime | — | Runtime |
 | Delegated | Undelegating | — |
 | Magic | Closed | — |
-| Undelegating | Base, Missing, Closed | Delegated |
+| Undelegating | Mirrored, Missing, Closed | Delegated |
 | Closed | — | — |
 
 Unlisted transitions and slot regressions fail without changing state or dirty

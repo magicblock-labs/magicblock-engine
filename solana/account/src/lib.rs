@@ -21,9 +21,7 @@ pub use cow::{
     ALIGNMENT, AccountBuilder, AccountSeqLock, AccountSharedData, BorrowedAccount, CoWAccount,
     DirtyMarkers, OwnedAccount, STORAGE_UNIT, StateFlags, StorageUnit,
 };
-pub use mode::{
-    AccessMode, AccountKind, AccountMode, DataFlow, InvalidAccountMode, StateAuthority,
-};
+pub use mode::{AccountMode, InvalidAccountMode};
 pub use patch::{AccountFieldPatch, AccountPatchError};
 #[cfg(feature = "bincode")]
 pub use sysvar::{

@@ -273,7 +273,7 @@ async fn replays_large_transactions_during_catch_up_and_live_streaming() {
     let created = AccountBuilder::default()
         .lamports(lamports)
         .owner(owner)
-        .mode(AccountMode::Base)
+        .mode(AccountMode::Mirrored)
         .slot(ACCOUNT_SLOT)
         .data(patterned_bytes(CREATE_DATA_LEN, 1));
     leader
@@ -414,7 +414,7 @@ async fn batches_transactions_without_crossing_block_boundaries() {
 async fn internally_paced_replication_persists_across_restart() {
     let state = Pubkey::new_unique();
     let volatile = Pubkey::new_unique();
-    let seed = [(state, 0, AccountMode::Delegated), (volatile, 7, AccountMode::Base)];
+    let seed = [(state, 0, AccountMode::Delegated), (volatile, 7, AccountMode::Mirrored)];
     let leader_authority: Authority = Keypair::new().into();
     let follower_authority = Authority {
         local: Arc::new(Keypair::new()),
@@ -457,7 +457,7 @@ async fn streams_and_resumes_without_duplicate_application() {
     let state = Pubkey::new_unique();
     // Only reset may remove the read-only account; delegated state must survive it.
     let volatile = Pubkey::new_unique();
-    let seed = [(state, 0, AccountMode::Delegated), (volatile, 7, AccountMode::Base)];
+    let seed = [(state, 0, AccountMode::Delegated), (volatile, 7, AccountMode::Mirrored)];
     let (mut leader, mut follower) = engines(&seed, &seed).await;
 
     // Catch-up crosses two sealed superblocks and a live tail from byte zero.

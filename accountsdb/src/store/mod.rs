@@ -6,7 +6,7 @@ use core::{hash::Hasher, slice};
 use std::sync::atomic::Ordering::{Acquire, Release};
 
 use solana_account::{
-    AccountMode, AccountSharedData, BorrowedAccount, CoWAccount::*, DirtyMarkers, OwnedAccount,
+    AccountSharedData, BorrowedAccount, CoWAccount::*, DirtyMarkers, OwnedAccount,
 };
 use solana_pubkey::Pubkey;
 use tracing::{error, warn};
@@ -156,7 +156,7 @@ impl PersistedStore {
     fn apply<'e>(&'e self, acc: &AccountEntry, txn: OptRwTxn<'_, 'e>) -> Result<()> {
         let (pubkey, account) = acc;
         // Drop any stale persisted entry when the mode no longer requires persistence.
-        if !account.mode().requires_persistence() || account.is(AccountMode::Closed) {
+        if !account.mode().requires_persistence() {
             self.delete(pubkey, txn)?;
             if let Borrowed(acc) = account.cow() {
                 acc.commit();

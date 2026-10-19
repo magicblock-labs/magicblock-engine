@@ -88,7 +88,12 @@ async fn account_crud_lifecycle() {
     let key = Pubkey::new_unique();
     let owner = Pubkey::new_unique();
 
-    let created = account(owner, vec![1, 2, 3, 4, 5, 6, 7, 8], AccountMode::Base, 10);
+    let created = account(
+        owner,
+        vec![1, 2, 3, 4, 5, 6, 7, 8],
+        AccountMode::Mirrored,
+        10,
+    );
     let authority_before = te.get_account(te.authority()).expect("sponsor exists").lamports();
 
     let accessor = te.account(key).await.unwrap();
@@ -101,10 +106,10 @@ async fn account_crud_lifecycle() {
     assert_eq!(acc.lamports(), LAMPORTS);
     assert_eq!(acc.owner(), &owner);
     assert_eq!(acc.data(), &[1, 2, 3, 4, 5, 6, 7, 8]);
-    assert!(acc.is(AccountMode::Base));
+    assert!(acc.is(AccountMode::Mirrored));
     let accessor = te.account(key).await.unwrap();
     assert!(accessor.exists());
-    assert_eq!(accessor.observed(), Some((AccountMode::Base, 10)));
+    assert_eq!(accessor.observed(), Some((AccountMode::Mirrored, 10)));
     drop(accessor);
 
     let authority_after = te.get_account(te.authority()).expect("sponsor exists").lamports();
@@ -120,13 +125,13 @@ async fn account_crud_lifecycle() {
     te.account(key)
         .await
         .unwrap()
-        .materialize(account(owner, vec![5; 16], AccountMode::Base, 11), None)
+        .materialize(account(owner, vec![5; 16], AccountMode::Mirrored, 11), None)
         .await
         .unwrap();
     let acc = te.get_account(key).expect("still exists");
     assert_eq!(acc.data(), &[5; 16], "materialization replaced the data");
     assert_eq!(acc.owner(), &owner, "materialization replaced the owner");
-    assert!(acc.is(AccountMode::Base));
+    assert!(acc.is(AccountMode::Mirrored));
 
     // delete: the account is gone from storage.
     te.account(key).await.unwrap().delete().await.unwrap();
@@ -177,7 +182,7 @@ async fn account_clone_materialization_accepts_large_data() {
         let account = AccountBuilder::default()
             .lamports(lamports)
             .owner(owner)
-            .mode(AccountMode::Base)
+            .mode(AccountMode::Mirrored)
             .slot(SLOT + index as u64)
             .data(data.clone());
 
@@ -186,7 +191,7 @@ async fn account_clone_materialization_accepts_large_data() {
         let stored = te.get_account(key).expect("large account exists");
         assert_eq!(stored.lamports(), lamports);
         assert_eq!(stored.owner(), &owner);
-        assert!(stored.is(AccountMode::Base));
+        assert!(stored.is(AccountMode::Mirrored));
         assert_eq!(stored.slot(), SLOT + index as u64);
         assert_eq!(stored.data(), data);
     }
@@ -353,12 +358,12 @@ async fn account_replacement_slot_ordering() {
     let owner = Pubkey::new_unique();
 
     for (from, to, slot) in [
-        (AccountMode::Base, AccountMode::Delegated, SLOT),
+        (AccountMode::Mirrored, AccountMode::Delegated, SLOT),
         (AccountMode::Delegated, AccountMode::Undelegating, SLOT),
-        (AccountMode::Undelegating, AccountMode::Base, SLOT),
+        (AccountMode::Undelegating, AccountMode::Mirrored, SLOT),
         (AccountMode::Undelegating, AccountMode::Delegated, SLOT + 1),
         (AccountMode::Missing, AccountMode::Magic, SLOT),
-        (AccountMode::Base, AccountMode::Magic, SLOT),
+        (AccountMode::Mirrored, AccountMode::Magic, SLOT),
     ] {
         let key = Pubkey::new_unique();
         materialize_with(&te, key, owner, from).await;
@@ -377,8 +382,8 @@ async fn account_replacement_slot_ordering() {
 
     let output = store_v42(&te, 0, AccountMode::Magic);
     for (from, to, slot) in [
-        (AccountMode::Base, AccountMode::Base, SLOT),
-        (AccountMode::Base, AccountMode::Delegated, SLOT - 1),
+        (AccountMode::Mirrored, AccountMode::Mirrored, SLOT),
+        (AccountMode::Mirrored, AccountMode::Delegated, SLOT - 1),
         (AccountMode::Undelegating, AccountMode::Delegated, SLOT - 1),
         (AccountMode::Magic, AccountMode::Delegated, SLOT - 1),
     ] {
@@ -406,7 +411,7 @@ async fn account_replacement_slot_ordering() {
 
     for (from, to, slot) in [
         (AccountMode::Missing, AccountMode::Undelegating, SLOT),
-        (AccountMode::Runtime, AccountMode::Base, SLOT),
+        (AccountMode::Runtime, AccountMode::Mirrored, SLOT),
         (AccountMode::Delegated, AccountMode::Delegated, SLOT + 1),
         (AccountMode::Magic, AccountMode::Magic, SLOT + 1),
         (
@@ -416,7 +421,7 @@ async fn account_replacement_slot_ordering() {
         ),
         (AccountMode::Undelegating, AccountMode::Delegated, SLOT),
         (AccountMode::Magic, AccountMode::Delegated, SLOT + 1),
-        (AccountMode::Magic, AccountMode::Base, SLOT + 1),
+        (AccountMode::Magic, AccountMode::Mirrored, SLOT + 1),
     ] {
         let key = Pubkey::new_unique();
         // Seed the source directly so only replacement validation is under test.
