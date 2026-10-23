@@ -5,6 +5,7 @@ use agave_transaction_view::{
     transaction_version::{MAGICBLOCK_PREFIX, TransactionVersion},
 };
 use keeper::TransactionView;
+use magic_root_interface::MagicRootInstruction;
 use solana_instruction::Instruction;
 use solana_message::{
     VersionedMessage,
@@ -141,27 +142,29 @@ pub(super) fn sigverify(view: &TransactionView) -> Result<()> {
 
 /// Composes an Engine-private transaction and signs its final
 /// Magicblock wire representation with the Engine authority.
-pub(crate) fn magicblock(instructions: &[Instruction], engine: &Engine) -> Result<Vec<u8>> {
-    let message = v1::Message::try_compile(&engine.authority(), instructions, engine.blockhash())?;
-    let message = VersionedMessage::V1(message);
+pub(crate) fn magicblock(mut instructions: Vec<Instruction>, engine: &Engine) -> Result<Vec<u8>> {
+    // Randomize the signed payload: repeated operations can share a blockhash.
+    instructions.push(MagicRootInstruction::Nonce(rand::random()).compose(engine.authority())?);
+    let message = v1::Message::try_compile(&engine.authority(), &instructions, engine.blockhash())?;
     // Private transactions have larger payloads but still obey runtime
     // instruction-trace and account-index limits.
-    if message.instructions().len() > MAGICBLOCK_INSTRUCTION_TRACE_LENGTH {
-        Err(TransactionError::SanitizeFailure)?;
-    } else if message.static_account_keys().len() > MAX_MAGICBLOCK_ACCOUNT_LOCKS {
-        Err(TransactionError::TooManyAccountLocks)?;
+    if message.instructions.len() > MAGICBLOCK_INSTRUCTION_TRACE_LENGTH {
+        return Err(TransactionError::SanitizeFailure.into());
     }
-    for ix in message.instructions() {
-        if ix.accounts.len() > MAX_MAGICBLOCK_ACCOUNT_LOCKS {
-            Err(TransactionError::TooManyAccountLocks)?;
-        }
+    if message.account_keys.len() > MAX_MAGICBLOCK_ACCOUNT_LOCKS
+        || message
+            .instructions
+            .iter()
+            .any(|ix| ix.accounts.len() > MAX_MAGICBLOCK_ACCOUNT_LOCKS)
+    {
+        return Err(TransactionError::TooManyAccountLocks.into());
     }
 
     // Reserve the trailing signature slot without signing the V1 prefix, which
     // is replaced below before the only signing operation.
     let transaction = VersionedTransaction {
         signatures: vec![Default::default()],
-        message,
+        message: VersionedMessage::V1(message),
     };
     let mut data = wincode::serialize(&transaction).map_err(wincode::Error::from)?;
     // Select the private wire format before signing; its payload limit exceeds V1's.
