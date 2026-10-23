@@ -26,6 +26,7 @@ processor = { workspace = true }
 derive_more = { workspace = true }
 num_cpus = { workspace = true }
 oneshot = { workspace = true }
+rand = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }

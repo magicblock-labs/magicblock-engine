@@ -38,6 +38,8 @@ pub enum MagicRootInstruction {
     /// (e.g. initializing a freshly created account); each is invoked via CPI
     /// against the accounts it declares.
     PostFinalize(PostFinalize),
+    /// Distinguishes repeated private operations without changing account state.
+    Nonce(u64),
 }
 
 impl MagicRootInstruction {
@@ -79,7 +81,7 @@ impl MagicRootInstruction {
         };
         for ix in &post_finalize.actions {
             accounts.push(AccountMeta::new_readonly(ix.program_id, false));
-            let metas = ix.accounts.clone().into_iter().map(|mut meta| {
+            let metas = ix.accounts.iter().cloned().map(|mut meta| {
                 meta.is_signer = false;
                 meta
             });

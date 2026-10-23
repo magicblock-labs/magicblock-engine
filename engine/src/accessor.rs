@@ -79,15 +79,14 @@ impl AccountAccessor<'_> {
             let ix = MagicRootInstruction::PostFinalize(actions);
             instructions.push(ix.compose(pubkey)?);
         }
-        self.execute(&instructions, Some(mode)).await
+        self.execute(instructions, Some(mode)).await
     }
 
     /// Closes the account, releasing ownership after definitive completion.
     /// Cancellation has the same ownership contract as [`Self::materialize`].
     pub async fn delete(self) -> Result<()> {
-        let pubkey = self.pubkey();
-        let instruction = MagicRootInstruction::Delete.compose(pubkey)?;
-        self.execute(&[instruction], None).await
+        let instruction = MagicRootInstruction::Delete.compose(self.pubkey())?;
+        self.execute(vec![instruction], None).await
     }
 
     /// Keeps this accessor only for a present account that does not require persistence.
@@ -102,7 +101,11 @@ impl AccountAccessor<'_> {
 
     /// Before submission, cancellation releases the lease without submitting work.
     /// After submission, the task owns completion and success bookkeeping.
-    async fn execute(self, instructions: &[Instruction], mode: Option<AccountMode>) -> Result<()> {
+    async fn execute(
+        self,
+        instructions: Vec<Instruction>,
+        mode: Option<AccountMode>,
+    ) -> Result<()> {
         let txn = transaction::magicblock(instructions, self.engine)?;
         let rx = self.engine.transaction(txn)?.submit().await?;
         // No await may separate successful submission from this lease handoff.

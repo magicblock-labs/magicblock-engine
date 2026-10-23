@@ -2339,6 +2339,7 @@ dependencies = [
  "magicblock-processor",
  "num_cpus",
  "oneshot",
+ "rand 0.9.5",
  "solana-account",
  "solana-compute-budget-program",
  "solana-instruction",
