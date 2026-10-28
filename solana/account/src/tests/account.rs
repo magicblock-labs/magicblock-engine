@@ -202,7 +202,7 @@ fn test_lifecycle_matrix() {
         (Mode::Mirrored, [2, 2, 0, 1, 1, 0, 1]),
         (Mode::Runtime, [0, 0, 2, 0, 0, 0, 0]),
         (Mode::Delegated, [0, 0, 0, 0, 0, 1, 0]),
-        (Mode::Magic, [0, 0, 0, 0, 0, 0, 1]),
+        (Mode::Magic, [0, 0, 0, 1, 0, 0, 1]),
         (Mode::Undelegating, [1, 1, 0, 2, 0, 0, 1]),
         (Mode::Closed, [0, 0, 0, 0, 0, 0, 0]),
     ];

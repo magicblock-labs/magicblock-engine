@@ -127,7 +127,11 @@ impl Engine {
     /// The accessor reports presence observed after acquisition.
     pub async fn account(&self, pubkey: Pubkey) -> Result<AccountAccessor<'_>> {
         let lease = self.accounts().lock(pubkey).await?;
-        Ok(AccountAccessor { engine: self, lease })
+        Ok(AccountAccessor {
+            engine: self,
+            lease,
+            expected: None,
+        })
     }
 
     /// Returns exclusive accessors for accounts that remain absent after locking.

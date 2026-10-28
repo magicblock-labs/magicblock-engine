@@ -18,6 +18,10 @@ installs the complete flags without changing lamports and loads executable state
 into the program cache. Closure marks the account for removal and immediately
 hides cached executable state.
 
+Conditional replacement first compares an expected account image with the loaded
+state, including data, lamports, owner, lifecycle, and flags. A mismatch aborts
+the transaction before replacement patches or follow-up actions.
+
 Rejected patches, failed executable loading, and failed follow-up actions roll
 back their account changes. Follow-up actions can't target MagicRoot or mark
 immutable accounts writable. The host validates source freshness, replacement

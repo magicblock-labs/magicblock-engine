@@ -46,6 +46,7 @@ pub struct AccountSharedData {
 
 /// Core account state shared by the borrowed and owned representations.
 #[repr(C)]
+#[cfg_attr(feature = "wincode", derive(wincode::SchemaRead, wincode::SchemaWrite))]
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct AccountCore {

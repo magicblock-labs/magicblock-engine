@@ -364,6 +364,8 @@ async fn account_replacement_slot_ordering() {
         (AccountMode::Undelegating, AccountMode::Delegated, SLOT + 1),
         (AccountMode::Missing, AccountMode::Magic, SLOT),
         (AccountMode::Mirrored, AccountMode::Magic, SLOT),
+        (AccountMode::Magic, AccountMode::Delegated, SLOT),
+        (AccountMode::Magic, AccountMode::Delegated, SLOT + 1),
     ] {
         let key = Pubkey::new_unique();
         materialize_with(&te, key, owner, from).await;
@@ -420,7 +422,6 @@ async fn account_replacement_slot_ordering() {
             SLOT + 1,
         ),
         (AccountMode::Undelegating, AccountMode::Delegated, SLOT),
-        (AccountMode::Magic, AccountMode::Delegated, SLOT + 1),
         (AccountMode::Magic, AccountMode::Mirrored, SLOT + 1),
     ] {
         let key = Pubkey::new_unique();
@@ -454,7 +455,8 @@ async fn account_replacement_slot_ordering() {
 }
 
 /// Proves creation and redelegation roll back an earlier action on
-/// failure, permit retry after reacquiring, and cannot replay actions once active.
+/// failure, reject changed snapshots, permit retry after reacquiring, and cannot
+/// replay actions once active.
 #[tokio::test(flavor = "multi_thread")]
 async fn account_activation_is_atomic() {
     let te = TestEngine::new().await;
@@ -473,10 +475,29 @@ async fn account_activation_is_atomic() {
             source_program: V42_ID,
             actions: vec![transfer(key, output, 1)],
         };
+        let expected = before[0].as_ref().map(|account| account.owned()).unwrap_or_default();
+        let stale = AccountBuilder::from(AccountSharedData::from(expected.clone()))
+            .data(vec![0xAA])
+            .build();
+        let error = te
+            .account(key)
+            .await
+            .unwrap()
+            .require(&stale)
+            .materialize(replacement.clone(), Some(actions()))
+            .await
+            .expect_err("changed data rejects the replacement even with matching mode and slot");
+        assert!(matches!(error, EngineError::AccountChanged));
+        assert_eq!(
+            state(),
+            before,
+            "conflict changes no target, sponsor, or action account"
+        );
         let accessor = te.account(key).await.unwrap();
         let mut failing = actions();
         failing.actions.push((E::lit(i64::MIN) - E::lit(1)).compose(output, &[]));
         let error = accessor
+            .require(&expected)
             .materialize(replacement.clone(), Some(failing))
             .await
             .expect_err("second action aborts the whole activation");
@@ -505,6 +526,7 @@ async fn account_activation_is_atomic() {
             "reacquired state still permits creation or redelegation"
         );
         accessor
+            .require(&expected)
             .materialize(replacement.clone(), Some(actions()))
             .await
             .expect("retry commits after reacquiring and reconciling");

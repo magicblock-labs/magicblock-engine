@@ -1,4 +1,4 @@
-use magic_root_interface::MagicRootInstruction;
+use magic_root_interface::{ACCOUNT_CHANGED, MagicRootInstruction};
 use nucleus::tls::AUTHORITY;
 use solana_instruction::TRANSACTION_LEVEL_STACK_HEIGHT;
 use solana_instruction_error::InstructionError;
@@ -76,6 +76,12 @@ fn dispatch(
         MagicRootInstruction::Delete => account::delete(ctx, target),
         MagicRootInstruction::PostFinalize(actions) => post_finalize::process(ctx, actions),
         MagicRootInstruction::Nonce(_) => Ok(()),
+        MagicRootInstruction::CompareAndPatch { expected, patch } => {
+            if **ctx.transaction_context.accounts().try_borrow(target)? != expected {
+                return Err(ACCOUNT_CHANGED);
+            }
+            account::patch(ctx, target, patch)
+        }
     }
 }
 
