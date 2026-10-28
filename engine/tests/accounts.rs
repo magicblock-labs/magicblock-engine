@@ -476,23 +476,26 @@ async fn account_activation_is_atomic() {
             actions: vec![transfer(key, output, 1)],
         };
         let expected = before[0].as_ref().map(|account| account.owned()).unwrap_or_default();
-        let stale = AccountBuilder::from(AccountSharedData::from(expected.clone()))
-            .data(vec![0xAA])
-            .build();
-        let error = te
-            .account(key)
-            .await
-            .unwrap()
-            .require(&stale)
-            .materialize(replacement.clone(), Some(actions()))
-            .await
-            .expect_err("changed data rejects the replacement even with matching mode and slot");
-        assert!(matches!(error, EngineError::AccountChanged));
-        assert_eq!(
-            state(),
-            before,
-            "conflict changes no target, sponsor, or action account"
-        );
+        let snapshot = AccountBuilder::from(AccountSharedData::from(expected.clone()));
+        for stale in [
+            snapshot.clone().data(vec![0xAA]).build(),
+            snapshot.lamports(expected.lamports() + 1).build(),
+        ] {
+            let error = te
+                .account(key)
+                .await
+                .unwrap()
+                .require(&stale)
+                .materialize(replacement.clone(), Some(actions()))
+                .await
+                .expect_err("changed data or lamports rejects the replacement");
+            assert!(matches!(error, EngineError::AccountChanged));
+            assert_eq!(
+                state(),
+                before,
+                "conflict changes no target, sponsor, or action account"
+            );
+        }
         let accessor = te.account(key).await.unwrap();
         let mut failing = actions();
         failing.actions.push((E::lit(i64::MIN) - E::lit(1)).compose(output, &[]));
