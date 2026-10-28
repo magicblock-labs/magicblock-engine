@@ -1,7 +1,7 @@
 use crate::{
     Account, AccountBuilder, AccountFieldPatch, AccountMode, AccountPatchError, AccountSeqLock,
     AccountSharedData, BorrowedAccount, CoWAccount, DirtyMarkers, OwnedAccount, ReadableAccount,
-    StorageUnit, WritableAccount, accounts_equal,
+    StateFlags, StorageUnit, WritableAccount, accounts_equal,
     testkit::{delegated_account, init_borrowed_account, serialize_account_buffer},
 };
 use bincode::ErrorKind;
@@ -470,23 +470,44 @@ fn test_account_cow_is_copy_on_write() {
     assert_eq!(cloned.data(), &[1, 2]);
 }
 
+/// Proves rent eligibility survives encoding, borrowed storage, and executable
+/// flag updates, and clearing it persists through a borrowed commit.
 #[test]
-// Borrowed serialization should round-trip back to shared state.
 fn test_account_cow_borrowed_round_trip() {
     let pubkey = Pubkey::new_unique();
     let owner = Pubkey::new_unique();
-    let owned = AccountBuilder::default()
+    let mut expected = AccountBuilder::default()
         .lamports(5)
         .data(vec![7, 8])
         .owner(owner)
         .executable(true)
-        .build::<OwnedAccount>();
-    let expected: AccountSharedData = owned.clone().into();
+        .build::<AccountSharedData>();
+    expected.set_flags(StateFlags::EXECUTABLE | StateFlags::RENT_FUNDED);
+    let owned = expected.owned();
+    let decoded: OwnedAccount = bincode::deserialize(&bincode::serialize(&owned).unwrap()).unwrap();
+    assert!(decoded == owned);
+    #[cfg(feature = "wincode")]
+    {
+        let decoded: OwnedAccount =
+            wincode::deserialize(&wincode::serialize(&owned).unwrap()).unwrap();
+        assert!(decoded == owned);
+    }
     let mut buf = serialize_account_buffer(&owned, &pubkey);
     let borrowed = init_borrowed_account(&mut buf);
-    let shared = AccountSharedData::from(borrowed);
+    let mut shared = AccountSharedData::from(borrowed);
 
     assert_eq!(shared, expected);
+    shared.set_executable(false);
+    assert_eq!(*shared.flags(), StateFlags::RENT_FUNDED);
+    shared.set_flags(StateFlags::empty());
+    assert!(shared.markers().contains(DirtyMarkers::FLAGS));
+    let CoWAccount::Borrowed(borrowed) = shared.cow() else {
+        panic!("flag updates should not promote borrowed storage");
+    };
+    borrowed.commit();
+    drop(shared);
+    let reopened = AccountSharedData::from(init_borrowed_account(&mut buf));
+    assert!(reopened.flags().is_empty());
 }
 
 #[test]

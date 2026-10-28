@@ -383,6 +383,8 @@ bitflags::bitflags! {
     pub struct StateFlags: u8 {
         /// Executable account data.
         const EXECUTABLE = 1 << 0;
+        /// The account's full data length is backed by an ephemeral rent deposit.
+        const RENT_FUNDED = 1 << 1;
     }
 
     /// Bits that record which fields changed through `AccountSharedData`.
