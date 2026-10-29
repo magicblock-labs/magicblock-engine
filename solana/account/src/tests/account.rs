@@ -290,13 +290,14 @@ fn test_mode_layout_and_decoding() {
 
     assert_eq!(size_of::<Mode>(), 2);
     assert_eq!(align_of::<Mode>(), 2);
-    assert_eq!(size_of::<AccountCore>(), 56);
+    assert_eq!(size_of::<AccountCore>(), 64);
     assert_eq!(align_of::<AccountCore>(), 8);
     assert_eq!(offset_of!(AccountCore, lamports), 0);
     assert_eq!(offset_of!(AccountCore, owner), 8);
     assert_eq!(offset_of!(AccountCore, slot), 40);
-    assert_eq!(offset_of!(AccountCore, mode), 48);
-    assert_eq!(offset_of!(AccountCore, flags), 50);
+    assert_eq!(offset_of!(AccountCore, nonce), 48);
+    assert_eq!(offset_of!(AccountCore, mode), 56);
+    assert_eq!(offset_of!(AccountCore, flags), 58);
 
     let cases = [
         (Mode::Missing, [0, 4], None),

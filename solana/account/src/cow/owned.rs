@@ -88,6 +88,11 @@ impl OwnedAccount {
         self.core.slot
     }
 
+    /// Returns the number of accepted commit reservations in this session.
+    pub fn nonce(&self) -> u64 {
+        self.core.nonce
+    }
+
     /// Returns the account modifier flags.
     pub fn flags(&self) -> StateFlags {
         self.core.flags
@@ -139,6 +144,13 @@ impl AccountBuilder {
     /// Sets the source slot associated with the account image.
     pub fn slot(mut self, slot: Slot) -> Self {
         self.0.core.slot = slot;
+        self
+    }
+
+    /// Sets the reserved nonce when restoring a delegation session.
+    /// Fresh sessions leave this at its default of zero.
+    pub fn nonce(mut self, nonce: u64) -> Self {
+        self.0.core.nonce = nonce;
         self
     }
 

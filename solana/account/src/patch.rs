@@ -51,6 +51,10 @@ pub enum AccountFieldPatch {
     },
     /// Resizes the data buffer to an exact length, zero-filling when growing.
     DataLen(usize),
+    /// Replaces the session's reserved commit nonce.
+    /// Scheduling must check advancement; session synchronization must establish
+    /// freshness and use a complete-image comparison when replacing live state.
+    Nonce(u64),
 }
 
 impl AccountFieldPatch {
@@ -67,27 +71,31 @@ impl AccountFieldPatch {
             Self::Lifecycle { mode, slot } => return account.set_lifecycle(mode, slot),
             Self::DataAt { offset, data } => account.set_data_at(offset, &data),
             Self::DataLen(len) => account.resize(len, 0),
+            Self::Nonce(nonce) => account.set_nonce(nonce),
         }
         Ok(())
     }
 
     /// Decomposes an owned account into the ordered sequence of patches that
-    /// reconstruct its non-flag fields: lamports, lifecycle, owner, the exact
+    /// reconstruct its non-flag fields: lamports, lifecycle, nonce, owner, the exact
     /// data length, then the data in `MAX_DATA_CHUNK_SIZE`-sized chunks.
     pub fn sequence(account: OwnedAccount) -> Vec<Self> {
-        let mut sequence = Vec::with_capacity(5);
-        sequence.push(Self::Lamports(account.core.lamports));
-        sequence.push(Self::Lifecycle {
-            mode: account.core.mode,
-            slot: account.core.slot,
-        });
-        sequence.push(Self::Owner(account.core.owner));
-        sequence.push(Self::DataLen(account.data.len()));
-        let mut offset = 0;
-        for data in account.data.chunks(MAX_DATA_CHUNK_SIZE) {
-            sequence.push(Self::DataAt { offset, data: data.into() });
-            offset += data.len();
-        }
+        let chunks = account.data.chunks(MAX_DATA_CHUNK_SIZE);
+        let mut sequence = Vec::with_capacity(5 + chunks.len());
+        sequence.extend([
+            Self::Lamports(account.core.lamports),
+            Self::Lifecycle {
+                mode: account.core.mode,
+                slot: account.core.slot,
+            },
+            Self::Nonce(account.core.nonce),
+            Self::Owner(account.core.owner),
+            Self::DataLen(account.data.len()),
+        ]);
+        sequence.extend(chunks.enumerate().map(|(index, data)| Self::DataAt {
+            offset: index * MAX_DATA_CHUNK_SIZE,
+            data: data.into(),
+        }));
         sequence
     }
 }
@@ -102,6 +110,7 @@ impl fmt::Debug for AccountFieldPatch {
             Self::Lifecycle { mode, slot } => write!(f, "lifecycle={mode:?}@{slot}"),
             Self::DataAt { offset, data } => write!(f, "data@{offset}+{}", data.len()),
             Self::DataLen(len) => write!(f, "data_len={len}"),
+            Self::Nonce(nonce) => write!(f, "nonce={nonce}"),
         }
     }
 }
