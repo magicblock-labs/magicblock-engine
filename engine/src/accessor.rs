@@ -4,12 +4,12 @@ use std::sync::atomic::Ordering;
 
 use derive_more::Deref;
 use keeper::{AccountLease, ExecutionRecord, ResolvedTransaction, TransactionView};
-use magic_root_interface::{MagicRootInstruction, PostFinalize};
+use magic_root_interface::{ACCOUNT_CHANGED, MagicRootInstruction, PostFinalize};
 use nucleus::runtime::ExecutionRequest;
 use processor::{SequencerMessage, Simulation, SimulatorMessage};
-use solana_account::{AccountMode, OwnedAccount};
+use solana_account::{AccountFieldPatch, AccountMode, OwnedAccount};
 use solana_instruction::Instruction;
-use solana_transaction::TransactionResult;
+use solana_transaction::{TransactionError, TransactionResult};
 
 use crate::{
     Engine, IntoTransactionView,
@@ -28,6 +28,7 @@ pub struct AccountAccessor<'a> {
     #[deref]
     pub(crate) lease: AccountLease,
     pub(crate) engine: &'a Engine,
+    pub(crate) expected: Option<OwnedAccount>,
 }
 
 /// Transaction-submission operations bound to an engine instance.
@@ -40,6 +41,14 @@ pub struct TransactionAccessor<'a> {
 }
 
 impl AccountAccessor<'_> {
+    /// Conditions materialization on this complete account image.
+    /// A default image represents absence. A conflict changes nothing and runs
+    /// no actions; reacquire, reread, and recompute before retrying.
+    pub fn require(mut self, expected: &OwnedAccount) -> Self {
+        self.expected = Some(expected.clone());
+        self
+    }
+
     /// Materializes the account by patching in every field and finalizing it,
     /// optionally running follow-up actions once it is finalized.
     ///
@@ -74,7 +83,17 @@ impl AccountAccessor<'_> {
             return Ok(());
         }
         let pubkey = self.pubkey();
+        let lamports = acc.lamports();
         let mut instructions = MagicRootInstruction::compose_account(pubkey, acc)?;
+        if let Some(expected) = self.expected.take() {
+            // compose_account starts with the lamport patch. Fold the compare
+            // into it so conditional materialization adds no execution step.
+            instructions[0] = MagicRootInstruction::CompareAndPatch {
+                expected,
+                patch: AccountFieldPatch::Lamports(lamports),
+            }
+            .compose(pubkey)?;
+        }
         if let Some(actions) = actions {
             let ix = MagicRootInstruction::PostFinalize(actions);
             instructions.push(ix.compose(pubkey)?);
@@ -99,8 +118,10 @@ impl AccountAccessor<'_> {
         self.cached_eviction_applies().then_some(self)
     }
 
-    /// Before submission, cancellation releases the lease without submitting work.
-    /// After submission, the task owns completion and success bookkeeping.
+    /// Executes authority-signed account maintenance, retaining the lease through
+    /// definitive completion even if the caller cancels its wait.
+    /// The caller validates freshness and replacement eligibility. On success,
+    /// `mode` must describe the target's resulting lifecycle, or be `None` for deletion.
     async fn execute(
         self,
         instructions: Vec<Instruction>,
@@ -111,7 +132,7 @@ impl AccountAccessor<'_> {
         // No await may separate successful submission from this lease handoff.
         let mut lease = self.lease;
         // Dropping the join handle detaches this task; it must never be aborted.
-        tokio::spawn(async move {
+        let result = tokio::spawn(async move {
             rx.await??;
             match mode {
                 Some(mode) => lease.materialized(mode),
@@ -119,7 +140,15 @@ impl AccountAccessor<'_> {
             }
             Ok(())
         })
-        .await?
+        .await?;
+        const ACCOUNT_CHANGED_ERROR: TransactionError =
+            TransactionError::InstructionError(0, ACCOUNT_CHANGED);
+        match result {
+            Err(EngineError::TransactionExecution(ACCOUNT_CHANGED_ERROR)) => {
+                Err(EngineError::AccountChanged)
+            }
+            result => result,
+        }
     }
 }
 

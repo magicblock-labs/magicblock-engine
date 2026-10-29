@@ -61,9 +61,17 @@ still reaches [lifecycle validation](../solana/account/README.md#account-lifecyc
 MBV validates source freshness, replacement eligibility, and action provenance.
 Engine enforces lifecycle transitions. Undelegating redelegation requires a new
 delegation at a strictly newer slot, not a newer observation of the old delegation.
-Delegated state can't be replaced in the same mode. Magic state remains authoritative
-until explicitly closed, regardless of token balance. Materialization and deletion
-require the local signer to match the effective authority.
+Delegated state can't be replaced in the same mode. Replacing Magic state with
+Delegated state requires the caller to validate application-specific eligibility
+and reconcile live local state atomically. `require` conditions materialization
+on the complete expected account image, checked in the replacement transaction
+before patches and actions. Skipped materializations do not compare the image or
+report conflicts. A conflict returns `AccountChanged`; the caller must reread and
+recompute rather than resubmit a stale replacement. The serialized comparison
+instruction, including the expected image, must fit within 65,535 bytes; larger
+images are unsupported and must not fall back to unconditional replacement.
+Other Magic state remains authoritative until explicitly closed. Materialization
+and deletion require the local signer to match the effective authority.
 
 After submission, the operation retains its lease through completion even if the
 waiter is cancelled. An uncertain outcome requires reacquiring the accessor and

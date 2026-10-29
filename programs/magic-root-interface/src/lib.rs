@@ -7,6 +7,9 @@ use wincode::{SchemaRead, SchemaWrite};
 
 declare_id!("MagicRootDRJ5atQjSJUxFjXzjeZXMADHUDznbk22gy");
 
+/// MagicRoot rejected a conditional replacement because the account changed.
+pub const ACCOUNT_CHANGED: InstructionError = InstructionError::Custom(0);
+
 /// Trusted provenance and follow-up instructions for a finalized account.
 ///
 /// `source_program` becomes the effective caller of each direct action. Code
@@ -16,7 +19,7 @@ declare_id!("MagicRootDRJ5atQjSJUxFjXzjeZXMADHUDznbk22gy");
 /// from untrusted action data. The source program need not equal the finalized
 /// account's current owner because projected accounts may deliberately retain
 /// a different state owner.
-#[derive(SchemaRead, SchemaWrite)]
+#[derive(Clone, SchemaRead, SchemaWrite)]
 pub struct PostFinalize {
     /// Verified program to expose as the effective caller of each direct action.
     pub source_program: Pubkey,
@@ -40,6 +43,13 @@ pub enum MagicRootInstruction {
     PostFinalize(PostFinalize),
     /// Distinguishes repeated private operations without changing account state.
     Nonce(u64),
+    /// Applies a patch only if the complete account image still matches.
+    CompareAndPatch {
+        /// Complete image expected before mutation.
+        expected: OwnedAccount,
+        /// First replacement patch, applied after a successful comparison.
+        patch: AccountFieldPatch,
+    },
 }
 
 impl MagicRootInstruction {

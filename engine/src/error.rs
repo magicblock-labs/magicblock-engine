@@ -16,6 +16,9 @@ pub type Result<T> = std::result::Result<T, EngineError>;
 /// Failures surfaced by the top-level engine.
 #[derive(From, thiserror::Error, Debug)]
 pub enum EngineError {
+    /// A conditional materialization lost a race with another account mutation.
+    #[error("account changed before materialization")]
+    AccountChanged,
     /// A durable-state (keeper) operation failed.
     #[error("state error: {0}")]
     State(#[source] KeeperError),

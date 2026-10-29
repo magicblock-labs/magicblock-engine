@@ -8,6 +8,7 @@ use solana_pubkey::Pubkey;
 use std::{ptr::NonNull, sync::Arc};
 
 /// Heap-backed account, used after promotion from borrowed or direct construction.
+#[cfg_attr(feature = "wincode", derive(wincode::SchemaRead, wincode::SchemaWrite))]
 #[derive(Clone, Default, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct OwnedAccount {

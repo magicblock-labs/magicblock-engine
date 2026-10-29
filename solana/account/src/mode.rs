@@ -203,8 +203,8 @@ impl AccountMode {
                 Missing | Mirrored | Runtime | Delegated | Magic | Closed => Forbidden,
             },
             Magic => match to {
-                Closed => SameOrNewer,
-                Missing | Mirrored | Runtime | Delegated | Magic | Undelegating => Forbidden,
+                Delegated | Closed => SameOrNewer,
+                Missing | Mirrored | Runtime | Magic | Undelegating => Forbidden,
             },
             Undelegating => match to {
                 Missing | Mirrored | Closed => SameOrNewer,

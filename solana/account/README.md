@@ -35,14 +35,15 @@ transaction mutations aren't replacements and don't follow that restriction.
 | Mirrored | Delegated, Magic, Closed | Mirrored, Missing |
 | Runtime | — | Runtime |
 | Delegated | Undelegating | — |
-| Magic | Closed | — |
+| Magic | Delegated, Closed | — |
 | Undelegating | Mirrored, Missing, Closed | Delegated |
 | Closed | — | — |
 
 Unlisted transitions and slot regressions fail without changing state or dirty
-markers. Magic state must be explicitly closed before another image can occupy
-its key, regardless of token balance. The host validates creation and closure
-eligibility, including application-specific token rules. [Engine's import path](../../engine/README.md#account-replacement)
+markers. Replacing Magic state with Delegated state requires application-specific
+validation and reconciliation of live local state, guarded against concurrent writes; it is not an
+ordinary remote refresh. The host validates creation and closure eligibility.
+[Engine's import path](../../engine/README.md#account-replacement)
 owns observation-based deduplication and the evidence required for redelegation.
 
 Binary mode encoding matches its two-byte memory layout; unsupported pairs are rejected.
