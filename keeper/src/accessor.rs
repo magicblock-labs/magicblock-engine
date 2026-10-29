@@ -42,6 +42,11 @@ pub struct AccountsAccessor<'a> {
 }
 
 impl<'a> AccountsAccessor<'a> {
+    /// Promotes an existing recency entry without loading or pinning the account.
+    pub fn touch(&self, pubkey: &Pubkey) {
+        self.keeper.caches.accounts.lru.get_sync(pubkey);
+    }
+
     /// Waits for exclusive mutation ownership of `pubkey` and records the
     /// account lifecycle observed after acquiring the lease.
     pub async fn lock(&self, pubkey: Pubkey) -> Result<AccountLease> {

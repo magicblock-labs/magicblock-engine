@@ -84,7 +84,7 @@ pub(crate) struct AccountCache {
 impl AccountCache {
     /// Creates mutation coordination with the requested recency capacity.
     pub(crate) fn new(capacity: usize) -> Self {
-        let lru = HashCache::with_capacity_and_hasher(256, capacity, Default::default());
+        let lru = HashCache::with_capacity_and_hasher(capacity, capacity, Default::default());
         Self {
             lru,
             reservations: Default::default(),

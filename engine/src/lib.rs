@@ -136,9 +136,10 @@ impl Engine {
 
     /// Returns exclusive accessors for accounts that remain absent after locking.
     ///
-    /// A single loader scans the requested keys before any lock wait. Missing
-    /// keys are deduplicated and locked in pubkey order so overlapping scans
-    /// cannot deadlock each other. Presence is checked again under each lease;
+    /// A single loader scans the requested keys before any lock wait. Accounts
+    /// found present are promoted in the recency cache. Missing keys are
+    /// deduplicated and locked in pubkey order so overlapping scans cannot
+    /// deadlock each other. Presence is checked again under each lease;
     /// callers must still avoid acquiring these keys recursively.
     pub async fn missing_accounts(&self, pubkeys: &[Pubkey]) -> Result<Vec<AccountAccessor<'_>>> {
         let mut missing = {
@@ -146,7 +147,9 @@ impl Engine {
             let loader = accounts.loader();
             let mut missing = Vec::new();
             for &pubkey in pubkeys {
-                if !loader.contains(&pubkey).map_err(KeeperError::from)? {
+                if loader.contains(&pubkey).map_err(KeeperError::from)? {
+                    accounts.touch(&pubkey);
+                } else {
                     missing.push(pubkey);
                 }
             }
@@ -158,7 +161,9 @@ impl Engine {
         let mut accessors = Vec::with_capacity(missing.len());
         for pubkey in missing {
             let accessor = self.account(pubkey).await?;
-            if !accessor.exists() {
+            if accessor.exists() {
+                self.accounts().touch(&pubkey);
+            } else {
                 accessors.push(accessor);
             }
         }
