@@ -443,7 +443,7 @@ fn test_defragment_preserves_live_accounts() {
 #[test]
 fn test_defragment_best_fit_and_deferred_holes() {
     let owner = Pubkey::new_unique();
-    let small = mutable_units(1, 21, &owner);
+    let small = delegated_account(1, vec![], owner).build::<AccountSharedData>();
     let small_units = u64::from(small.owned().units());
     let medium = mutable_at_least(2, MIN_REMAINDER, &owner);
     let medium_units = u64::from(medium.owned().units());
@@ -531,7 +531,7 @@ fn test_defragment_best_fit_and_deferred_holes() {
 
         let pass = unsafe { db.persisted.defragment() }.unwrap();
         assert_eq!(pass.moved, 3);
-        assert_eq!(pass.reclaimed, 63);
+        assert_eq!(pass.reclaimed, 3 * small_units);
         assert!(offset(&db, &wide_key_b) == wide_dst);
         assert!(offset(&db, &exact_key) == exact_dst);
 

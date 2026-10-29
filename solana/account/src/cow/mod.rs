@@ -56,6 +56,8 @@ pub struct AccountCore {
     pub(crate) owner: Pubkey,
     /// Source slot associated with the latest privileged lifecycle update.
     pub(crate) slot: Slot,
+    /// Number of accepted commit reservations in this delegation session.
+    pub(crate) nonce: u64,
     /// Classification, ordinary local access, and synchronization policy.
     pub(crate) mode: AccountMode,
     /// Account state modifier flags.
@@ -119,6 +121,21 @@ impl AccountSharedData {
     /// Returns the source slot associated with the account's lifecycle state.
     pub fn slot(&self) -> Slot {
         self.slot
+    }
+
+    /// Returns the number of accepted commit reservations in this session.
+    pub fn nonce(&self) -> u64 {
+        self.nonce
+    }
+
+    /// Replaces session metadata through the privileged account patch path.
+    pub(crate) fn set_nonce(&mut self, nonce: u64) {
+        if self.nonce == nonce {
+            return;
+        }
+        self.translate();
+        self.dirty.insert(DirtyMarkers::NONCE);
+        self.nonce = nonce;
     }
 
     /// Copies a clean borrowed image into the shadow buffer before mutation.
@@ -402,6 +419,8 @@ bitflags::bitflags! {
         const SLOT     = 1 << 4;
         /// Data bytes changed.
         const DATA     = 1 << 5;
+        /// Commit nonce changed.
+        const NONCE    = 1 << 6;
     }
 }
 
