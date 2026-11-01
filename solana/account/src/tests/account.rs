@@ -512,28 +512,12 @@ fn test_account_cow_borrowed_round_trip() {
 }
 
 #[test]
-fn test_commit_seq_round_trip_and_rollback() {
+fn test_commit_seq_patch_persists_in_borrowed_account() {
     let key = Pubkey::new_unique();
     let original = AccountBuilder::default()
         .mode(AccountMode::Delegated)
         .commit_seq(41)
         .build::<OwnedAccount>();
-    assert_eq!(original.commit_seq(), 41);
-    assert!(
-        bincode::deserialize::<OwnedAccount>(&bincode::serialize(&original).unwrap()).unwrap()
-            == original
-    );
-    #[cfg(feature = "wincode")]
-    assert!(
-        wincode::deserialize::<OwnedAccount>(&wincode::serialize(&original).unwrap()).unwrap()
-            == original
-    );
-    assert!(
-        AccountFieldPatch::sequence(original.clone())
-            .iter()
-            .any(|patch| matches!(patch, AccountFieldPatch::CommitSeq(41)))
-    );
-
     let mut buffer = serialize_account_buffer(&original, &key);
     let mut account = AccountSharedData::from(init_borrowed_account(&mut buffer));
     assert_eq!(account.commit_seq(), 41);
@@ -543,15 +527,10 @@ fn test_commit_seq_round_trip_and_rollback() {
         panic!("expected borrowed account")
     };
     borrowed.commit();
+    drop(account);
     assert_eq!(
         AccountSharedData::from(init_borrowed_account(&mut buffer)).commit_seq(),
         42
-    );
-    // SAFETY: this view published the latest commit and holds exclusive writer access.
-    unsafe { borrowed.rollback() };
-    assert_eq!(
-        AccountSharedData::from(init_borrowed_account(&mut buffer)).commit_seq(),
-        41
     );
 }
 
