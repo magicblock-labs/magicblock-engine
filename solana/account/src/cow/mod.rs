@@ -56,8 +56,11 @@ pub struct AccountCore {
     pub(crate) owner: Pubkey,
     /// Source slot associated with the latest privileged lifecycle update.
     pub(crate) slot: Slot,
-    /// Latest commit sequence finalized on the base chain or reserved by an accepted intent.
-    /// Fresh delegation sessions start at zero; local reservations can run ahead of finalization.
+    /// Commit counter for this delegated account.
+    /// A ScheduleCommit-family instruction increments it before returning and
+    /// saves the new value with its scheduled intent. Later schedules can
+    /// increment the counter again; each intent keeps its value for this account.
+    /// A fresh session starts at zero, so N schedules make the counter N.
     pub(crate) commit_seq: u32,
     /// Classification, ordinary local access, and synchronization policy.
     pub(crate) mode: AccountMode,
