@@ -89,8 +89,8 @@ impl OwnedAccount {
     }
 
     /// Returns the number of accepted commit reservations in this session.
-    pub fn nonce(&self) -> u64 {
-        self.core.nonce
+    pub fn commit_seq(&self) -> u32 {
+        self.core.commit_seq
     }
 
     /// Returns the account modifier flags.
@@ -147,10 +147,10 @@ impl AccountBuilder {
         self
     }
 
-    /// Sets the reserved nonce when restoring a delegation session.
+    /// Sets the reserved commit sequence when restoring a delegation session.
     /// Fresh sessions leave this at its default of zero.
-    pub fn nonce(mut self, nonce: u64) -> Self {
-        self.0.core.nonce = nonce;
+    pub fn commit_seq(mut self, commit_seq: u32) -> Self {
+        self.0.core.commit_seq = commit_seq;
         self
     }
 

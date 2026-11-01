@@ -290,14 +290,14 @@ fn test_mode_layout_and_decoding() {
 
     assert_eq!(size_of::<Mode>(), 2);
     assert_eq!(align_of::<Mode>(), 2);
-    assert_eq!(size_of::<AccountCore>(), 64);
+    assert_eq!(size_of::<AccountCore>(), 56);
     assert_eq!(align_of::<AccountCore>(), 8);
     assert_eq!(offset_of!(AccountCore, lamports), 0);
     assert_eq!(offset_of!(AccountCore, owner), 8);
     assert_eq!(offset_of!(AccountCore, slot), 40);
-    assert_eq!(offset_of!(AccountCore, nonce), 48);
-    assert_eq!(offset_of!(AccountCore, mode), 56);
-    assert_eq!(offset_of!(AccountCore, flags), 58);
+    assert_eq!(offset_of!(AccountCore, commit_seq), 48);
+    assert_eq!(offset_of!(AccountCore, mode), 52);
+    assert_eq!(offset_of!(AccountCore, flags), 54);
 
     let cases = [
         (Mode::Missing, [0, 4], None),
@@ -509,6 +509,50 @@ fn test_account_cow_borrowed_round_trip() {
     drop(shared);
     let reopened = AccountSharedData::from(init_borrowed_account(&mut buf));
     assert!(reopened.flags().is_empty());
+}
+
+#[test]
+fn test_commit_seq_round_trip_and_rollback() {
+    let key = Pubkey::new_unique();
+    let original = AccountBuilder::default()
+        .mode(AccountMode::Delegated)
+        .commit_seq(41)
+        .build::<OwnedAccount>();
+    assert_eq!(original.commit_seq(), 41);
+    assert!(
+        bincode::deserialize::<OwnedAccount>(&bincode::serialize(&original).unwrap()).unwrap()
+            == original
+    );
+    #[cfg(feature = "wincode")]
+    assert!(
+        wincode::deserialize::<OwnedAccount>(&wincode::serialize(&original).unwrap()).unwrap()
+            == original
+    );
+    assert!(
+        AccountFieldPatch::sequence(original.clone())
+            .iter()
+            .any(|patch| matches!(patch, AccountFieldPatch::CommitSeq(41)))
+    );
+
+    let mut buffer = serialize_account_buffer(&original, &key);
+    let mut account = AccountSharedData::from(init_borrowed_account(&mut buffer));
+    assert_eq!(account.commit_seq(), 41);
+    AccountFieldPatch::CommitSeq(42).apply(&mut account).unwrap();
+    assert!(account.markers().contains(DirtyMarkers::COMMIT_SEQ));
+    let CoWAccount::Borrowed(borrowed) = account.cow() else {
+        panic!("expected borrowed account")
+    };
+    borrowed.commit();
+    assert_eq!(
+        AccountSharedData::from(init_borrowed_account(&mut buffer)).commit_seq(),
+        42
+    );
+    // SAFETY: this view published the latest commit and holds exclusive writer access.
+    unsafe { borrowed.rollback() };
+    assert_eq!(
+        AccountSharedData::from(init_borrowed_account(&mut buffer)).commit_seq(),
+        41
+    );
 }
 
 #[test]

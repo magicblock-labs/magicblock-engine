@@ -51,10 +51,10 @@ pub enum AccountFieldPatch {
     },
     /// Resizes the data buffer to an exact length, zero-filling when growing.
     DataLen(usize),
-    /// Replaces the session's reserved commit nonce.
+    /// Replaces the session's reserved commit sequence.
     /// Scheduling must check advancement; session synchronization must establish
     /// freshness and use a complete-image comparison when replacing live state.
-    Nonce(u64),
+    CommitSeq(u32),
 }
 
 impl AccountFieldPatch {
@@ -71,13 +71,13 @@ impl AccountFieldPatch {
             Self::Lifecycle { mode, slot } => return account.set_lifecycle(mode, slot),
             Self::DataAt { offset, data } => account.set_data_at(offset, &data),
             Self::DataLen(len) => account.resize(len, 0),
-            Self::Nonce(nonce) => account.set_nonce(nonce),
+            Self::CommitSeq(commit_seq) => account.set_commit_seq(commit_seq),
         }
         Ok(())
     }
 
     /// Decomposes an owned account into the ordered sequence of patches that
-    /// reconstruct its non-flag fields: lamports, lifecycle, nonce, owner, the exact
+    /// reconstruct its non-flag fields: lamports, lifecycle, commit sequence, owner, the exact
     /// data length, then the data in `MAX_DATA_CHUNK_SIZE`-sized chunks.
     pub fn sequence(account: OwnedAccount) -> Vec<Self> {
         let chunks = account.data.chunks(MAX_DATA_CHUNK_SIZE);
@@ -88,7 +88,7 @@ impl AccountFieldPatch {
                 mode: account.core.mode,
                 slot: account.core.slot,
             },
-            Self::Nonce(account.core.nonce),
+            Self::CommitSeq(account.core.commit_seq),
             Self::Owner(account.core.owner),
             Self::DataLen(account.data.len()),
         ]);
@@ -110,7 +110,7 @@ impl fmt::Debug for AccountFieldPatch {
             Self::Lifecycle { mode, slot } => write!(f, "lifecycle={mode:?}@{slot}"),
             Self::DataAt { offset, data } => write!(f, "data@{offset}+{}", data.len()),
             Self::DataLen(len) => write!(f, "data_len={len}"),
-            Self::Nonce(nonce) => write!(f, "nonce={nonce}"),
+            Self::CommitSeq(commit_seq) => write!(f, "commit_seq={commit_seq}"),
         }
     }
 }
