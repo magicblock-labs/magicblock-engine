@@ -56,7 +56,8 @@ pub struct AccountCore {
     pub(crate) owner: Pubkey,
     /// Source slot associated with the latest privileged lifecycle update.
     pub(crate) slot: Slot,
-    /// Number of accepted commit reservations in this delegation session.
+    /// Latest commit sequence finalized on the base chain or reserved by an accepted intent.
+    /// Fresh delegation sessions start at zero; local reservations can run ahead of finalization.
     pub(crate) commit_seq: u32,
     /// Classification, ordinary local access, and synchronization policy.
     pub(crate) mode: AccountMode,
@@ -123,7 +124,7 @@ impl AccountSharedData {
         self.slot
     }
 
-    /// Returns the number of accepted commit reservations in this session.
+    /// Returns the latest finalized or reserved commit sequence.
     pub fn commit_seq(&self) -> u32 {
         self.commit_seq
     }

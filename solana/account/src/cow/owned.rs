@@ -88,7 +88,7 @@ impl OwnedAccount {
         self.core.slot
     }
 
-    /// Returns the number of accepted commit reservations in this session.
+    /// Returns the latest finalized or reserved commit sequence.
     pub fn commit_seq(&self) -> u32 {
         self.core.commit_seq
     }
