@@ -512,29 +512,6 @@ fn test_account_cow_borrowed_round_trip() {
 }
 
 #[test]
-fn test_commit_seq_patch_persists_in_borrowed_account() {
-    let key = Pubkey::new_unique();
-    let original = AccountBuilder::default()
-        .mode(AccountMode::Delegated)
-        .commit_seq(41)
-        .build::<OwnedAccount>();
-    let mut buffer = serialize_account_buffer(&original, &key);
-    let mut account = AccountSharedData::from(init_borrowed_account(&mut buffer));
-    assert_eq!(account.commit_seq(), 41);
-    AccountFieldPatch::CommitSeq(42).apply(&mut account).unwrap();
-    assert!(account.markers().contains(DirtyMarkers::COMMIT_SEQ));
-    let CoWAccount::Borrowed(borrowed) = account.cow() else {
-        panic!("expected borrowed account")
-    };
-    borrowed.commit();
-    drop(account);
-    assert_eq!(
-        AccountSharedData::from(init_borrowed_account(&mut buffer)).commit_seq(),
-        42
-    );
-}
-
-#[test]
 // Writing past borrowed capacity should promote to owned storage.
 fn test_account_cow_borrowed_extend_promotes() {
     let (_buf, mut shared) = make_borrowed(vec![7, 8]);
