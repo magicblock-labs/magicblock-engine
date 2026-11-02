@@ -44,8 +44,8 @@ Transitions to either revoke mutation immediately, including across CPI. Final
 writeback can accept a dirty transition without authorizing further writes.
 
 The [account crate](account/README.md) owns those rules and the active/shadow layout.
-Dirty markers track data, owner, lamports, slot, mode, and flags; touched flags track
-transaction access. Both are caller writeback signals, not persistence operations.
+Dirty markers track data, owner, lamports, slot, mode, flags, and commit sequence;
+touched flags track transaction access. Both are caller writeback signals, not persistence operations.
 Complete-account patches cover non-flag fields, and MagicRoot finalization installs
 the complete flags without changing lamports. Source freshness remains the host's
 responsibility. `rent_epoch` isn't stored; compatibility APIs return a masked value

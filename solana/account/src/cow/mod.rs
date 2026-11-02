@@ -56,14 +56,18 @@ pub struct AccountCore {
     pub(crate) owner: Pubkey,
     /// Source slot associated with the latest privileged lifecycle update.
     pub(crate) slot: Slot,
-    /// Number of accepted commit reservations in this delegation session.
-    pub(crate) nonce: u64,
+    /// Commit counter for this delegated account.
+    /// A ScheduleCommit-family instruction increments it before returning and
+    /// saves the new value with its scheduled intent. Later schedules can
+    /// increment the counter again; each intent keeps its value for this account.
+    /// A fresh session starts at zero, so N schedules make the counter N.
+    pub(crate) commit_seq: u32,
     /// Classification, ordinary local access, and synchronization policy.
     pub(crate) mode: AccountMode,
     /// Account state modifier flags.
     pub(crate) flags: StateFlags,
     /// Reserved bytes that make the serialized representation deterministic.
-    _padding: [u8; 5],
+    _padding: [u8; 1],
 }
 
 impl Deref for AccountSharedData {
@@ -123,19 +127,19 @@ impl AccountSharedData {
         self.slot
     }
 
-    /// Returns the number of accepted commit reservations in this session.
-    pub fn nonce(&self) -> u64 {
-        self.nonce
+    /// Returns the latest finalized or reserved commit sequence.
+    pub fn commit_seq(&self) -> u32 {
+        self.commit_seq
     }
 
     /// Replaces session metadata through the privileged account patch path.
-    pub(crate) fn set_nonce(&mut self, nonce: u64) {
-        if self.nonce == nonce {
+    pub(crate) fn set_commit_seq(&mut self, commit_seq: u32) {
+        if self.commit_seq == commit_seq {
             return;
         }
         self.translate();
-        self.dirty.insert(DirtyMarkers::NONCE);
-        self.nonce = nonce;
+        self.dirty.insert(DirtyMarkers::COMMIT_SEQ);
+        self.commit_seq = commit_seq;
     }
 
     /// Copies a clean borrowed image into the shadow buffer before mutation.
@@ -419,8 +423,8 @@ bitflags::bitflags! {
         const SLOT     = 1 << 4;
         /// Data bytes changed.
         const DATA     = 1 << 5;
-        /// Commit nonce changed.
-        const NONCE    = 1 << 6;
+        /// Commit sequence changed.
+        const COMMIT_SEQ = 1 << 6;
     }
 }
 
