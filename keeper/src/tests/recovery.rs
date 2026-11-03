@@ -112,6 +112,42 @@ async fn seeds_features_programs_and_sysvars() {
     }
 }
 
+/// Startup seeds missing accounts without replacing account state saved by a prior run.
+#[tokio::test]
+async fn preserves_seeded_accounts_on_reopen() {
+    let existing = Pubkey::new_unique();
+    let added = Pubkey::new_unique();
+    let dirs = Dirs::default();
+    let mut builder = keeper_builder(&dirs);
+    builder.accounts.insert(
+        existing,
+        delegated_account(1, vec![], Pubkey::default()).build(),
+    );
+
+    let keeper = TestKeeper::from_builder(dirs, builder.clone()).await;
+    store_marker(&keeper, existing, 2);
+    let dirs = keeper.close().await;
+
+    builder.accounts.insert(
+        added,
+        delegated_account(3, vec![], Pubkey::default()).build(),
+    );
+    let keeper = TestKeeper::from_builder(dirs, builder).await;
+    {
+        let accounts = keeper.accounts();
+        let loader = accounts.loader();
+        assert_eq!(
+            loader.read(&existing, |account| account.lamports()).unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            loader.read(&added, |account| account.lamports()).unwrap(),
+            Some(3)
+        );
+    }
+    keeper.close().await;
+}
+
 /// Proves recovery derives the same schedule with unchanged configuration;
 /// repeated seals do not advance epochs, and volatile resets leave the schedule
 /// intact. The newest archived account state wins, and the saved corrupt tree
