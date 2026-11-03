@@ -66,8 +66,8 @@ pub struct KeeperBuilder {
     pub builtins: HashMap<Pubkey, BuiltinFunctionWithContext>,
     /// SBF programs to seed as executable loader-v4 accounts: `(program id, ELF bytes)`.
     pub programs: HashMap<Pubkey, Vec<u8>>,
-    /// Plain accounts to seed when absent before startup completes.
-    pub accounts: HashMap<Pubkey, AccountSharedData>,
+    /// Accounts to seed at startup if missing from the database; existing accounts are kept.
+    pub possibly_missing_accounts: HashMap<Pubkey, AccountSharedData>,
     /// Rent parameters used to size seeded accounts and the Rent sysvar.
     pub rent: Rent,
 }
@@ -111,7 +111,7 @@ impl KeeperBuilder {
                 .mode(AccountMode::Magic);
             accounts.push((authority, sponsor.build()));
         }
-        for (pubkey, account) in self.accounts.drain() {
+        for (pubkey, account) in self.possibly_missing_accounts.drain() {
             if !loader.contains(&pubkey)? {
                 accounts.push((pubkey, account));
             }

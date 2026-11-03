@@ -52,7 +52,7 @@ async fn engine(authority: Authority, accounts: &[AccountSeed], pacing: Pacing) 
     builder.authority = authority;
     builder.blockstore.checkpoint = 2;
     for &(key, value, mode) in accounts {
-        builder.accounts.insert(key, v42_builder(value, mode).build());
+        builder.possibly_missing_accounts.insert(key, v42_builder(value, mode).build());
     }
     TestEngine::from_builder(dirs, builder, pacing).await
 }

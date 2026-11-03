@@ -119,7 +119,7 @@ async fn preserves_seeded_accounts_on_reopen() {
     let added = Pubkey::new_unique();
     let dirs = Dirs::default();
     let mut builder = keeper_builder(&dirs);
-    builder.accounts.insert(
+    builder.possibly_missing_accounts.insert(
         existing,
         delegated_account(1, vec![], Pubkey::default()).build(),
     );
@@ -128,7 +128,7 @@ async fn preserves_seeded_accounts_on_reopen() {
     store_marker(&keeper, existing, 2);
     let dirs = keeper.close().await;
 
-    builder.accounts.insert(
+    builder.possibly_missing_accounts.insert(
         added,
         delegated_account(3, vec![], Pubkey::default()).build(),
     );
