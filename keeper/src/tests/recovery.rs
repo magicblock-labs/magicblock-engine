@@ -125,7 +125,10 @@ async fn preserves_seeded_accounts_on_reopen() {
     );
 
     let keeper = TestKeeper::from_builder(dirs, builder.clone()).await;
-    store_marker(&keeper, existing, 2);
+    let marker_owner = Pubkey::new_unique();
+    let marker_data = vec![7, 7, 7];
+    let marker = delegated_account(2, marker_data.clone(), marker_owner);
+    keeper.accounts().store(&[(existing, marker.build())]).unwrap();
     let dirs = keeper.close().await;
 
     builder.possibly_missing_accounts.insert(
@@ -139,6 +142,14 @@ async fn preserves_seeded_accounts_on_reopen() {
         assert_eq!(
             loader.read(&existing, |account| account.lamports()).unwrap(),
             Some(2)
+        );
+        assert_eq!(
+            loader.read(&existing, |account| account.data().to_vec()).unwrap(),
+            Some(marker_data)
+        );
+        assert_eq!(
+            loader.read(&existing, |account| *account.owner()).unwrap(),
+            Some(marker_owner)
         );
         assert_eq!(
             loader.read(&added, |account| account.lamports()).unwrap(),
