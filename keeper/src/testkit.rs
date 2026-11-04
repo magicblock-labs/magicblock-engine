@@ -68,7 +68,7 @@ impl Default for Dirs {
 
 /// A keeper builder over `dirs` with retention disabled and a 100 ms blocktime.
 ///
-/// `builtins` and `accounts` default to empty and `programs` holds only v42;
+/// `builtins` and `possibly_missing_accounts` default to empty and `programs` holds only v42;
 /// individual tests fill the rest as needed. [`TestKeeper::new`] is the seeded
 /// path, adding a funded payer on top.
 pub fn keeper_builder(dirs: &Dirs) -> KeeperBuilder {
@@ -93,7 +93,7 @@ pub fn keeper_builder(dirs: &Dirs) -> KeeperBuilder {
         },
         builtins: Default::default(),
         programs,
-        accounts: Default::default(),
+        possibly_missing_accounts: Default::default(),
         rent: Rent::default(),
     }
 }
@@ -127,7 +127,7 @@ impl TestKeeper {
     pub async fn with(dirs: Dirs) -> Self {
         let mut builder = keeper_builder(&dirs);
         let payer = Keypair::new();
-        builder.accounts.insert(
+        builder.possibly_missing_accounts.insert(
             payer.pubkey(),
             AccountBuilder::default().lamports(1_000_000).build(),
         );

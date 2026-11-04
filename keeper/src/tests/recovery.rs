@@ -112,6 +112,53 @@ async fn seeds_features_programs_and_sysvars() {
     }
 }
 
+/// Startup seeds missing accounts without replacing account state saved by a prior run.
+#[tokio::test]
+async fn preserves_seeded_accounts_on_reopen() {
+    let existing = Pubkey::new_unique();
+    let added = Pubkey::new_unique();
+    let dirs = Dirs::default();
+    let mut builder = keeper_builder(&dirs);
+    builder.possibly_missing_accounts.insert(
+        existing,
+        delegated_account(1, vec![], Pubkey::default()).build(),
+    );
+
+    let keeper = TestKeeper::from_builder(dirs, builder.clone()).await;
+    let marker_owner = Pubkey::new_unique();
+    let marker_data = vec![7, 7, 7];
+    let marker = delegated_account(2, marker_data.clone(), marker_owner);
+    keeper.accounts().store(&[(existing, marker.build())]).unwrap();
+    let dirs = keeper.close().await;
+
+    builder.possibly_missing_accounts.insert(
+        added,
+        delegated_account(3, vec![], Pubkey::default()).build(),
+    );
+    let keeper = TestKeeper::from_builder(dirs, builder).await;
+    {
+        let accounts = keeper.accounts();
+        let loader = accounts.loader();
+        assert_eq!(
+            loader.read(&existing, |account| account.lamports()).unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            loader.read(&existing, |account| account.data().to_vec()).unwrap(),
+            Some(marker_data)
+        );
+        assert_eq!(
+            loader.read(&existing, |account| *account.owner()).unwrap(),
+            Some(marker_owner)
+        );
+        assert_eq!(
+            loader.read(&added, |account| account.lamports()).unwrap(),
+            Some(3)
+        );
+    }
+    keeper.close().await;
+}
+
 /// Proves recovery derives the same schedule with unchanged configuration;
 /// repeated seals do not advance epochs, and volatile resets leave the schedule
 /// intact. The newest archived account state wins, and the saved corrupt tree
