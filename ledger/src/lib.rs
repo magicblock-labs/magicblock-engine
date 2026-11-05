@@ -3,6 +3,7 @@
 use std::{
     collections::BTreeMap,
     fs::{self, File},
+    ops::RangeInclusive,
     path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering::*},
     thread::{self, JoinHandle},
@@ -131,6 +132,16 @@ impl Ledger {
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = Arc<Superblock>> + '_ {
         let range = self.meta.superblocks();
         range.rev().filter_map(|id| self.superblocks.read().get(&id).cloned())
+    }
+
+    /// Returns the published retained slot bounds for consecutive-slot producers.
+    /// An empty ledger has no range; publication does not fence the asynchronous index.
+    pub fn retained_range(&self) -> Option<RangeInclusive<Slot>> {
+        let superblocks = self.superblocks.read();
+        let (_, first) = superblocks.first_key_value()?;
+        let end = self.meta.range.end.load(Acquire);
+        let start = first.meta.range.start.load(Acquire);
+        (start != 0 && start <= end).then_some(start..=end)
     }
 
     /// Returns the highest slot recorded across retained superblocks, or
