@@ -168,7 +168,7 @@ impl<'a> TransactionsAccessor<'a> {
         Ok(rx)
     }
 
-    /// Subscribes to successful transactions mentioning `account`, including their logs.
+    /// Subscribes to executed transactions mentioning `account`, including failures and their logs.
     pub async fn subscribe_logs(&self, account: Pubkey) -> Receiver<Arc<FullTransaction>> {
         self.keeper.subscriptions.logs.subscribe(account)
     }
@@ -214,7 +214,7 @@ impl<'a> TransactionsAccessor<'a> {
         let success =
             txn.execution.result.as_ref().is_ok_and(|execution| execution.was_successful());
         // Class-level checks are atomic. Keyed maps are accessed only for delivery.
-        let logs = success && !subs.logs.is_empty();
+        let logs = txn.execution.result.is_ok() && !subs.logs.is_empty();
         let failures = !success && !subs.failures.is_empty();
         let transactions = subs.transactions.sender();
         let notify = logs || failures || transactions.is_some();
