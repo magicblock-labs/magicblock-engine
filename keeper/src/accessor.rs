@@ -1,6 +1,11 @@
 //! Namespaced keeper access APIs.
 
-use std::{cell::LazyCell, ops::Deref, path::PathBuf, sync::Arc};
+use std::{
+    cell::LazyCell,
+    ops::{Deref, RangeInclusive},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use accountsdb::{AccountEntry, AccountsDB, AccountsDBError};
 use ledger::{
@@ -308,6 +313,11 @@ impl<'a> BlocksAccessor<'a> {
     /// Loads a retained block at the requested detail level.
     pub async fn get(&self, params: BlockParams) -> Result<Option<BlockResponse>> {
         Ok(request(self.keeper, params, ReadRequest::Block).await??)
+    }
+
+    /// Returns published retained bounds, assuming consecutive block slots.
+    pub fn retained_range(&self) -> Option<RangeInclusive<Slot>> {
+        self.keeper.ledger.retained_range()
     }
 
     /// Returns the latest block boundary known to keeper.

@@ -489,12 +489,19 @@ async fn test_block_detail_levels_partition_transactions() {
 async fn test_superblock_rotation_and_retention() {
     // size_limit 0 makes every block boundary trigger a retention pass.
     let (dir, ledger) = ledger(0);
+    assert_eq!(ledger.retained_range(), None);
     let old = block_of(&ledger, 1, 1);
+    assert_eq!(ledger.retained_range(), Some(1..=1));
     // Seal superblock 1 and rotate to superblock 2.
     let events = vec![seal(&ledger, 1)];
     append(&ledger, events);
     assert_eq!(ledger.meta.head(), 2);
 
+    assert_eq!(
+        ledger.retained_range(),
+        Some(1..=1),
+        "empty head preserves the retained tip"
+    );
     // The sealed superblock is still readable through the newer head.
     assert!(read_transaction(&ledger, old[0]).await.is_some());
 
@@ -504,6 +511,10 @@ async fn test_superblock_rotation_and_retention() {
     assert!(
         ledger.superblocks.read().get(&1).is_none(),
         "oldest sealed segment purged"
+    );
+    assert_eq!(
+        ledger.retained_range(),
+        Some(SIZE_CHECK_FREQUENCY..=SIZE_CHECK_FREQUENCY)
     );
     // Its transactions are gone; the head's remain.
     assert!(read_transaction(&ledger, old[0]).await.is_none());
@@ -530,6 +541,7 @@ async fn test_block_read_across_superblocks() {
     append(&ledger, events);
     block_of(&ledger, 2, 1);
 
+    assert_eq!(ledger.retained_range(), Some(1..=2));
     // Slot 1 lives in the sealed superblock; slot 2 in the head. Both resolve.
     assert_eq!(block_signatures(&ledger, 1).await, first);
     assert!(read_block(&ledger, 2, BlockDetails::None).await.is_some());
