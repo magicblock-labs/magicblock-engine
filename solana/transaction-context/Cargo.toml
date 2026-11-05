@@ -23,6 +23,7 @@ agave-unstable-api = []
 bincode = ["dep:bincode", "serde", "solana-account/bincode"]
 dev-context-only-utils = ["bincode"]
 serde = ["serde/derive", "solana-pubkey/serde"]
+wincode = ["dep:wincode", "solana-pubkey/wincode"]
 
 [dependencies]
 solana-account = { workspace = true }
@@ -31,6 +32,7 @@ solana-instructions-sysvar = { workspace = true }
 solana-pubkey = { workspace = true }
 
 [target.'cfg(not(any(target_arch = "sbf", target_arch = "bpf")))'.dependencies]
+wincode = { workspace = true, features = ["derive"], optional = true }
 bincode = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 solana-rent = { workspace = true }
