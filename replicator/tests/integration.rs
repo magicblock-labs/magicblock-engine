@@ -21,7 +21,7 @@ use nucleus::{
     KB, Slot,
     config::Authority,
     ledger::{BlockstorePosition, Reset, Signed},
-    shutdown::ShutdownManager,
+    shutdown::{ShutdownManager, ShutdownReason},
 };
 use replicator::{ReplicationClient, ReplicationDispatcher};
 use solana_account::{AccountBuilder, AccountMode, ReadableAccount};
@@ -74,6 +74,14 @@ async fn engines(
     };
     let leader = engine(leader_authority, leader_accounts, Pacing::External).await;
     let follower = engine(follower_authority, follower_accounts, Pacing::External).await;
+    {
+        let _guard = leader.barrier().await.unwrap();
+        keeper::testkit::seal_and_archive(&leader).await;
+    }
+    let addr = loopback_addr();
+    let mut server = dispatcher(addr, &leader, &[follower.signer().pubkey()]).await;
+    let follower = restart_from_snapshot(addr, follower).await;
+    server.terminate().await;
     (leader, follower)
 }
 
@@ -104,7 +112,11 @@ fn stream(addr: SocketAddr, follower: &mut TestEngine) -> broadcast::Receiver<Bl
 /// Stages a snapshot through replication and installs it on restart.
 async fn restart_from_snapshot(addr: SocketAddr, mut follower: TestEngine) -> TestEngine {
     replicate(addr, &mut follower);
-    follower.shutdown().wait().await;
+    let reason = time::timeout(TIMEOUT, follower.shutdown().wait()).await.unwrap();
+    assert!(
+        matches!(reason, ShutdownReason::RestartRequired),
+        "{reason:?}"
+    );
     let (dirs, authority) = follower.close().await;
     TestEngine::with(dirs, authority).await
 }
@@ -157,7 +169,7 @@ async fn checkpoint_mismatch_stops_replication() {
     leader.advance(1).await;
     leader.sync().await;
     let reason = time::timeout(TIMEOUT, follower.shutdown().wait()).await.unwrap();
-    let nucleus::shutdown::ShutdownReason::Error(error) = reason else {
+    let ShutdownReason::Error(error) = reason else {
         panic!("checkpoint mismatch must stop replication: {reason:?}");
     };
     assert!(matches!(
@@ -428,10 +440,20 @@ async fn internally_paced_replication_persists_across_restart() {
     let leader = engine(leader_authority, &seed, Pacing::Internal).await;
     let mut follower = engine(follower_authority, &seed, Pacing::External).await;
 
+    let mut snapshots = leader.accounts().subscribe_snapshots();
+    if !leader
+        .ledger()
+        .iter()
+        .any(|segment| segment.directory.join(nucleus::ledger::ACCOUNTSDB_SNAPSHOT_FILE).is_file())
+    {
+        time::timeout(TIMEOUT, snapshots.recv()).await.unwrap().unwrap();
+    }
+    leader.superblocks().sync(false).unwrap();
     let addr = loopback_addr();
-    let initial = follower.superblocks().position();
     let follower_identity = follower.signer().pubkey();
     let mut dispatcher = dispatcher(addr, &leader, &[follower_identity]).await;
+    follower = restart_from_snapshot(addr, follower).await;
+    let initial = follower.superblocks().position();
     let mut positions = stream(addr, &mut follower);
     let observed = time::timeout(TIMEOUT, async {
         loop {
@@ -465,7 +487,7 @@ async fn streams_and_resumes_without_duplicate_application() {
     let seed = [(state, 0, AccountMode::Delegated), (volatile, 7, AccountMode::Mirrored)];
     let (mut leader, mut follower) = engines(&seed, &seed).await;
 
-    // Catch-up crosses two sealed superblocks and a live tail from byte zero.
+    // Catch-up streams across two sealed superblocks and the live tail.
     for _ in 0..2 {
         increment(&leader, state).await;
         leader.seal_and_archive().await;
@@ -713,14 +735,16 @@ async fn graceful_shutdown_drains_to_next_block_and_reopens() {
     leader.close().await;
 }
 
-/// Installs the newest retained snapshot on restart, then streams every durable
-/// ledger entry committed after that snapshot.
+/// A cold follower prefers the newest snapshot even while its cursor is retained,
+/// then streams every durable ledger entry committed after that snapshot.
 #[tokio::test(flavor = "multi_thread")]
 async fn restores_the_newest_snapshot_then_streams_its_tail() {
     let state = Pubkey::new_unique();
     let seed = [(state, 0, AccountMode::Delegated)];
     // The empty follower can acquire `state` only through snapshot restoration.
-    let (mut leader, follower) = engines(&seed, &[]).await;
+    let (mut leader, installed) = engines(&seed, &[]).await;
+    let (_, authority) = installed.close().await;
+    let follower = engine(authority, &[], Pacing::External).await;
     let set = |value| E::lit(value).compose(state, &[]);
 
     // Distinct values distinguish the newest snapshot from its streamed tail.
@@ -731,16 +755,9 @@ async fn restores_the_newest_snapshot_then_streams_its_tail() {
     leader.execute(&[set(30)]).await.unwrap();
     leader.advance(1).await;
     let expected = leader.sync().await;
-    // Make the newest snapshot the only possible handshake response.
-    truncate(leader.ledger()); // superblock 0
-    truncate(leader.ledger()); // superblock 1
     assert!(
-        leader.ledger().cursor(0).is_none(),
-        "follower cursor was retained away"
-    );
-    assert!(
-        leader.ledger().cursor(1).is_none(),
-        "older snapshot history was retained away"
+        leader.ledger().cursor(follower.superblocks().position().superblock).is_some(),
+        "the cold follower could otherwise stream retained history"
     );
 
     let addr = loopback_addr();
@@ -786,9 +803,15 @@ async fn cascades_replication_through_a_follower() {
     let middle_addr = loopback_addr();
     let middle_identity = middle.signer().pubkey();
     let tail_identity = tail.signer().pubkey();
+    {
+        let _guard = leader.barrier().await.unwrap();
+        keeper::testkit::seal_and_archive(&leader).await;
+    }
     let mut leader_dispatcher = dispatcher(leader_addr, &leader, &[middle_identity]).await;
+    middle = restart_from_snapshot(leader_addr, middle).await;
     let mut middle_positions = stream(leader_addr, &mut middle);
     let mut middle_dispatcher = dispatcher(middle_addr, &middle, &[tail_identity]).await;
+    let tail = restart_from_snapshot(middle_addr, tail).await;
 
     // Subscribe before the boundary because this seal is driven by replication,
     // outside the testkit's race-free seal-and-archive helper.
@@ -814,9 +837,10 @@ async fn cascades_replication_through_a_follower() {
     await_replication(&mut middle_positions, &middle, expected, state, 2).await;
 
     // The successor archive must become the only answer to the tail's cursor.
-    truncate(middle.ledger()); // superblock 0
+    truncate(middle.ledger()); // initial segment
+    truncate(middle.ledger()); // tail's installed snapshot segment
     assert!(
-        middle.ledger().cursor(0).is_none(),
+        middle.ledger().cursor(tail.superblocks().position().superblock).is_none(),
         "tail cursor was retained away"
     );
 

@@ -236,7 +236,7 @@ impl ReplicationServer {
         protocol::write(&mut self.connection, &handshake)
     }
 
-    /// Selects retained streaming when possible, otherwise the newest ready snapshot.
+    /// Starts fresh followers from a snapshot; otherwise resumes retained history.
     fn handshake(&mut self) -> Result<(ReplicationAction, Arc<()>)> {
         let _timer = metrics::time(Operation::ServerHandshake);
         let handshake: Handshake<HandshakeRequest> = protocol::read(&mut self.connection)?;
@@ -249,6 +249,11 @@ impl ReplicationServer {
         let requested = handshake.payload.position;
         if requested > self.position.current {
             return Err(ReplicationError::PositionNotFound(requested));
+        }
+        // The first segment has no snapshot baseline: replay alone cannot restore
+        // accounts imported before recording began (for example, migrated state).
+        if requested.superblock == 1 {
+            return Ok((self.snapshot()?, lease));
         }
         let action = match self.ledger().cursor(requested.superblock) {
             Some(end) if requested.offset <= end => ReplicationAction::Stream {
