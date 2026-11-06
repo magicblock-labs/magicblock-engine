@@ -37,7 +37,7 @@ impl TransactionSimulator {
         cache: Arc<ProgramCache>,
         shutdown: &mut ShutdownManager,
     ) -> Result<Sender<SimulatorMessage>> {
-        let svm = SvmContext::new(&state, cache)?;
+        let svm = SvmContext::new(&state, cache);
         let shutdown = shutdown.handle(Service::TransactionSimulator);
         let (tx, rx) = mpsc::channel(16);
         let executor = Self { rx, svm, state, shutdown };
@@ -100,7 +100,7 @@ impl TransactionSimulator {
             return;
         };
         let accounts = self.state.accounts();
-        let output = self.svm.execute::<true>(accounts.loader(), &txn, self.state.features());
+        let output = self.svm.execute::<true>(accounts.loader(), &txn, &self.state);
         let execution = ExecutionRecord {
             result: output.processing_result,
             balances: output.balance_collector,

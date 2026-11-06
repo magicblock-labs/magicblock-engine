@@ -30,6 +30,8 @@ fn sequencer(tk: &mut TestKeeper) -> Sequencer {
         slot: state.blocks().current_slot(),
         hasher: BlockHasher::new(state.blockhash()),
         state,
+        cache: Default::default(),
+        simulation: tokio_mpsc::channel(1).0,
         ordering: Default::default(),
         rx,
         executors: Executors::new(Vec::new(), event_rx),

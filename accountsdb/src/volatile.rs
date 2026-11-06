@@ -108,15 +108,18 @@ impl VolatileStore {
         self.programs.read_sync(owner, |_, s| s.clone()).unwrap_or_default()
     }
 
-    /// Drops chain-mirrored accounts while retaining internal system accounts.
+    /// Drops base-chain state while retaining ER-owned programs and their indexes.
     pub(crate) fn reset(&self) {
         self.programs.clear_sync();
-        self.accounts.retain_sync(|k, a| {
-            if !a.is(AccountMode::Runtime) {
+        self.accounts.retain_sync(|key, account| {
+            if !account.mode().is_er_owned() {
                 return false;
             }
-            let mut set = self.programs.entry_sync(a.owner()).or_default();
-            BTreeSet::insert(&mut set, *k)
+            BTreeSet::insert(
+                &mut self.programs.entry_sync(account.owner()).or_default(),
+                *key,
+            );
+            true
         });
     }
 

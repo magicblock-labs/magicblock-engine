@@ -9,6 +9,7 @@ use std::{
 use engine::{Engine, testkit::TestEngine};
 use ledger::schema::{Block, Checkpoint, OwnedBlockstoreEntry, Reset, Signed, SuperblockSeal};
 use solana_keypair::Keypair;
+use solana_pubkey::Pubkey;
 
 use crate::{
     ReplicationError, Result,
@@ -67,12 +68,21 @@ async fn authenticates_boundary_records() {
             },
             signer,
         );
-        let mut reset = Signed::new(Reset(1), signer);
+        let mut reset = Signed::new(
+            Reset {
+                slot: 1,
+                rent: engine.rent().lamports_per_byte,
+                features: engine.features().active().keys().copied().collect(),
+            },
+            signer,
+        );
         let mut checkpoint = Signed::new(Checkpoint(2), signer);
         // Change payloads after signing, independently for each scenario.
         block.payload.slot += tamper;
         seal.payload.checksum += tamper;
-        reset.payload.0 += tamper;
+        if tamper != 0 {
+            reset.payload.features.push(Pubkey::new_unique());
+        }
         checkpoint.payload.0 += tamper;
         for (kind, record) in [
             ("block", OwnedBlockstoreEntry::Block(block)),

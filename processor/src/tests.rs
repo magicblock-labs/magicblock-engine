@@ -9,7 +9,7 @@ use keeper::{
     testkit::{TestKeeper, V42_ID, load_v42_data, load_v42_lamports, signed_view, store_v42},
 };
 use nucleus::{
-    ledger::Block,
+    ledger::{Block, Reset, Signed},
     runtime::{ExecutionRequest, SequencerHandle, Simulation, barrier},
 };
 use solana_account::{AccountMode, ReadableAccount};
@@ -45,6 +45,7 @@ struct Harness {
     keeper: TestKeeper,
     /// Channels used by tests to drive execution and simulation paths.
     handle: SequencerHandle,
+    cache: Arc<ProgramCache>,
 }
 
 impl Harness {
@@ -64,15 +65,16 @@ impl Harness {
     /// consume from it, forcing contention resolution to happen from a backlog.
     async fn unspawned(replay: bool) -> (Self, Sequencer) {
         let mut keeper = TestKeeper::new().await;
+        let cache = Arc::new(ProgramCache::default());
         let (sequencer, handle) = Sequencer::new(
             2,
             keeper.clone(),
-            Arc::new(ProgramCache::default()),
+            cache.clone(),
             &mut keeper.shutdown,
             replay,
         )
         .unwrap();
-        (Self { keeper, handle }, sequencer)
+        (Self { keeper, handle, cache }, sequencer)
     }
 
     /// A signed transaction view paid for by a fresh payer, not the shared one.
@@ -140,7 +142,8 @@ impl Harness {
     ///
     /// [`TestKeeper::close`] flushes, so nothing needs flushing here.
     async fn close(self) {
-        let Self { keeper, handle } = self;
+        let Self { keeper, handle, cache } = self;
+        drop(cache);
         drop(handle);
         keeper.close().await;
     }
@@ -329,11 +332,43 @@ async fn seeded_program_and_recursive_cpi_return_data_work() {
     harness.barrier().await;
 
     assert_eq!(load_v42_data(&harness, output), Some(110));
+    let compiled = harness.cache.get(&V42_ID).expect("program compiled");
+    let (controller, guard) = barrier();
+    harness.handle.execution.send(SequencerMessage::Barrier(guard)).await.unwrap();
+    controller.acknowledged.await.unwrap();
+    let selected = harness
+        .features()
+        .active()
+        .keys()
+        .copied()
+        .filter(|id| *id != agave_feature_set::enable_poseidon_syscall::ID)
+        .collect();
+    harness
+        .append_reset(Signed::new(
+            Reset {
+                slot: 1,
+                rent: harness.rent().lamports_per_byte,
+                features: selected,
+            },
+            harness.signer(),
+        ))
+        .unwrap();
+    drop(controller.released);
+    let (_, tx) = signed_view(&harness, None, E::lit(111).compose(output, &[]));
+    harness.execute(tx).await;
+    harness.barrier().await;
+    assert_eq!(load_v42_data(&harness, output), Some(111));
+    let recompiled = harness.cache.get(&V42_ID).expect("program recompiled");
+    assert!(
+        !Arc::ptr_eq(&compiled, &recompiled),
+        "old compilation must not survive a feature change"
+    );
+
     harness.close().await;
 }
 
 /// Proves stored and runtime-cached sysvars agree in execution and simulation at
-/// startup, around epoch boundaries, and after skipped epochs, including zero fallback.
+/// startup, across rent resets and epoch boundaries, including skipped epochs and zero fallback.
 #[tokio::test(flavor = "current_thread")]
 async fn block_transition_updates_execution_and_simulation_sysvars() {
     use keeper::testkit::{Dirs, keeper_builder};
@@ -354,6 +389,9 @@ async fn block_transition_updates_execution_and_simulation_sysvars() {
         .into_iter()
         .flat_map(u64::to_le_bytes)
         .collect();
+        observed
+            .extend_from_slice(&ctx.get_sysvar_cache().get_rent()?.lamports_per_byte.to_le_bytes());
+        observed.push(u8::from(ctx.get_feature_set().enable_poseidon_syscall));
         // This fork exposes EpochSchedule through the generic serialized cache.
         observed.extend_from_slice(
             ctx.get_sysvar_cache()
@@ -378,10 +416,16 @@ async fn block_transition_updates_execution_and_simulation_sysvars() {
             program,
             ProgramCacheEntry::new_builtin((ObserveEpoch::vm, ObserveEpoch::codegen)).into(),
         );
-        let (sequencer, handle) =
-            Sequencer::new(2, keeper.clone(), cache, &mut keeper.shutdown, false).unwrap();
+        let (sequencer, handle) = Sequencer::new(
+            2,
+            keeper.clone(),
+            cache.clone(),
+            &mut keeper.shutdown,
+            false,
+        )
+        .unwrap();
         sequencer.spawn().unwrap();
-        let harness = Harness { keeper, handle };
+        let harness = Harness { keeper, handle, cache };
         let schedule = harness.epoch_schedule();
         let n = schedule.slots_per_epoch;
         let mut slots = vec![1, n.saturating_sub(1).max(1), n, n + 1, 4 * n + 1];
@@ -392,6 +436,27 @@ async fn block_transition_updates_execution_and_simulation_sysvars() {
                 harness.set_block(block).await;
                 harness.barrier().await;
             }
+            let (controller, guard) = barrier();
+            harness.handle.execution.send(SequencerMessage::Barrier(guard)).await.unwrap();
+            controller.acknowledged.await.unwrap();
+            let mut rent = harness.rent();
+            rent.lamports_per_byte = 5080 + slot % 2;
+            let mut selected: Vec<_> = harness.features().active().keys().copied().collect();
+            selected.retain(|id| *id != agave_feature_set::enable_poseidon_syscall::ID);
+            if slot % 2 == 0 {
+                selected.push(agave_feature_set::enable_poseidon_syscall::ID);
+            }
+            harness
+                .append_reset(Signed::new(
+                    Reset {
+                        slot,
+                        rent: rent.lamports_per_byte,
+                        features: selected,
+                    },
+                    harness.signer(),
+                ))
+                .unwrap();
+            drop(controller.released);
             let expected = harness.clock(harness.blocks().latest());
             assert_eq!(expected.slot, slot);
             assert_eq!(expected.epoch, slot / n);
@@ -420,6 +485,8 @@ async fn block_transition_updates_execution_and_simulation_sysvars() {
             .into_iter()
             .flat_map(u64::to_le_bytes)
             .collect();
+            data.extend_from_slice(&rent.lamports_per_byte.to_le_bytes());
+            data.push(u8::from(slot % 2 == 0));
             data.extend_from_slice(schedule_account.data());
             let ix = Instruction::new_with_bytes(program, &data, vec![]);
             let (_, sim_tx) = signed_view(&harness, None, ix.clone());

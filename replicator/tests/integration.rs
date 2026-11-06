@@ -17,7 +17,12 @@ use keeper::testkit::{
     v42_builder, v42_padded_value,
 };
 use ledger::request::{BlockDetails, BlockParams, BlockResponse};
-use nucleus::{KB, Slot, config::Authority, ledger::BlockstorePosition, shutdown::ShutdownManager};
+use nucleus::{
+    KB, Slot,
+    config::Authority,
+    ledger::{BlockstorePosition, Reset, Signed},
+    shutdown::ShutdownManager,
+};
 use replicator::{ReplicationClient, ReplicationDispatcher};
 use solana_account::{AccountBuilder, AccountMode, ReadableAccount};
 use solana_keypair::{Keypair, Signer};
@@ -506,6 +511,31 @@ async fn streams_and_resumes_without_duplicate_application() {
     let mut second_dispatcher = dispatcher(upstream, &leader, &[follower_identity]).await;
     await_replication(&mut positions, &follower, expected, state, 5).await;
 
+    // The live follower must switch rent before executing the minimally funded
+    // materialization, even though its SVM workers were started at the old rate.
+    let extra_feature = Pubkey::new_unique();
+    let mut rent = leader.rent();
+    rent.lamports_per_byte = 5080;
+    {
+        let _guard = leader.barrier().await.unwrap();
+        leader
+            .append_reset(Signed::new(
+                Reset {
+                    slot: leader.blocks().current_slot(),
+                    rent: rent.lamports_per_byte,
+                    features: leader
+                        .features()
+                        .active()
+                        .keys()
+                        .copied()
+                        .chain([extra_feature])
+                        .collect(),
+                },
+                leader.signer(),
+            ))
+            .unwrap();
+    }
+
     // Account creation debits the sponsor on both nodes before reset replenishes it.
     let authority = leader.authority();
     let authority_before = leader.get_account(authority).expect("leader sponsor exists").lamports();
@@ -514,7 +544,10 @@ async fn streams_and_resumes_without_duplicate_application() {
         .account(sponsored)
         .await
         .unwrap()
-        .materialize(v42_builder(0, AccountMode::Delegated), None)
+        .materialize(
+            v42_builder(0, AccountMode::Delegated).lamports(rent.minimum_balance(8)),
+            None,
+        )
         .await
         .expect("sponsored account creation commits");
     let authority_after = leader.get_account(authority).expect("leader sponsor remains").lamports();
@@ -525,6 +558,19 @@ async fn streams_and_resumes_without_duplicate_application() {
     leader.advance(1).await;
     let expected = leader.sync().await;
     await_replication(&mut positions, &follower, expected, state, 5).await;
+    assert_eq!(follower.rent(), rent);
+    assert!(
+        follower.features().is_active(&extra_feature),
+        "reset communicates active feature membership"
+    );
+    assert_eq!(
+        follower
+            .get_account(sponsored)
+            .expect("rent-sensitive account replicated")
+            .lamports(),
+        rent.minimum_balance(8),
+        "the follower must execute the materialization, not merely adopt the reset rent"
+    );
     assert_eq!(
         follower.get_account(authority).expect("follower sponsor remains").lamports(),
         authority_after,
@@ -532,7 +578,11 @@ async fn streams_and_resumes_without_duplicate_application() {
     );
 
     // Reset discards volatile accounts, retains delegated state, and replenishes the sponsor.
-    leader.reset(99).expect("leader reset records");
+    let rent = leader.rent();
+    {
+        let _guard = leader.barrier().await.unwrap();
+        leader.reset(rent).expect("leader reset records");
+    }
     assert_eq!(
         leader
             .get_account(authority)
@@ -544,6 +594,10 @@ async fn streams_and_resumes_without_duplicate_application() {
     let expected = leader.sync().await;
     await_replication(&mut positions, &follower, expected, state, 5).await;
     assert!(follower.get_account(volatile).is_none());
+    assert!(
+        !follower.features().is_active(&extra_feature),
+        "startup reset restores Engine defaults"
+    );
     assert_eq!(
         follower
             .get_account(authority)

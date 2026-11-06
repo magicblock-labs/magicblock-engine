@@ -3,6 +3,8 @@
 //! receipts, signature observers, duplicate admission, and client wire formats.
 #![cfg(test)]
 
+use std::time::Duration;
+
 use agave_transaction_view::MAX_STANDARD_TRANSACTION_SIZE;
 use engine::testkit::TestEngine;
 use keeper::testkit::{
@@ -14,6 +16,7 @@ use solana_account::{AccountMode, ReadableAccount};
 use solana_instruction_error::InstructionError;
 use solana_packet::PACKET_DATA_SIZE;
 use solana_transaction::TransactionError;
+use tokio::time;
 use v42_calculator_interface::builder::{Expr as E, transfer};
 
 // The Engine accepts the same standard wire formats produced by Solana clients
@@ -231,6 +234,7 @@ async fn failed_execution_surfaces_error_result() {
 
 /// Proves scheduling acknowledges queueing before admission and repeated bytes
 /// execute once without consuming signature observers registered around resends.
+/// The same barrier also holds simulation until execution is allowed to resume.
 #[tokio::test(flavor = "multi_thread")]
 async fn schedule_is_fire_and_forget() {
     let te = TestEngine::new().await;
@@ -240,6 +244,15 @@ async fn schedule_is_fire_and_forget() {
         signed_view(&te, None, (E::acc(0) + E::lit(7)).compose(output, &[]));
     let first = te.transactions().subscribe_signature(signature).await.unwrap();
     let barrier = te.barrier().await.unwrap();
+    {
+        let simulation = te
+            .transaction(transaction.inner_data().as_ref().clone())
+            .unwrap()
+            .simulate(true);
+        tokio::pin!(simulation);
+        // Poll the request into the simulator queue; it must not run across this boundary.
+        assert!(time::timeout(Duration::from_millis(50), &mut simulation).await.is_err());
+    }
     for _ in 0..3 {
         te.transaction(transaction.inner_data().as_ref().clone())
             .unwrap()
@@ -259,6 +272,9 @@ async fn schedule_is_fire_and_forget() {
         Err(oneshot::TryRecvError::Empty)
     ));
     drop(barrier);
+    let txn = transaction.inner_data().as_ref().clone();
+    let simulation = te.transaction(txn).unwrap().simulate(true);
+    assert!(simulation.await.unwrap().is_ok());
     assert_eq!(first.await.unwrap().result, Ok(()));
     assert_eq!(second.await.unwrap().result, Ok(()));
     assert_eq!(

@@ -3,36 +3,46 @@
 use std::{
     fs::{self, File},
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering::*},
+    },
     thread,
 };
 
 use agave_feature_set::FeatureSet;
-use solana_account::AccountBuilder;
+use arc_swap::ArcSwap;
+use serde::Serialize;
+use solana_account::{AccountBuilder, AccountMode, AccountSharedData, ReadableAccount};
+use solana_feature_gate_interface::Feature;
 use solana_hash::Hash;
 use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
+use solana_sdk_ids::sysvar;
+use tar::Builder;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
+use zstd::Encoder;
 
-use accountsdb::{AccountsDB, SnapshotError};
+use accountsdb::{AccountEntry, AccountsDB, SnapshotError, SnapshotResult};
 use ledger::{
     LedgerHandle, Superblock,
     request::{ReadRequest, ReplayHandle, ReplayParams, RequestPayload},
     schema::Event,
 };
 use nucleus::{
-    Slot,
     config::Authority,
-    ledger::{ACCOUNTSDB_SNAPSHOT_FILE, Checkpoint, Reset, Signed, SuperblockSeal},
+    ledger::{ACCOUNTSDB_SNAPSHOT_FILE, Block, Checkpoint, Reset, Signed, SuperblockSeal},
 };
-use solana_sysvar::{clock::Clock, epoch_schedule::EpochSchedule, rent::Rent};
+use solana_sysvar::{
+    clock::Clock, epoch_schedule::EpochSchedule, rent::Rent, slot_hashes::SysvarId,
+};
 
 use crate::{
     accessor::{AccountsAccessor, BlocksAccessor, SuperblockAccessor, TransactionsAccessor},
-    builder::SPONSOR_INIT_BALANCE,
+    builder::{DEFAULT_FEATURES, SPONSOR_INIT_BALANCE},
     cache::Caches,
-    error::Result,
+    error::{KeeperError, Result},
     metrics::Operation,
     subscriptions::Subscriptions,
 };
@@ -66,9 +76,9 @@ pub struct Keeper {
     /// Local signer and optional remote authority represented by this engine.
     authority: Authority,
     /// Active feature set governing runtime behavior.
-    featureset: FeatureSet,
+    featureset: ArcSwap<FeatureSet>,
     /// Rent parameters applied during execution.
-    rent: Rent,
+    rent: AtomicU64,
     /// Local slot-based schedule shared by sysvars and execution.
     epoch_schedule: EpochSchedule,
     /// Account state store.
@@ -172,7 +182,7 @@ impl Keeper {
             Some(seal) if seal.payload == payload => seal,
             Some(expected) => {
                 error!(?expected, observed = ?payload, "superblock state mismatch");
-                return Err(error::KeeperError::SealMismatch(expected.payload.id));
+                return Err(KeeperError::SealMismatch(expected.payload.id));
             }
         };
         let completion = self.superblocks().append(seal)?;
@@ -197,23 +207,24 @@ impl Keeper {
             Some(checkpoint) if checkpoint.payload == observed => checkpoint,
             Some(expected) => {
                 error!(?expected, ?observed, "checkpoint state mismatch");
-                return Err(error::KeeperError::CheckpointMismatch);
+                return Err(KeeperError::CheckpointMismatch);
             }
         };
         self.ledger.appender.send(Event::Checkpoint(checkpoint))?;
         Ok(())
     }
 
-    /// Resolved once from the seeded feature accounts at startup and fixed for
-    /// the engine's lifetime — features never activate mid-run.
-    pub fn features(&self) -> &FeatureSet {
-        &self.featureset
+    /// Immutable feature selection effective at the current execution boundary.
+    pub fn features(&self) -> Arc<FeatureSet> {
+        self.featureset.load_full()
     }
 
-    /// Supplied by the builder at startup and fixed for the engine's lifetime;
-    /// the same parameters that sized the seeded accounts.
-    pub fn rent(&self) -> &Rent {
-        &self.rent
+    /// Rent effective at the current ordered execution boundary.
+    pub fn rent(&self) -> Rent {
+        Rent {
+            lamports_per_byte: self.rent.load(Acquire),
+            ..Default::default()
+        }
     }
 
     /// Returns the informational epoch schedule derived from local superblock configuration.
@@ -222,7 +233,7 @@ impl Keeper {
     }
 
     /// Clock for the slot executing after `block`. Epoch-start timestamps are unsupported.
-    pub fn clock(&self, block: nucleus::ledger::Block) -> Clock {
+    pub fn clock(&self, block: Block) -> Clock {
         clock(&self.epoch_schedule, block)
     }
 
@@ -241,22 +252,52 @@ impl Keeper {
         self.accountsdb.flush(true).map_err(Into::into)
     }
 
-    /// Appends a reset marker before discarding chain-synchronized volatile
-    /// accounts and restoring the authority sponsor's initial balance.
+    /// Appends a startup reset establishing rent and Engine-default features,
+    /// discarding chain mirrors, and restoring the sponsor's initial balance.
     ///
     /// Internal runtime accounts and persisted state remain available.
-    pub fn reset(&self, slot: Slot) -> Result<()> {
-        self.append_reset(Signed::new(Reset(slot), self.signer()))
+    /// Execution and simulation must be quiesced.
+    pub fn reset(&self, rent: Rent) -> Result<()> {
+        let reset = Reset {
+            slot: self.blocks().current_slot(),
+            rent: rent.lamports_per_byte,
+            features: DEFAULT_FEATURES.to_vec(),
+        };
+        self.append_reset(Signed::new(reset, self.signer()))
     }
 
-    /// Appends an authenticated reset before applying it. Execution must be quiesced.
+    /// Appends an authenticated reset before applying it.
+    /// Execution and simulation must be quiesced.
     pub fn append_reset(&self, reset: Signed<Reset>) -> Result<()> {
-        self.ledger.appender.send(Event::Reset(reset))?;
-        self.apply_reset(reset.payload)
+        self.ledger.appender.send(Event::Reset(reset.clone()))?;
+        self.apply_reset(&reset.payload)
     }
 
-    /// Discards volatile state without appending; execution must be quiesced.
-    pub fn apply_reset(&self, reset: Reset) -> Result<()> {
+    /// Applies rent and discards volatile state without appending; execution and simulation must be quiesced.
+    pub fn apply_reset(&self, reset: &Reset) -> Result<()> {
+        let mut features = FeatureSet::default();
+        for id in &reset.features {
+            features.activate(id, 0);
+        }
+        let previous = self.features();
+        let mut accounts = Vec::new();
+        for id in previous.active().keys().filter(|id| !features.is_active(id)) {
+            let acc = AccountBuilder::default().mode(AccountMode::Closed).build();
+            accounts.push((*id, acc));
+        }
+        for id in features.active().keys().filter(|id| !previous.is_active(id)) {
+            accounts.push((*id, feature_account()));
+        }
+        let rent = Rent {
+            lamports_per_byte: reset.rent,
+            ..Default::default()
+        };
+        accounts.push(sysvar_account(&rent));
+        self.accountsdb.store(&accounts)?;
+        if *previous != features {
+            self.featureset.store(Arc::new(features));
+        }
+        self.rent.store(rent.lamports_per_byte, Release);
         self.accountsdb.reset();
         let authority = self.authority();
         let account = self.accounts().loader().read(&authority, Clone::clone)?;
@@ -264,17 +305,13 @@ impl Keeper {
             let acc = AccountBuilder::from(account).lamports(SPONSOR_INIT_BALANCE);
             self.accounts().store(&[(authority, acc.build())])?;
         }
-        info!(slot = *reset, "reset volatile state");
+        info!(slot = reset.slot, "reset volatile state");
         Ok(())
     }
 
     /// Spawns a background thread that tars and zstd-compresses the accountsdb
     /// snapshot at `snapshot` into `target`, removing the snapshot afterward.
-    fn archive(
-        &self,
-        snapshot: PathBuf,
-        target: PathBuf,
-    ) -> std::result::Result<(), SnapshotError> {
+    fn archive(&self, snapshot: PathBuf, target: PathBuf) -> SnapshotResult<()> {
         let path = target.join(ACCOUNTSDB_SNAPSHOT_FILE);
         let tmp = target.join(format!("{ACCOUNTSDB_SNAPSHOT_FILE}.tmp"));
         let dst = File::options().write(true).create(true).truncate(true).open(&tmp)?;
@@ -282,7 +319,7 @@ impl Keeper {
         thread::Builder::new().name("snapshot-archiver".into()).spawn(move || {
             {
                 let _timer = metrics::time(Operation::ArchiveSnapshot);
-                let mut tar = tar::Builder::new(zstd::Encoder::new(dst, 0)?);
+                let mut tar = Builder::new(Encoder::new(dst, 0)?);
                 tar.append_dir_all(".", &snapshot)?;
                 {
                     let archive = tar.into_inner()?.finish()?;
@@ -302,7 +339,7 @@ impl Keeper {
 }
 
 /// Shared by startup seeding and live transitions; seals never enter this calculation.
-fn clock(schedule: &EpochSchedule, block: nucleus::ledger::Block) -> Clock {
+fn clock(schedule: &EpochSchedule, block: Block) -> Clock {
     let slot = block.slot + 1;
     Clock {
         slot,
@@ -312,4 +349,30 @@ fn clock(schedule: &EpochSchedule, block: nucleus::ledger::Block) -> Clock {
         // Engine does not track epoch-start timestamps.
         epoch_start_timestamp: 0,
     }
+}
+
+/// Synthetic account funding is fixed so restarts and rent changes cannot alter
+/// program-visible balances independently on leaders and followers.
+#[expect(
+    clippy::expect_used,
+    reason = "All callers serialize known Engine-generated account state"
+)]
+fn runtime_account<S: Serialize>(state: &S, owner: &Pubkey) -> AccountBuilder {
+    let account = AccountSharedData::new_data(0, state, owner)
+        .expect("Engine-generated runtime accounts must be encodable");
+    let lamports = Rent::default().minimum_balance(account.data().len());
+    AccountBuilder::from(account).lamports(lamports).mode(AccountMode::Runtime)
+}
+
+/// Active feature membership is persisted independently of startup defaults.
+fn feature_account() -> AccountSharedData {
+    runtime_account(
+        &Feature { activated_at: Some(0) },
+        &solana_feature_gate_interface::ID,
+    )
+    .build()
+}
+
+fn sysvar_account<S: Serialize + SysvarId>(state: &S) -> AccountEntry {
+    (S::id(), runtime_account(state, &sysvar::ID).build())
 }

@@ -84,6 +84,14 @@ impl SysvarCache {
         self.get_sysvar_obj(&Clock::id())
     }
 
+    /// Stores a serialized rent sysvar.
+    pub fn set_rent(&mut self, rent: &Rent) {
+        let buffer = self.rent.get_or_insert_default();
+        buffer.clear();
+        // Rent serialization into a Vec cannot fail.
+        let _ = bincode::serialize_into(buffer, rent);
+    }
+
     /// Returns the cached rent sysvar.
     pub fn get_rent(&self) -> Result<Arc<Rent>, InstructionError> {
         self.get_sysvar_obj(&Rent::id())

@@ -214,9 +214,10 @@ impl LedgerAppender {
 
     /// Writes and publishes a volatile-state reset marker.
     fn write_reset(&mut self, reset: Signed<Reset>) -> Result<()> {
+        let slot = reset.slot;
         self.writer.write_blockstore(&BlockstoreEntry::Reset(reset))?;
         self.sync()?;
-        info!(slot = **reset, "appended volatile state reset");
+        info!(slot, "appended volatile state reset");
         Ok(())
     }
 

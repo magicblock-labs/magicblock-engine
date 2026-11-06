@@ -64,11 +64,6 @@ impl Caches {
             self.signatures.push(signature, None, block.slot);
         }
     }
-
-    /// Returns the latest restored block boundary.
-    pub(crate) fn latest(&self) -> Block {
-        **self.blocks.latest.load()
-    }
 }
 
 /// Account access cache along with per-account mutation reservations.
@@ -129,7 +124,7 @@ impl AccountLease {
 
     /// Returns whether the observed account may be evicted from the cache.
     pub fn evictable(&self) -> bool {
-        self.observed.is_some_and(|(mode, _)| !mode.requires_persistence())
+        self.observed.is_some_and(|(mode, _)| !mode.is_er_owned())
     }
 
     /// Returns the local mode when the incoming image is older or duplicates
@@ -170,7 +165,7 @@ impl Drop for AccountLease {
 impl AccountCache {
     /// Tracks a materialized account and returns one displaced from recency.
     fn track(&self, pubkey: Pubkey, mode: AccountMode) -> Option<Pubkey> {
-        if !mode.requires_persistence() {
+        if !mode.is_er_owned() {
             return self.admit_recency(pubkey);
         }
         self.remove_recency(&pubkey);

@@ -19,10 +19,13 @@ resolution but reject user writes. `Closed` marks state for storage removal.
 Transitions to undelegating or closed revoke mutation immediately, including in CPI.
 The transaction-final writeback guard can accept a dirty transition into those
 modes without permitting further program writes. Other modes represent cached
-external absence (`Missing`), a read-only mirror (`Mirrored`), and internal sysvar,
-feature, or precompile state (`Runtime`).
+external absence (`Missing`), read-only base mirrors (`Mirrored`), persisted sysvar
+and feature state (`Runtime`), and locally supplied programs (`BuiltIn`).
 
-`Runtime` has no base sync, is read-only, and survives mirror reset.
+`Runtime` has no base sync, is read-only, survives local recovery and mirror
+reset, and is included in persisted-state checksums.
+`BuiltIn` has the same access and sync policy but stays in volatile storage;
+the host reloads program images at startup. Base-chain programs remain `Mirrored`.
 
 Privileged replacement validates mode and source slot together. Delegated, Magic,
 and Undelegating state can't be refreshed in the same mode, even at a newer slot;
@@ -31,9 +34,10 @@ transaction mutations aren't replacements and don't follow that restriction.
 
 | From | Allowed at the same or a newer slot | Requires a strictly newer slot |
 | :-- | :-- | :-- |
-| Missing | Mirrored, Runtime, Delegated, Magic, Closed | Missing |
+| Missing | Mirrored, Runtime, BuiltIn, Delegated, Magic, Closed | Missing |
 | Mirrored | Delegated, Magic, Closed | Mirrored, Missing |
 | Runtime | — | Runtime |
+| BuiltIn | — | BuiltIn |
 | Delegated | Undelegating | — |
 | Magic | Delegated, Closed | — |
 | Undelegating | Mirrored, Missing, Closed | Delegated |

@@ -38,7 +38,7 @@ const ACTIVE_DIR: &str = "CURRENT";
 pub struct AccountsDB {
     /// On-disk store for account modes that require persistence.
     persisted: PersistedStore,
-    /// Rebuildable in-memory store for mirrors and runtime accounts.
+    /// In-memory store for programs and base-chain mirrors.
     volatile: VolatileStore,
     /// Database root directory.
     root: PathBuf,
@@ -63,6 +63,12 @@ impl AccountsDB {
         };
         metrics::init(&db);
         Ok(db)
+    }
+
+    /// Whether persisted storage has no allocated account images.
+    /// Genesis seeding makes this false; reopening alone does not.
+    pub fn is_new(&self) -> bool {
+        self.persisted.storage.cursor() == 0
     }
 
     /// Returns the active database directory under `root`.
@@ -230,12 +236,8 @@ impl AccountsDB {
         self.persisted.checksum().map_err(Into::into)
     }
 
-    /// Drops chain-mirrored volatile state while retaining system accounts;
-    /// persisted state is left untouched.
-    ///
-    /// Chain-owned accounts can be fetched again when synchronization resumes.
-    /// System accounts hold internal runtime state and survive the reset; their
-    /// volatile owner indexes are rebuilt. Persisted state is never reset.
+    /// Drops rebuildable chain mirrors and their owner indexes.
+    /// ER-owned state, including local programs and runtime accounts, is retained.
     pub fn reset(&self) {
         self.volatile.reset();
     }
@@ -421,6 +423,7 @@ fn persisted((_, account): &&AccountEntry) -> bool {
     // Mode changes still need persisted cleanup after borrowed data grows into owned data.
     matches!(account.cow(), CoWAccount::Borrowed(_))
         || account.mode().requires_persistence()
+        || account.is(AccountMode::Closed)
         || account.markers().contains(DirtyMarkers::MODE)
 }
 

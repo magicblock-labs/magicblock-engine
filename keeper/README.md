@@ -9,7 +9,10 @@ to interpret their state.
 ## Startup and recovery
 
 Startup validates account storage against ledger progress, restores a retained
-snapshot when necessary, and seeds programs, features, and sysvars.
+snapshot when necessary, and seeds features and sysvars only on genesis.
+Later startups preserve those account images and restore runtime configuration from them.
+Locally supplied native and SBF programs are volatile `BuiltIn` accounts, reloaded
+from builder inputs on every startup and retained across mirror resets.
 [Engine](../engine/README.md#startup-and-recovery) replays the remaining history.
 Recovery can fail rather than open inconsistent state and depends on valid retained
 snapshots and history.
@@ -67,8 +70,9 @@ irreversibly closes storage services.
 
 Keeper supplies Solana sysvars without validator epoch policy. Its informational
 epoch schedule follows local `blockstore.superblock` configuration, without warmup;
-zero disables periodic sealing and uses 432,000-slot epochs. Schedules can differ
-between peers or change on restart. Sealing doesn't itself advance the schedule.
+zero disables periodic sealing and uses 432,000-slot epochs. The schedule is seeded
+at genesis and restored from account state; changing the local sealing interval
+doesn't replace it. Sealing doesn't itself advance the schedule.
 
 Execution and simulation see Clock at the slot after the latest completed block,
 with epochs derived from that slot and Unix timestamp from the block. The unsupported

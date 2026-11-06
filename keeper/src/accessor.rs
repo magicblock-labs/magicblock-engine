@@ -37,7 +37,7 @@ use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
 
 use crate::{
     AccountLease, ExecutionRecord, FullTransaction, Keeper, ResolvedTransaction,
-    error::Result,
+    error::{KeeperError, Result},
     util::{execution_commit, request, transaction_status},
 };
 
@@ -93,22 +93,21 @@ impl<'a> AccountsAccessor<'a> {
 
     /// Updates stored `SlotHashes` and `Clock` sysvar accounts from `block`.
     ///
-    /// If either sysvar account is absent, no account updates are stored.
+    /// Both sysvars must exist; fixed-capacity borrowed commits preserve their index offsets.
     pub fn update_sysvars(&self, block: Block) -> Result<()> {
         let loader = self.loader();
 
-        let Some(mut hacc) = loader.read(&SlotHashes::id(), Clone::clone)? else {
-            return Ok(());
-        };
+        // SAFETY: the sequencer is the exclusive sysvar writer and excludes compaction
+        // through this block transition. The guarded loader outlives both borrowed images.
+        let mut hacc = unsafe { loader.load(&SlotHashes::id()) }?
+            .ok_or(KeeperError::MissingSysvar(SlotHashes::id()))?;
+        let mut cacc =
+            unsafe { loader.load(&Clock::id()) }?.ok_or(KeeperError::MissingSysvar(Clock::id()))?;
         let mut hashes: SlotHashes = hacc.deserialize_data().map_err(AccountsDBError::from)?;
         hashes.add(block.slot, block.hash);
         hacc.serialize_data(&hashes).map_err(AccountsDBError::from)?;
-        let Some(mut cacc) = loader.read(&Clock::id(), Clone::clone)? else {
-            return Ok(());
-        };
         let clock = self.keeper.clock(block);
         cacc.serialize_data(&clock).map_err(AccountsDBError::from)?;
-        drop(loader);
         self.store(&[(SlotHashes::id(), hacc), (Clock::id(), cacc)]).map_err(Into::into)
     }
 }

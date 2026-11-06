@@ -22,11 +22,9 @@ config = [
 ]
 default = []
 ledger = [
-    "dep:bytemuck",
     "dep:derive_more",
     "dep:solana-keypair",
     "dep:solana-pubkey",
-    "solana-hash/bytemuck",
     "solana-hash/copy",
     "solana-hash/wincode",
     "solana-signature/verify",
@@ -64,7 +62,6 @@ testkit = [
 tls = ["dep:solana-instruction-error", "dep:solana-pubkey", "dep:wincode"]
 
 [dependencies]
-bytemuck = { workspace = true, optional = true, features = ["derive"] }
 derive_more = { workspace = true, optional = true, features = ["deref", "from"] }
 futures = { workspace = true, features = ["alloc"], optional = true }
 oneshot = { workspace = true, features = ["async"], optional = true }

@@ -93,9 +93,8 @@ impl ExternalBlock {
 impl PaceMaker {
     /// Registers and starts the pacemaker task.
     ///
-    /// Uses an external block source when supplied. Otherwise it records one
-    /// reset at the keeper's current slot, clears chain-mirrored volatile state,
-    /// and starts emitting slots on the configured block interval.
+    /// Uses an external block source when supplied; otherwise emits slots on
+    /// the configured block interval.
     pub(crate) fn spawn(
         engine: Engine,
         pacer: Option<ExternalPacer>,
@@ -104,11 +103,7 @@ impl PaceMaker {
     ) -> Result<()> {
         let pacer = match pacer {
             Some(rx) => Pacer::External(rx),
-            None => {
-                let ticker = BlockTicker::new(&engine, blockstore.blocktime);
-                engine.reset(ticker.slot)?;
-                Pacer::Internal(ticker)
-            }
+            None => Pacer::Internal(BlockTicker::new(&engine, blockstore.blocktime)),
         };
         let shutdown = shutdown.handle(Service::PaceMaker);
         let superblock = blockstore.superblock;

@@ -92,8 +92,12 @@ impl Engine {
             cache.assign_program(id, entry.into());
         }
         let blockstore = builder.blockstore;
+        let rent = builder.rent.clone();
         let state = Arc::new(builder.build(shutdown).await?);
         Self::try_replay(&state, &cache, cpus).await?;
+        if pacer.is_none() {
+            state.reset(rent)?;
+        }
         let (service, sequencer) = Sequencer::new(cpus / 2, state.clone(), cache, shutdown, false)?;
         service.spawn()?;
         let terminating = Arc::new(AtomicBool::new(false));
@@ -190,7 +194,7 @@ impl Engine {
         TransactionVerifier::new(self.authority())
     }
 
-    /// Drains in-flight execution and keeps the sequencer paused until the handle is dropped.
+    /// Drains execution and simulation, keeping both paused until the handle is dropped.
     pub async fn barrier(&self) -> Result<BarrierHandle> {
         self.pause(SequencerMessage::Barrier).await
     }
@@ -237,7 +241,7 @@ impl Engine {
             }
             OwnedBlockstoreEntry::Reset(reset) => {
                 let _guard = self.barrier().await?;
-                self.apply_reset(*reset)?;
+                self.apply_reset(&reset.payload)?;
             }
             OwnedBlockstoreEntry::Checkpoint(expected) => {
                 let _guard = self.barrier().await?;
