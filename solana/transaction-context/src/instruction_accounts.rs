@@ -414,7 +414,6 @@ mod tests {
             AccountMode::Missing,
             AccountMode::Mirrored,
             AccountMode::Runtime,
-            AccountMode::BuiltIn,
             AccountMode::Undelegating,
             AccountMode::Closed,
         ] {

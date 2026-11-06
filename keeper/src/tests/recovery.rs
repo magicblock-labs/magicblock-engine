@@ -70,7 +70,7 @@ async fn seeds_features_programs_and_sysvars() {
         // Builtins are seeded through the same path with an executable native-loader
         // account, so they share this shape.
         let acc = loader.read(&program, Clone::clone).unwrap().expect("program seeded");
-        assert!(acc.is(AccountMode::BuiltIn));
+        assert!(acc.is(AccountMode::Runtime));
         assert!(acc.executable());
         assert_eq!(acc.owner(), &loader_v4::ID);
         assert_eq!(acc.data(), elf.as_slice());
@@ -118,7 +118,7 @@ async fn seeds_features_programs_and_sysvars() {
     }
 }
 
-/// Startup reloads local programs but preserves persisted state and seeds missing accounts.
+/// Startup preserves persisted programs and accounts while seeding missing accounts.
 #[tokio::test]
 async fn preserves_seeded_accounts_on_reopen() {
     let existing = Pubkey::new_unique();
@@ -131,6 +131,7 @@ async fn preserves_seeded_accounts_on_reopen() {
     );
 
     let keeper = TestKeeper::from_builder(dirs, builder.clone()).await;
+    let program = builder.programs[&V42_ID].clone();
     let schedule = keeper.epoch_schedule().clone();
     let marker_owner = Pubkey::new_unique();
     let marker_data = vec![7, 7, 7];
@@ -155,8 +156,8 @@ async fn preserves_seeded_accounts_on_reopen() {
         let loader = accounts.loader();
         assert_eq!(
             loader.read(&V42_ID, |account| account.data().to_vec()).unwrap(),
-            Some(vec![9]),
-            "startup reloads the supplied program bytes"
+            Some(program),
+            "startup must not replace persisted program bytes"
         );
         assert_eq!(
             loader.read(&existing, |account| account.lamports()).unwrap(),

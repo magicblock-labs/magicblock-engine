@@ -198,14 +198,13 @@ fn test_lifecycle_matrix() {
     // Columns are destinations in `modes` order.
     // 0 forbids the pair, 1 permits equal/newer slots, 2 requires a newer slot.
     let cases = [
-        (Mode::Missing, [2, 1, 1, 1, 0, 1, 1, 1]),
-        (Mode::Mirrored, [2, 2, 1, 1, 0, 1, 0, 0]),
-        (Mode::Delegated, [0, 0, 0, 0, 1, 0, 0, 0]),
-        (Mode::Magic, [0, 0, 1, 0, 0, 1, 0, 0]),
-        (Mode::Undelegating, [1, 1, 2, 0, 0, 1, 0, 0]),
-        (Mode::Closed, [0, 0, 0, 0, 0, 0, 0, 0]),
-        (Mode::Runtime, [0, 0, 0, 0, 0, 0, 2, 0]),
-        (Mode::BuiltIn, [0, 0, 0, 0, 0, 0, 0, 2]),
+        (Mode::Missing, [2, 1, 1, 1, 0, 1, 1]),
+        (Mode::Mirrored, [2, 2, 1, 1, 0, 1, 0]),
+        (Mode::Delegated, [0, 0, 0, 0, 1, 0, 0]),
+        (Mode::Magic, [0, 0, 1, 0, 0, 1, 0]),
+        (Mode::Undelegating, [1, 1, 2, 0, 0, 1, 0]),
+        (Mode::Closed, [0, 0, 0, 0, 0, 0, 0]),
+        (Mode::Runtime, [0, 0, 0, 0, 0, 0, 2]),
     ];
     let modes = cases.map(|(mode, _)| mode);
     let slot_pairs =
@@ -304,7 +303,6 @@ fn test_mode_layout_and_decoding() {
         (Mode::Missing, [0, 4], None),
         (Mode::Mirrored, [1, 4], Some(Base)),
         (Mode::Runtime, [1, 0], Some(Er)),
-        (Mode::BuiltIn, [2, 0], Some(Er)),
         (Mode::Delegated, [1, 9], Some(Er)),
         (Mode::Magic, [1, 1], Some(Er)),
         (Mode::Undelegating, [1, 8], Some(Er)),
@@ -339,11 +337,10 @@ fn test_mode_layout_and_decoding() {
                 || mode == Mode::Undelegating
                 || mode == Mode::Runtime
         );
-        assert_eq!(mode.is_er_owned(), authority == Some(Er));
     }
     assert_eq!(Mode::default(), Mode::Missing);
 
-    for bytes in [[2, 4], [4, 0], [1, 0x10], [1, 2], [1, 3], [1, 12], [2, 1]] {
+    for bytes in [[2, 0], [4, 0], [1, 0x10], [1, 2], [1, 3], [1, 12], [2, 1]] {
         assert!(Mode::try_from(bytes).is_err());
         assert!(bincode::deserialize::<Mode>(&bytes).is_err());
         #[cfg(feature = "wincode")]

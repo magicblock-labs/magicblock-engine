@@ -22,8 +22,6 @@ pub(crate) enum AccountKind {
     Missing,
     /// Account state whose access and synchronization policy determine its behavior.
     Regular,
-    /// Locally supplied program image rebuilt at startup instead of persisted.
-    BuiltIn,
     /// Deletion tombstone retained until storage removes the account image.
     Closed = 3,
 }
@@ -104,9 +102,6 @@ pub enum AccountMode {
     /// Read-only, locally maintained state without base-chain synchronization.
     Runtime = encode(Regular, ReadOnly, DataFlow::NoSync),
 
-    /// Read-only local program image, kept in memory without base-chain synchronization.
-    BuiltIn = encode(BuiltIn, ReadOnly, DataFlow::NoSync),
-
     /// Deletion tombstone awaiting physical removal.
     Closed = encode(Closed, ReadOnly, DataFlow::NoSync),
 }
@@ -122,7 +117,6 @@ impl AccountMode {
         match ((self as u16) & KIND_MASK) >> KIND_OFFSET {
             0 => Missing,
             1 => Regular,
-            2 => BuiltIn,
             3 => Closed,
             _ => unreachable!(),
         }
@@ -161,14 +155,9 @@ impl AccountMode {
         }
     }
 
-    /// Returns whether the ER is authoritative for this account's state.
-    pub const fn is_er_owned(self) -> bool {
-        matches!(self.authority(), Some(StateAuthority::Er))
-    }
-
     /// Returns whether local state requires persistence.
     pub const fn requires_persistence(self) -> bool {
-        matches!(self.kind(), Regular) && self.is_er_owned()
+        matches!(self.authority(), Some(StateAuthority::Er))
     }
 
     /// Validates lifecycle eligibility before slot freshness.
@@ -184,9 +173,8 @@ impl AccountMode {
             (Missing, Missing)
             | (Mirrored, Missing | Mirrored)
             | (Runtime, Runtime)
-            | (BuiltIn, BuiltIn)
             | (Undelegating, Delegated) => to_slot > from_slot,
-            (Missing, Mirrored | Runtime | BuiltIn | Delegated | Magic | Closed)
+            (Missing, Mirrored | Runtime | Delegated | Magic | Closed)
             | (Mirrored, Delegated | Magic | Closed)
             | (Delegated, Undelegating)
             | (Magic, Delegated | Closed)
@@ -214,7 +202,6 @@ impl TryFrom<[u8; 2]> for AccountMode {
             [0, 4] => Ok(Self::Missing),
             [1, 4] => Ok(Self::Mirrored),
             [1, 0] => Ok(Self::Runtime),
-            [2, 0] => Ok(Self::BuiltIn),
             [1, 9] => Ok(Self::Delegated),
             [1, 1] => Ok(Self::Magic),
             [1, 8] => Ok(Self::Undelegating),

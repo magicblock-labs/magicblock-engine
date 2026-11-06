@@ -69,9 +69,9 @@ pub struct KeeperBuilder {
     pub ledger: LedgerParams,
     /// Block production timing and superblock sealing parameters.
     pub blockstore: BlockstoreParams,
-    /// Native builtin program ids to install as volatile executable accounts.
+    /// Native builtin program ids to seed as executable runtime accounts at genesis.
     pub builtins: HashMap<Pubkey, BuiltinFunctionWithContext>,
-    /// SBF programs to reload as volatile loader-v4 accounts: `(program id, ELF bytes)`.
+    /// SBF programs to seed at genesis as loader-v4 accounts: `(program id, ELF bytes)`.
     pub programs: HashMap<Pubkey, Vec<u8>>,
     /// Accounts to seed at startup if missing from the database; existing accounts are kept.
     pub possibly_missing_accounts: HashMap<Pubkey, AccountSharedData>,
@@ -114,16 +114,16 @@ impl KeeperBuilder {
         })
     }
 
-    /// Reloads local programs, initializes genesis runtime state, and seeds missing accounts.
+    /// Initializes runtime state once and seeds caller-supplied missing accounts.
     fn prepopulate(&mut self, accountsdb: &AccountsDB) -> Result<()> {
         let mut accounts = Vec::new();
         if accountsdb.is_new() {
             for id in DEFAULT_FEATURES {
                 accounts.push((id, feature_account()));
             }
+            self.seed_programs(&mut accounts);
             self.seed_sysvars(&mut accounts);
         }
-        self.seed_programs(&mut accounts);
         let loader = accountsdb.loader();
         let authority = self.authority.pubkey();
         if !loader.contains(&authority)? {
@@ -179,7 +179,7 @@ impl KeeperBuilder {
         Ok(features)
     }
 
-    /// Reloads native-loader builtins and precompiles, and loader-v4 SBF programs.
+    /// Seeds native-loader builtins and precompiles, and loader-v4 SBF programs.
     fn seed_programs(&mut self, accounts: &mut Vec<AccountEntry>) {
         let precompiles = [
             solana_sdk_ids::ed25519_program::ID,
@@ -198,7 +198,7 @@ impl KeeperBuilder {
             let lamports = Rent::default().minimum_balance(elf.len());
             let account = AccountBuilder::default()
                 .lamports(lamports)
-                .mode(AccountMode::BuiltIn)
+                .mode(AccountMode::Runtime)
                 .owner(owner)
                 .executable(true)
                 .data(elf);

@@ -129,7 +129,7 @@ fn mutable_at_least(lamports: u64, units: u64, owner: &Pubkey) -> AccountSharedD
 }
 
 /// Proves lifecycle changes route accounts and owner indexes between backends,
-/// while closing removes state and reset retains ER-owned state, including volatile programs.
+/// while closing removes state and reset retains persisted runtime accounts and programs.
 #[test]
 fn test_routing_and_persistence_flips() {
     let (_dir, db) = db();
@@ -223,24 +223,24 @@ fn test_routing_and_persistence_flips() {
         before,
         "fixed-size runtime updates commit without reallocating"
     );
-    let builtin = Pubkey::new_unique();
+    let executable = Pubkey::new_unique();
     store(
         &db,
-        builtin,
+        executable,
         AccountBuilder::default()
             .owner(p)
-            .mode(AccountMode::BuiltIn)
+            .mode(AccountMode::Runtime)
             .executable(true)
             .build(),
     );
-    assert!(in_volatile(&db, &builtin) && !in_persisted(&db, &builtin));
+    assert!(in_persisted(&db, &executable) && !in_volatile(&db, &executable));
     db.reset();
     assert!(!in_volatile(&db, &b));
     assert!(in_persisted(&db, &c));
     assert!(in_persisted(&db, &runtime));
     assert!(program(&db, &p).contains(&runtime));
-    assert!(in_volatile(&db, &builtin));
-    assert!(program(&db, &p).contains(&builtin));
+    assert!(in_persisted(&db, &executable));
+    assert!(program(&db, &p).contains(&executable));
 }
 
 // Both migration directions remove the source image and owner mapping, retain

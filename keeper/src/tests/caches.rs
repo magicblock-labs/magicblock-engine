@@ -116,7 +116,6 @@ async fn account_lease_coordinates_recency_and_waiters() {
         (AccountMode::Magic, false),
         (AccountMode::Undelegating, false),
         (AccountMode::Runtime, false),
-        (AccountMode::BuiltIn, false),
     ];
     for (mode, tracked) in modes {
         let cache = Arc::new(AccountCache::new(256));

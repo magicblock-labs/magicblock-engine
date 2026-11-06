@@ -38,7 +38,7 @@ const ACTIVE_DIR: &str = "CURRENT";
 pub struct AccountsDB {
     /// On-disk store for account modes that require persistence.
     persisted: PersistedStore,
-    /// In-memory store for programs and base-chain mirrors.
+    /// Rebuildable in-memory store for base-chain mirrors.
     volatile: VolatileStore,
     /// Database root directory.
     root: PathBuf,
@@ -237,7 +237,7 @@ impl AccountsDB {
     }
 
     /// Drops rebuildable chain mirrors and their owner indexes.
-    /// ER-owned state, including local programs and runtime accounts, is retained.
+    /// Persisted state, including local programs and runtime accounts, is retained.
     pub fn reset(&self) {
         self.volatile.reset();
     }

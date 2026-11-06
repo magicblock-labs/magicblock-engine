@@ -108,19 +108,10 @@ impl VolatileStore {
         self.programs.read_sync(owner, |_, s| s.clone()).unwrap_or_default()
     }
 
-    /// Drops base-chain state while retaining ER-owned programs and their indexes.
+    /// Drops rebuildable base-chain state and its ownership indexes.
     pub(crate) fn reset(&self) {
+        self.accounts.clear_sync();
         self.programs.clear_sync();
-        self.accounts.retain_sync(|key, account| {
-            if !account.mode().is_er_owned() {
-                return false;
-            }
-            BTreeSet::insert(
-                &mut self.programs.entry_sync(account.owner()).or_default(),
-                *key,
-            );
-            true
-        });
     }
 
     /// Removes the cached account and drops its owner mapping.
