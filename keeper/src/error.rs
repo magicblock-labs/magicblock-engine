@@ -1,5 +1,7 @@
 //! Keeper error types.
 
+use std::io;
+
 use accountsdb::{AccountsDBError, SnapshotError};
 use derive_more::From;
 use flume::SendError;
@@ -12,7 +14,7 @@ use solana_pubkey::Pubkey;
 pub enum KeeperError {
     /// Filesystem or archive IO failed.
     #[error("io: {0}")]
-    IO(#[source] std::io::Error),
+    IO(#[source] io::Error),
     /// Accounts database operation failed.
     #[error("accountsdb: {0}")]
     AccountsDB(#[source] AccountsDBError),

@@ -4,8 +4,11 @@ use std::fs;
 
 use accountsdb::AccountEntry;
 use ledger::schema::Signed;
-use nucleus::testkit::{V42_ID, block, signed_view};
-use solana_account::{ReadableAccount, testkit::delegated_account};
+use nucleus::{
+    ledger::Reset,
+    testkit::{V42_ID, block, signed_view},
+};
+use solana_account::{AccountBuilder, AccountMode, ReadableAccount, testkit::delegated_account};
 use solana_instruction::Instruction;
 use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
@@ -20,13 +23,15 @@ use crate::ResolvedTransaction;
 use crate::testkit::{Dirs, archived_snapshot, corrupt, keeper_builder, seal_and_archive};
 
 /// Proves startup seeds features, programs, and a no-warmup epoch schedule,
-/// including sub-32-slot intervals and the zero-sealing fallback.
+/// including fixed runtime funding under nondefault rent, sub-32-slot intervals,
+/// and the zero-sealing fallback.
 #[tokio::test]
 async fn seeds_features_programs_and_sysvars() {
     for interval in [1, 7, 0] {
         let dirs = Dirs::default();
         let mut builder = keeper_builder(&dirs);
         builder.blockstore.superblock = interval;
+        builder.rent.lamports_per_byte = 5080;
         let program = Pubkey::new_unique();
         let elf = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
         builder.programs.insert(program, elf.clone());
@@ -65,6 +70,7 @@ async fn seeds_features_programs_and_sysvars() {
         // Builtins are seeded through the same path with an executable native-loader
         // account, so they share this shape.
         let acc = loader.read(&program, Clone::clone).unwrap().expect("program seeded");
+        assert!(acc.is(AccountMode::Runtime));
         assert!(acc.executable());
         assert_eq!(acc.owner(), &loader_v4::ID);
         assert_eq!(acc.data(), elf.as_slice());
@@ -112,11 +118,14 @@ async fn seeds_features_programs_and_sysvars() {
     }
 }
 
-/// Startup seeds missing accounts without replacing account state saved by a prior run.
+/// Startup preserves existing programs and accounts while persisting missing SBF,
+/// native program, and caller-supplied account seeds on an initialized database.
 #[tokio::test]
 async fn preserves_seeded_accounts_on_reopen() {
     let existing = Pubkey::new_unique();
     let added = Pubkey::new_unique();
+    let added_program = Pubkey::new_unique();
+    let native = solana_sdk_ids::secp256k1_program::ID;
     let dirs = Dirs::default();
     let mut builder = keeper_builder(&dirs);
     builder.possibly_missing_accounts.insert(
@@ -125,20 +134,52 @@ async fn preserves_seeded_accounts_on_reopen() {
     );
 
     let keeper = TestKeeper::from_builder(dirs, builder.clone()).await;
+    let program = builder.programs[&V42_ID].clone();
+    let schedule = keeper.epoch_schedule().clone();
     let marker_owner = Pubkey::new_unique();
     let marker_data = vec![7, 7, 7];
     let marker = delegated_account(2, marker_data.clone(), marker_owner);
-    keeper.accounts().store(&[(existing, marker.build())]).unwrap();
+    // Reopening must restore a missing native program, not just retain an existing image.
+    let closed = AccountBuilder::default().mode(AccountMode::Closed).build();
+    keeper
+        .accounts()
+        .store(&[(existing, marker.build()), (native, closed)])
+        .unwrap();
     let dirs = keeper.close().await;
 
+    builder.programs.insert(V42_ID, vec![9]);
+    builder.programs.insert(added_program, vec![1, 2, 3]);
+    builder.blockstore.superblock = 3;
     builder.possibly_missing_accounts.insert(
         added,
         delegated_account(3, vec![], Pubkey::default()).build(),
     );
     let keeper = TestKeeper::from_builder(dirs, builder).await;
+    assert_eq!(
+        keeper.epoch_schedule(),
+        &schedule,
+        "restored schedule overrides local configuration"
+    );
     {
         let accounts = keeper.accounts();
         let loader = accounts.loader();
+        assert_eq!(
+            loader.read(&V42_ID, |account| account.data().to_vec()).unwrap(),
+            Some(program),
+            "startup must not replace persisted program bytes"
+        );
+        for (id, owner, data) in [
+            (added_program, loader_v4::ID, vec![1, 2, 3]),
+            (native, solana_sdk_ids::native_loader::ID, vec![]),
+        ] {
+            let account = loader
+                .read(&id, Clone::clone)
+                .unwrap()
+                .expect("missing programs are seeded on an initialized database");
+            assert!(account.is(AccountMode::Runtime) && account.executable());
+            assert_eq!(account.owner(), &owner);
+            assert_eq!(account.data(), data);
+        }
         assert_eq!(
             loader.read(&existing, |account| account.lamports()).unwrap(),
             Some(2)
@@ -173,7 +214,7 @@ async fn preserves_seeded_accounts_on_reopen() {
 async fn recovers_the_newest_snapshot() {
     let marker = Pubkey::new_unique();
     let dirs = Dirs::default();
-    let builder = keeper_builder(&dirs);
+    let mut builder = keeper_builder(&dirs);
     let keeper = TestKeeper::from_builder(dirs, builder.clone()).await;
 
     let schedule = keeper.epoch_schedule().clone();
@@ -186,6 +227,21 @@ async fn recovers_the_newest_snapshot() {
         "snapshot archived under superblock"
     );
     // Second snapshot, in a later superblock, captures marker == 2.
+    let mut rent = keeper.rent();
+    rent.lamports_per_byte = 5080;
+    keeper
+        .apply_reset(&Reset {
+            slot: 0,
+            rent: rent.lamports_per_byte,
+            features: keeper
+                .features()
+                .active()
+                .keys()
+                .copied()
+                .filter(|id| *id != agave_feature_set::enable_poseidon_syscall::ID)
+                .collect(),
+        })
+        .unwrap();
     store_marker(&keeper, marker, 2);
     seal_and_archive(&keeper).await;
     assert_eq!(
@@ -193,7 +249,13 @@ async fn recovers_the_newest_snapshot() {
         clock,
         "seals do not advance epochs"
     );
-    keeper.apply_reset(nucleus::ledger::Reset(0)).unwrap();
+    keeper
+        .apply_reset(&Reset {
+            slot: 0,
+            rent: rent.lamports_per_byte,
+            features: keeper.features().active().keys().copied().collect(),
+        })
+        .unwrap();
     assert_eq!(
         keeper.epoch_schedule(),
         &schedule,
@@ -207,7 +269,25 @@ async fn recovers_the_newest_snapshot() {
     // valid checksum over the poisoned word.
     corrupt(dirs.accounts.path(), 8, 0xABAB_ABAB_ABAB_ABAB);
 
+    builder.rent = Rent::default();
     let keeper = TestKeeper::from_builder(dirs, builder).await;
+    assert_eq!(
+        keeper.rent(),
+        rent,
+        "snapshot rent wins over local defaults"
+    );
+    assert!(
+        !keeper.features().active().is_empty(),
+        "snapshot restores active features"
+    );
+    assert!(
+        !keeper.features().is_active(&agave_feature_set::enable_poseidon_syscall::ID),
+        "startup defaults must not override restored feature membership"
+    );
+    assert!(
+        !keeper.accounts().is_new(),
+        "snapshot restoration does not create a fresh store"
+    );
     keeper.accounts().validate().expect("restored store validates");
     assert_eq!(keeper.epoch_schedule(), &schedule);
     assert_eq!(keeper.clock(keeper.blocks().latest()), clock);

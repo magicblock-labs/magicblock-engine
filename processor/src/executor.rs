@@ -113,7 +113,7 @@ impl TransactionExecutor {
         events: Sender<ExecutorEvent>,
         replay: bool,
     ) -> Result<ExecutorHandle> {
-        let svm = SvmContext::new(&state, cache)?;
+        let svm = SvmContext::new(&state, cache);
         let shutdown = shutdown.handle(Service::TransactionExecutor(id));
         let (tx, rx) = mpsc::sync_channel(2);
         let executor = Self {
@@ -178,7 +178,7 @@ impl TransactionExecutor {
         // executor completes processing, including commit and owned fanout.
         // Replay follows the same drain protocol; no borrowed result escapes.
         let loader = unsafe { AccountLoader::unguarded(&accounts) };
-        let output = self.svm.execute::<false>(loader, &txn, self.state.features());
+        let output = self.svm.execute::<false>(loader, &txn, &self.state);
         if !output.processing_result.was_processed_with_successful_result() {
             metrics::failed_transaction(FailureKind::Execution);
         }

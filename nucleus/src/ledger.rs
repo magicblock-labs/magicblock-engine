@@ -1,17 +1,13 @@
 //! Ledger block-boundary schema shared by storage-adjacent crates.
 
-use bytemuck::NoUninit;
 use derive_more::Deref;
 use solana_hash::Hash;
 use solana_keypair::{Keypair, Signer};
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
-use wincode::{SchemaRead, SchemaWrite};
+use wincode::{Result, SchemaRead, SchemaWrite, config::DefaultConfig};
 
 use crate::Slot;
-
-#[cfg(not(target_endian = "little"))]
-compile_error!("ledger signatures require little-endian targets");
 
 /// File name of the archived accountsdb snapshot tarball inside a superblock directory.
 pub const ACCOUNTSDB_SNAPSHOT_FILE: &str = "accountsdb.tar.zst";
@@ -28,7 +24,7 @@ pub struct BlockstorePosition {
 }
 
 /// Block boundary entry stored after all transactions in the block.
-#[derive(SchemaRead, SchemaWrite, Clone, Copy, Default, PartialEq, Eq, Debug, NoUninit)]
+#[derive(SchemaRead, SchemaWrite, Clone, Copy, Default, PartialEq, Eq, Debug)]
 #[repr(C)]
 pub struct Block {
     /// Slot that produced the block.
@@ -49,7 +45,7 @@ impl Block {
 }
 
 /// Superblock boundary entry stored at the end of the blockstore stream.
-#[derive(SchemaRead, SchemaWrite, Clone, Copy, Debug, PartialEq, Eq, NoUninit)]
+#[derive(SchemaRead, SchemaWrite, Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct SuperblockSeal {
     /// Id of the superblock this seal closes.
@@ -61,12 +57,18 @@ pub struct SuperblockSeal {
 }
 
 /// Volatile-state reset stored at its ordered position in the ledger.
-#[derive(SchemaRead, SchemaWrite, Clone, Copy, Debug, PartialEq, Eq, Deref, NoUninit)]
-#[repr(transparent)]
-pub struct Reset(pub Slot);
+#[derive(SchemaRead, SchemaWrite, Clone, Debug, PartialEq, Eq)]
+pub struct Reset {
+    /// Slot at which volatile state is discarded.
+    pub slot: Slot,
+    /// Rent rate effective before subsequent transactions.
+    pub rent: u64,
+    /// Complete active feature set.
+    pub features: Vec<Pubkey>,
+}
 
 /// Fresh persisted-state checksum at an ordered ledger boundary.
-#[derive(SchemaRead, SchemaWrite, Clone, Copy, Debug, PartialEq, Eq, Deref, NoUninit)]
+#[derive(SchemaRead, SchemaWrite, Clone, Copy, Debug, PartialEq, Eq, Deref)]
 #[repr(transparent)]
 pub struct Checkpoint(pub u64);
 
@@ -82,10 +84,8 @@ pub struct Signed<T> {
 
 const DOMAIN_SIZE: usize = 8;
 
-/// Padding-free ledger payload with a stable layout and distinct signing domain.
-/// Its little-endian memory image must match its wincode payload and fit within
-/// `size_of::<Block>()` bytes. Violating this contract is a programming error.
-pub trait Record: NoUninit {
+/// Canonically serialized ledger payload with a distinct signing domain.
+pub trait Record: SchemaWrite<DefaultConfig, Src = Self> {
     /// Domain prefix separating this payload from other signed records.
     const DOMAIN: &'static [u8; DOMAIN_SIZE];
 }
@@ -104,26 +104,26 @@ impl Record for Checkpoint {
 }
 
 impl<T: Record> Signed<T> {
-    /// Signs the canonical payload without allocating an intermediate message.
+    /// Signs the domain-prefixed canonical payload. Encoding failure is a programming error.
+    #[expect(
+        clippy::expect_used,
+        reason = "Engine-owned record encoding is an invariant; verification remains fallible"
+    )]
     pub fn new(payload: T, signer: &Keypair) -> Self {
-        let signature = Self::message(&payload, |bytes| signer.sign_message(bytes));
+        let bytes = Self::message(&payload).expect("Engine-owned ledger records must be encodable");
+        let signature = signer.sign_message(&bytes);
         Self { payload, signature }
     }
 
     /// Authenticates the canonical payload against the configured producer.
     pub fn verify(&self, authority: &Pubkey) -> bool {
-        Self::message(&self.payload, |bytes| {
-            self.signature.verify(authority.as_ref(), bytes)
-        })
+        Self::message(&self.payload)
+            .is_ok_and(|bytes| self.signature.verify(authority.as_ref(), &bytes))
     }
 
-    fn message<R>(payload: &T, consume: impl FnOnce(&[u8]) -> R) -> R {
-        let payload = bytemuck::bytes_of(payload);
-        let len = DOMAIN_SIZE + payload.len();
-        // Only the domain prefix is copied separately; NoUninit excludes padding.
-        let mut bytes = [0; DOMAIN_SIZE + size_of::<Block>()];
-        bytes[..DOMAIN_SIZE].copy_from_slice(T::DOMAIN);
-        bytes[DOMAIN_SIZE..len].copy_from_slice(payload);
-        consume(&bytes[..len])
+    fn message(payload: &T) -> Result<Vec<u8>> {
+        let mut bytes = T::DOMAIN.to_vec();
+        wincode::serialize_into(&mut bytes, payload)?;
+        Ok(bytes)
     }
 }

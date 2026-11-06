@@ -6,11 +6,14 @@ use std::{
     time::Duration,
 };
 
-use accountsdb::{AccountEntry, AccountsDB, AccountsDBError, BackupOp, SnapshotError};
+use accountsdb::{
+    AccountEntry, AccountLoader, AccountsDB, AccountsDBError, BackupOp, SnapshotError,
+};
 use agave_feature_set::FeatureSet;
+use arc_swap::ArcSwap;
 use ledger::{
     Ledger, LedgerHandle,
-    request::{BlockDetails, BlockParams, BlockRangeParams, ReadRequest, RequestPayload},
+    request::{BlockRangeParams, ReadRequest, RequestPayload},
 };
 use nucleus::{
     Slot,
@@ -18,28 +21,32 @@ use nucleus::{
     ledger::{ACCOUNTSDB_SNAPSHOT_FILE, Block},
     shutdown::ShutdownManager,
 };
-use serde::Serialize;
-use solana_account::{AccountBuilder, AccountMode, AccountSharedData, ReadableAccount};
-use solana_feature_gate_interface::Feature;
+use serde::de::DeserializeOwned;
+use solana_account::{AccountBuilder, AccountMode, AccountSharedData};
 use solana_program_runtime::invoke_context::BuiltinFunctionWithContext;
 use solana_pubkey::Pubkey;
 use solana_sdk_ids::sysvar;
-#[allow(deprecated)]
-use solana_sysvar::fees::Fees;
 use solana_sysvar::{
     clock::Clock,
     epoch_rewards::EpochRewards,
     epoch_schedule::EpochSchedule,
+    fees,
     last_restart_slot::LastRestartSlot,
     rent::Rent,
     slot_hashes::{SlotHashes, SysvarId},
 };
+use tar::Archive;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
+use zstd::Decoder;
 
 use crate::{
-    Keeper, LEDGER_STREAM_CAPACITY, cache::Caches, error::Result, metrics,
+    Keeper, LEDGER_STREAM_CAPACITY,
+    cache::Caches,
+    error::{KeeperError, Result},
+    feature_account, metrics, runtime_account,
     subscriptions::Subscriptions,
+    sysvar_account,
 };
 
 /// Initial balance assigned to the authority account that sponsors account creation.
@@ -62,13 +69,13 @@ pub struct KeeperBuilder {
     pub ledger: LedgerParams,
     /// Block production timing and superblock sealing parameters.
     pub blockstore: BlockstoreParams,
-    /// Native builtin program ids to seed as executable accounts.
+    /// Native builtin program ids to seed as executable runtime accounts if absent.
     pub builtins: HashMap<Pubkey, BuiltinFunctionWithContext>,
-    /// SBF programs to seed as executable loader-v4 accounts: `(program id, ELF bytes)`.
+    /// SBF programs to seed if absent as loader-v4 accounts: `(program id, ELF bytes)`.
     pub programs: HashMap<Pubkey, Vec<u8>>,
     /// Accounts to seed at startup if missing from the database; existing accounts are kept.
     pub possibly_missing_accounts: HashMap<Pubkey, AccountSharedData>,
-    /// Rent parameters used to size seeded accounts and the Rent sysvar.
+    /// Startup rent for a new leader; recovery uses the persisted Rent sysvar.
     pub rent: Rent,
 }
 
@@ -78,13 +85,27 @@ impl KeeperBuilder {
         let ledger = Ledger::init(&self.ledger.directory, self.ledger.size_limit, shutdown)?;
         let accountsdb = self.accountsdb(&ledger)?;
         accountsdb.cleanup_snapshots()?;
-        let (caches, featureset) = self.prepopulate(&accountsdb, &ledger).await?;
+        self.prepopulate(&accountsdb)?;
+        let featureset = Self::restore_features(&accountsdb)?;
+        let (rent, epoch_schedule, slothashes, clock) = {
+            let loader = accountsdb.loader();
+            (
+                load_sysvar::<Rent>(&loader)?,
+                load_sysvar::<EpochSchedule>(&loader)?,
+                load_sysvar::<SlotHashes>(&loader)?,
+                load_sysvar::<Clock>(&loader)?,
+            )
+        };
+        let caches = if self.authority.remote.is_some() {
+            self.follower_caches(&ledger, accountsdb.slot(), &slothashes, &clock).await?
+        } else {
+            self.leader_caches(&slothashes, &clock)
+        };
         metrics::init();
-        let epoch_schedule = self.epoch_schedule();
         Ok(Keeper {
             authority: self.authority,
-            featureset,
-            rent: self.rent,
+            featureset: ArcSwap::from_pointee(featureset),
+            rent: rent.lamports_per_byte.into(),
             epoch_schedule,
             accountsdb,
             ledger,
@@ -93,16 +114,16 @@ impl KeeperBuilder {
         })
     }
 
-    /// Seeds accounts needed before the engine starts serving reads.
-    async fn prepopulate(
-        &mut self,
-        accountsdb: &AccountsDB,
-        ledger: &LedgerHandle,
-    ) -> Result<(Caches, FeatureSet)> {
+    /// Initializes runtime configuration once and seeds missing programs and accounts.
+    fn prepopulate(&mut self, accountsdb: &AccountsDB) -> Result<()> {
         let mut accounts = Vec::new();
-        let featureset = self.seed_featureset(&mut accounts)?;
-        self.seed_programs(&mut accounts)?;
-        let caches = self.seed_sysvars(accountsdb, ledger, &mut accounts).await?;
+        if accountsdb.is_new() {
+            for id in DEFAULT_FEATURES {
+                accounts.push((id, feature_account()));
+            }
+            self.seed_sysvars(&mut accounts);
+        }
+        self.seed_programs();
         let loader = accountsdb.loader();
         let authority = self.authority.pubkey();
         if !loader.contains(&authority)? {
@@ -117,8 +138,7 @@ impl KeeperBuilder {
             }
         }
         drop(loader);
-        accountsdb.store(&accounts)?;
-        Ok((caches, featureset))
+        accountsdb.store(&accounts).map_err(Into::into)
     }
 
     /// Epochs follow the local sealing interval; zero uses Solana's no-warmup default.
@@ -147,136 +167,66 @@ impl KeeperBuilder {
         window.div_duration_f64(self.blockstore.blocktime).ceil() as Slot
     }
 
-    /// Activates the engine's required feature gates at slot 0, seeds a feature
-    /// account for each, and returns the resulting [`FeatureSet`].
-    fn seed_featureset(&self, accounts: &mut Vec<AccountEntry>) -> Result<FeatureSet> {
-        let mut featureset = FeatureSet::default();
-        [
-            agave_feature_set::curve25519_syscall_enabled::ID,
-            agave_feature_set::curve25519_restrict_msm_length::ID,
-            agave_feature_set::enable_poseidon_syscall::ID,
-            agave_feature_set::enable_sbpf_v3_deployment_and_execution::ID,
-            agave_feature_set::virtual_address_space_adjustments::ID,
-            agave_feature_set::syscall_parameter_address_restrictions::ID,
-            agave_feature_set::get_sysvar_syscall_enabled::ID,
-            agave_feature_set::ed25519_program_enabled::ID,
-            agave_feature_set::secp256k1_program_enabled::ID,
-            agave_feature_set::enable_secp256r1_precompile::ID,
-        ]
-        .iter()
-        .for_each(|f| featureset.activate(f, 0));
-        for (&id, &slot) in featureset.active() {
-            let feature = &Feature { activated_at: Some(slot) };
-            let account = self.account(feature, &solana_feature_gate_interface::ID)?;
-            accounts.push((id, account.build()));
+    /// Reconstructs feature membership from authoritative runtime accounts.
+    fn restore_features(accountsdb: &AccountsDB) -> Result<FeatureSet> {
+        let mut features = FeatureSet::default();
+        let accounts = accountsdb.program(&solana_feature_gate_interface::ID, |_, account| {
+            account.mode()
+        })?;
+        for (id, _) in accounts.filter(|(_, mode)| *mode == AccountMode::Runtime) {
+            features.activate(&id, 0);
         }
-        Ok(featureset)
+        Ok(features)
     }
 
-    /// Seeds native-loader accounts for builtins and precompiles, and raw ELF
-    /// accounts owned by loader-v4 for configured SBF programs.
-    fn seed_programs(&self, accounts: &mut Vec<AccountEntry>) -> Result<()> {
+    /// Adds program images to the common insert-if-missing startup seeds.
+    fn seed_programs(&mut self) {
         let precompiles = [
             solana_sdk_ids::ed25519_program::ID,
             solana_sdk_ids::secp256k1_program::ID,
             solana_sdk_ids::secp256r1_program::ID,
         ];
-        for program in self.builtins.keys().copied().chain(precompiles) {
-            let account = self.account(&(), &solana_sdk_ids::native_loader::ID)?;
-            let account = account.executable(true).build();
-            accounts.push((program, account));
+        let builtins = self
+            .builtins
+            .keys()
+            .copied()
+            .chain(precompiles)
+            .map(|id| (id, solana_sdk_ids::native_loader::ID, Vec::new()));
+        let programs =
+            self.programs.drain().map(|(id, elf)| (id, solana_sdk_ids::loader_v4::ID, elf));
+        for (program, owner, elf) in builtins.chain(programs) {
+            self.possibly_missing_accounts.entry(program).or_insert_with(|| {
+                let lamports = Rent::default().minimum_balance(elf.len());
+                AccountBuilder::default()
+                    .lamports(lamports)
+                    .mode(AccountMode::Runtime)
+                    .owner(owner)
+                    .executable(true)
+                    .data(elf)
+                    .build()
+            });
         }
-
-        for (&program, elf) in &self.programs {
-            let lamports = self.rent.minimum_balance(elf.len());
-            let account = AccountBuilder::default()
-                .lamports(lamports)
-                .mode(AccountMode::Runtime)
-                .owner(solana_sdk_ids::loader_v4::ID)
-                .executable(true)
-                .data(elf.clone());
-            accounts.push((program, account.build()));
-        }
-        Ok(())
     }
 
-    /// Seeds block-derived sysvars and builds the caches needed for this node's role.
-    async fn seed_sysvars(
-        &self,
-        accountsdb: &AccountsDB,
-        ledger: &LedgerHandle,
-        accounts: &mut Vec<AccountEntry>,
-    ) -> Result<Caches> {
-        let slot = accountsdb.slot();
-        let id = SlotHashes::id();
-        // AccountsDB starts at slot 1 and the ledger starts at head 1.
-        let genesis = slot == 1 && ledger.head() == 1;
-        let slothashes = accountsdb
-            .loader()
-            .read(&id, |account| account.deserialize_data::<SlotHashes>())?;
-        let slothashes = match slothashes {
-            Some(hashes) => hashes.map_err(AccountsDBError::from)?,
-            None => {
-                // Keep the sysvar account at its fixed serialized capacity so live
-                // updates can replace entries without resizing the account.
-                let mut hashes = SlotHashes::new(&[Default::default(); SLOTHASH_ENTRIES]);
-                if !genesis {
-                    // Leader shutdown does not dump volatile sysvars. Recover only
-                    // through AccountsDB's boundary, never an unapplied ledger tail.
-                    let start = slot.saturating_sub(SLOTHASH_ENTRIES as Slot - 1).max(1);
-                    for slot in start..=slot {
-                        let params = BlockParams {
-                            slot,
-                            details: BlockDetails::None,
-                        };
-                        let (payload, response) = RequestPayload::new(params);
-                        ledger.reader.send(ReadRequest::Block(payload))?;
-                        let Some(response) = response.recv().await?? else { continue };
-                        let block = response.block();
-                        hashes.add(block.slot, block.hash);
-                    }
-                }
-                let account = self.account(&hashes, &sysvar::ID)?;
-                accounts.push((id, account.build()));
-                hashes
-            }
-        };
-
-        // A remote authority makes this engine a replication client. Followers
-        // need retained dedup history; leaders deliberately retain only the tip
-        // without reconstructing signature history.
-        let caches = if self.authority.remote.is_some() {
-            self.follower_caches(ledger, slot, &slothashes).await?
-        } else {
-            self.leader_caches(&slothashes)
-        };
-
-        let epoch_schedule = self.epoch_schedule();
-        let clock = crate::clock(&epoch_schedule, caches.latest());
-        accounts.push((Clock::id(), self.account(&clock, &sysvar::ID)?.build()));
-        accounts.push((Rent::id(), self.account(&self.rent, &sysvar::ID)?.build()));
-        #[allow(deprecated)]
-        accounts.push((
-            Fees::id(),
-            self.account(&Fees::default(), &sysvar::ID)?.build(),
-        ));
-        accounts.push((
-            sysvar::last_restart_slot::id(),
-            self.account(&LastRestartSlot::default(), &sysvar::ID)?.build(),
-        ));
-        accounts.push((
-            sysvar::instructions::id(),
-            self.account(&(), &sysvar::ID)?.build(),
-        ));
-        accounts.push((
-            EpochSchedule::id(),
-            self.account(&epoch_schedule, &sysvar::ID)?.build(),
-        ));
-        accounts.push((
-            EpochRewards::id(),
-            self.account(&EpochRewards::default(), &sysvar::ID)?.build(),
-        ));
-        Ok(caches)
+    /// Creates the genesis sysvars; subsequent startup always reads persisted state.
+    fn seed_sysvars(&self, accounts: &mut Vec<AccountEntry>) {
+        let hashes = SlotHashes::new(&[Default::default(); SLOTHASH_ENTRIES]);
+        let schedule = self.epoch_schedule();
+        let clock = crate::clock(&schedule, Block::default());
+        accounts.extend([
+            sysvar_account(&hashes),
+            sysvar_account(&clock),
+            sysvar_account(&self.rent),
+            #[allow(deprecated)]
+            sysvar_account(&fees::Fees::default()),
+            sysvar_account(&LastRestartSlot::default()),
+            (
+                sysvar::instructions::ID,
+                runtime_account(&(), &sysvar::ID).build(),
+            ),
+            sysvar_account(&schedule),
+            sysvar_account(&EpochRewards::default()),
+        ]);
     }
 
     /// Streams retained history into follower caches without materializing the range.
@@ -285,6 +235,7 @@ impl KeeperBuilder {
         ledger: &LedgerHandle,
         slot: Slot,
         slothashes: &SlotHashes,
+        clock: &Clock,
     ) -> Result<Caches> {
         let retained = self
             .ttl(BLOCK_CACHE_WINDOW)
@@ -298,7 +249,7 @@ impl KeeperBuilder {
         let (payload, response) = RequestPayload::new(params);
         ledger.reader.send(ReadRequest::BlockRange(payload))?;
 
-        let caches = self.caches(persisted_latest(slothashes));
+        let caches = self.caches(persisted_latest(slothashes, clock));
         // Merge the two ascending streams so ExpiringCache's eviction queue
         // stays ordered, preferring blockstore data for overlapping slots.
         let mut persisted = slothashes.slot_hashes().iter().rev().copied().peekable();
@@ -317,19 +268,11 @@ impl KeeperBuilder {
     }
 
     /// Restores only AccountsDB's latest boundary so replay can advance it from there.
-    fn leader_caches(&self, slothashes: &SlotHashes) -> Caches {
-        let latest = persisted_latest(slothashes);
+    fn leader_caches(&self, slothashes: &SlotHashes, clock: &Clock) -> Caches {
+        let latest = persisted_latest(slothashes, clock);
         let caches = self.caches(latest);
         caches.restore_hash(latest.slot, latest.hash);
         caches
-    }
-
-    /// Builds a rent-exempt system account containing a serialized sysvar-like state.
-    fn account<S: Serialize>(&self, state: &S, owner: &Pubkey) -> Result<AccountBuilder> {
-        let account =
-            AccountSharedData::new_data(0, state, owner).map_err(AccountsDBError::from)?;
-        let lamports = self.rent.minimum_balance(account.data().len());
-        Ok(AccountBuilder::from(account).lamports(lamports).mode(AccountMode::Runtime))
     }
 
     /// Opens accountsdb, restoring the newest archived snapshot after corruption.
@@ -388,7 +331,7 @@ impl KeeperBuilder {
             }
             let dst = AccountsDB::directory(&self.accountsdb.directory);
             let file = File::open(src)?;
-            let mut tar = tar::Archive::new(zstd::Decoder::new(file)?);
+            let mut tar = Archive::new(Decoder::new(file)?);
             tar.unpack(dst)?;
             info!(directory = ?superblock.directory, "restored accountsdb snapshot");
             return Ok(());
@@ -397,12 +340,34 @@ impl KeeperBuilder {
     }
 }
 
-fn persisted_latest(slothashes: &SlotHashes) -> Block {
+fn persisted_latest(slothashes: &SlotHashes, clock: &Clock) -> Block {
     let hashes = slothashes.slot_hashes();
     hashes.first().map_or(Block::default(), |&(slot, hash)| Block {
         slot,
         hash,
-        time: 0,
+        time: clock.unix_timestamp,
         parent: hashes.get(1).map(|(_, hash)| *hash).unwrap_or_default(),
     })
+}
+
+/// Engine-selected features published by a leader at startup.
+pub(crate) const DEFAULT_FEATURES: [Pubkey; 10] = [
+    agave_feature_set::curve25519_syscall_enabled::ID,
+    agave_feature_set::curve25519_restrict_msm_length::ID,
+    agave_feature_set::enable_poseidon_syscall::ID,
+    agave_feature_set::enable_sbpf_v3_deployment_and_execution::ID,
+    agave_feature_set::virtual_address_space_adjustments::ID,
+    agave_feature_set::syscall_parameter_address_restrictions::ID,
+    agave_feature_set::get_sysvar_syscall_enabled::ID,
+    agave_feature_set::ed25519_program_enabled::ID,
+    agave_feature_set::secp256k1_program_enabled::ID,
+    agave_feature_set::enable_secp256r1_precompile::ID,
+];
+
+fn load_sysvar<S: DeserializeOwned + SysvarId>(loader: &AccountLoader<'_>) -> Result<S> {
+    loader
+        .read(&S::id(), |account| account.deserialize_data::<S>())?
+        .ok_or(KeeperError::MissingSysvar(S::id()))?
+        .map_err(AccountsDBError::from)
+        .map_err(Into::into)
 }

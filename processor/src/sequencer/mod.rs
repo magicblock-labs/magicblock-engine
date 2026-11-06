@@ -8,7 +8,9 @@ use keeper::Keeper;
 use nucleus::{
     Slot,
     ledger::Signed,
-    runtime::{BarrierGuard, BlockInput, ExecutionRequest, SequencerHandle},
+    runtime::{
+        self, BarrierGuard, BlockInput, ExecutionRequest, SequencerHandle, SimulatorMessage,
+    },
     shutdown::{Service, ShutdownHandle, ShutdownManager, ShutdownReason},
 };
 use solana_hash::Hash;
@@ -54,10 +56,14 @@ pub(crate) struct ReadyTransaction {
 pub struct Sequencer {
     /// Durable engine state used for appends and account/block lookups.
     state: Arc<Keeper>,
+    /// Shared compiled programs, invalidated at feature boundaries.
+    cache: Arc<ProgramCache>,
     /// Block-local dependency graph preserving input order for account conflicts.
     ordering: OrderingTable,
     /// Inbound stream of transactions and block boundaries.
     rx: mpsc::Receiver<SequencerMessage>,
+    /// Simulator participates in execution-boundary quiescence.
+    simulation: mpsc::Sender<SimulatorMessage>,
     /// Hash-chain state for the block currently being sequenced.
     hasher: BlockHasher,
     /// The executor pool and its availability bookkeeping.
@@ -80,6 +86,7 @@ impl Sequencer {
         shutdown: &mut ShutdownManager,
         replay: bool,
     ) -> Result<(Self, SequencerHandle)> {
+        cache.invalidate();
         let count = executors.clamp(1, MAX_EXECUTORS as usize);
         metrics::init();
         let (event_tx, event_rx) = mpsc::channel(count);
@@ -99,12 +106,14 @@ impl Sequencer {
         let hasher = BlockHasher::new(state.blockhash());
 
         let (execution, rx) = mpsc::channel(1024);
-        let simulation = TransactionSimulator::spawn(state.clone(), cache, shutdown)?;
+        let simulation = TransactionSimulator::spawn(state.clone(), cache.clone(), shutdown)?;
         let shutdown = shutdown.handle(Service::Sequencer);
 
         let sequencer = Self {
             slot: state.blocks().current_slot(),
             state,
+            cache,
+            simulation: simulation.clone(),
             ordering: Default::default(),
             executors: Executors::new(executors, event_rx),
             rx,
@@ -166,7 +175,9 @@ impl Sequencer {
                         SequencerMessage::Barrier(guard) => self.barrier(guard).await,
                         SequencerMessage::Shutdown(guard) => {
                             self.rx.close();
-                            self.barrier(guard).await?;
+                            // The simulator may already have stopped during coordinated shutdown.
+                            self.drain().await?;
+                            self.pause(guard).await;
                             // Do not resume ingress after terminal storage synchronization.
                             self.shutdown.signalled().await;
                             return Ok(());
@@ -231,13 +242,22 @@ impl Sequencer {
         Ok(())
     }
 
-    /// Raises a quiescence barrier: drains all in-flight work so the sequencer
-    /// and its executors are idle, acknowledges the controller, then waits to be
-    /// released before resuming. Used to take a consistent state snapshot at
-    /// superblock boundaries.
+    /// Drains execution and simulation before acknowledging the boundary, then
+    /// holds both services until the controller releases it.
     async fn barrier(&mut self, guard: BarrierGuard) -> Result<()> {
         self.drain().await?;
+        let (simulation, barrier) = runtime::barrier();
+        self.simulation
+            .send(SimulatorMessage::Barrier(barrier))
+            .await
+            .map_err(|_| Service::TransactionSimulator)?;
+        simulation.acknowledged.await.map_err(|_| Service::TransactionSimulator)?;
+        let features = self.state.features();
         self.pause(guard).await;
+        if !Arc::ptr_eq(&features, &self.state.features()) {
+            self.cache.invalidate();
+        }
+        drop(simulation.released);
         Ok(())
     }
 

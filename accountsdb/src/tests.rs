@@ -129,7 +129,7 @@ fn mutable_at_least(lamports: u64, units: u64, owner: &Pubkey) -> AccountSharedD
 }
 
 /// Proves lifecycle changes route accounts and owner indexes between backends,
-/// while closing removes state and reset retains persisted and runtime accounts.
+/// while closing removes state and reset retains persisted runtime accounts and programs.
 #[test]
 fn test_routing_and_persistence_flips() {
     let (_dir, db) = db();
@@ -137,7 +137,11 @@ fn test_routing_and_persistence_flips() {
     let (a, b) = (Pubkey::new_unique(), Pubkey::new_unique());
 
     let aacc = delegated_account(10, vec![], p);
-    let bacc = AccountBuilder::default().lamports(20).owner(p);
+    let bacc = AccountBuilder::default()
+        .lamports(20)
+        .owner(p)
+        .mode(AccountMode::Mirrored)
+        .executable(true);
     // `a` is authoritative, `b` is non-authoritative; both are owned by `p`.
     db.store(&[(a, aacc.build()), (b, bacc.build())]).unwrap();
     assert!(in_persisted(&db, &a) && !in_volatile(&db, &a));
@@ -203,12 +207,40 @@ fn test_routing_and_persistence_flips() {
             .mode(AccountMode::Runtime)
             .build(),
     );
-    assert!(in_volatile(&db, &runtime) && !in_persisted(&db, &runtime));
+    assert!(!in_volatile(&db, &runtime) && in_persisted(&db, &runtime));
+    let allocations = || {
+        let stats = db.persisted.storage.stats();
+        (stats.allocs.load(Relaxed), stats.reallocs.load(Relaxed))
+    };
+    let before = allocations();
+    for lamports in [41, 42] {
+        let mut account = reload(&db, &runtime);
+        account.set_lamports(lamports);
+        store(&db, runtime, account);
+    }
+    assert_eq!(
+        allocations(),
+        before,
+        "fixed-size runtime updates commit without reallocating"
+    );
+    let executable = Pubkey::new_unique();
+    store(
+        &db,
+        executable,
+        AccountBuilder::default()
+            .owner(p)
+            .mode(AccountMode::Runtime)
+            .executable(true)
+            .build(),
+    );
+    assert!(in_persisted(&db, &executable) && !in_volatile(&db, &executable));
     db.reset();
     assert!(!in_volatile(&db, &b));
     assert!(in_persisted(&db, &c));
-    assert!(in_volatile(&db, &runtime));
+    assert!(in_persisted(&db, &runtime));
     assert!(program(&db, &p).contains(&runtime));
+    assert!(in_persisted(&db, &executable));
+    assert!(program(&db, &p).contains(&executable));
 }
 
 // Both migration directions remove the source image and owner mapping, retain
@@ -346,16 +378,30 @@ fn test_dump_restores_volatile_on_reopen() {
 
     {
         let db = AccountsDB::new(dir.path()).unwrap();
+        assert!(db.is_new(), "persisted storage starts unseeded");
         let account = AccountBuilder::default().lamports(42).mode(AccountMode::Mirrored).build();
         store(&db, key, account);
+        assert!(
+            db.is_new(),
+            "volatile mirrors do not initialize persisted storage"
+        );
         db.dump(None).unwrap();
         assert!(dump.exists(), "dump is written into the active tree");
     }
 
     let db = AccountsDB::new(dir.path()).unwrap();
+    assert!(db.is_new(), "reopening does not seed persisted storage");
     assert_eq!(lamports(&db, &key), 42);
     assert!(in_volatile(&db, &key));
     assert!(!dump.exists(), "restored dump is consumed on open");
+    store(&db, Pubkey::new_unique(), delegated(1));
+    assert!(
+        !db.is_new(),
+        "persisted allocation marks the store initialized"
+    );
+    db.flush(true).unwrap();
+    drop(db);
+    assert!(!AccountsDB::new(dir.path()).unwrap().is_new());
 }
 
 // A freed span is reused for a same-sized insert instead of growing the file;

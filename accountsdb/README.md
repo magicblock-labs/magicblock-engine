@@ -2,13 +2,13 @@
 
 Accountsdb stores current account state; the [ledger](../ledger/README.md) retains
 execution history. The store separates account state that requires persistence
-from rebuildable base mirrors and runtime state, which live in memory.
+from rebuildable base mirrors, which live in memory.
 
 Routing follows [lifecycle mode](../solana/account/README.md#account-lifecycle),
-not memory representation. Delegated, Magic, and undelegating accounts are persisted,
+not memory representation. Delegated, Magic, Runtime, and undelegating accounts are persisted,
 including undelegating state that no longer permits user writes.
 Closed accounts are removed. Reset discards mirrored state while preserving
-persisted and runtime accounts.
+persisted accounts, including locally supplied `Runtime` program images.
 
 ## Storage access and writeback
 

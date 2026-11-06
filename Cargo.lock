@@ -2368,7 +2368,6 @@ name = "magicblock-engine-nucleus"
 version = "0.22.0"
 dependencies = [
  "agave-transaction-view",
- "bytemuck",
  "derive_more",
  "futures",
  "oneshot",

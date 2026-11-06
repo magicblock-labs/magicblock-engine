@@ -274,6 +274,11 @@ impl ProgramCacheForTxBatch {
 }
 
 impl ProgramCache {
+    /// Drops programs compiled or verified under a previous feature environment.
+    pub fn invalidate(&self) {
+        self.index.retain_sync(|_, entry| entry.program.get_environment().is_none());
+    }
+
     pub fn assign_program(&self, key: Pubkey, entry: Arc<ProgramCacheEntry>) {
         self.index.upsert_sync(key, entry);
     }
@@ -326,6 +331,7 @@ mod tests {
         })
     }
 
+    /// Proves environment-bound entries are discarded rather than reused after a feature change.
     #[test]
     fn assign_program_makes_entry_retrievable() {
         let cache = ProgramCache::default();
@@ -336,5 +342,7 @@ mod tests {
         let fetched = cache.get(&key);
         assert!(fetched.is_some());
         assert!(Arc::ptr_eq(&fetched.unwrap(), &entry));
+        cache.invalidate();
+        assert!(cache.get(&key).is_none());
     }
 }

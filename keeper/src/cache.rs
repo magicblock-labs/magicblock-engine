@@ -64,11 +64,6 @@ impl Caches {
             self.signatures.push(signature, None, block.slot);
         }
     }
-
-    /// Returns the latest restored block boundary.
-    pub(crate) fn latest(&self) -> Block {
-        **self.blocks.latest.load()
-    }
 }
 
 /// Account access cache along with per-account mutation reservations.

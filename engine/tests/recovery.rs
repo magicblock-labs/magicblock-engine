@@ -205,12 +205,6 @@ async fn clean_restart_reopens_persisted_and_volatile_state() {
     let (dirs, authority) = te.close().await;
 
     let te2 = TestEngine::with(dirs, authority).await;
-    // Leader startup reconstructs the block timestamp as zero; epoch semantics
-    // depend only on the recovered slot, not on that existing timestamp policy.
-    let expected_clock = solana_sysvar::clock::Clock {
-        unix_timestamp: 0,
-        ..expected_clock
-    };
     assert_eq!(te2.clock(te2.blocks().latest()), expected_clock);
     let stored: solana_sysvar::clock::Clock = te2
         .get_account(solana_sdk_ids::sysvar::clock::ID)

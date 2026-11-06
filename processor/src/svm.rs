@@ -28,16 +28,14 @@ use solana_svm::{
 use solana_sysvar::clock::Clock;
 use solana_transaction_error::TransactionResult;
 
-use crate::{
-    Result,
-    callback::{InvokeCallback, LoadCallback},
-};
+use crate::callback::{InvokeCallback, LoadCallback};
 
 /// SVM batch processor together with its per-block environment and recording
 /// config, shared verbatim by the executor and simulator workers.
 pub(crate) struct SvmContext {
     /// SVM batch processor that loads and executes transactions.
     processor: TransactionBatchProcessor,
+    features: Arc<FeatureSet>,
     /// Per-block processing environment (blockhash, features, rent, ...).
     env: TransactionProcessingEnvironment,
     /// Recording and logging configuration for execution.
@@ -46,22 +44,15 @@ pub(crate) struct SvmContext {
 
 impl SvmContext {
     /// Builds the SVM runtime environment and batch processor from current state.
-    pub(crate) fn new(state: &Keeper, cache: Arc<ProgramCache>) -> Result<Self> {
-        let budget = Default::default();
-        let runtime_env = agave_syscalls::create_program_runtime_environment(
-            &state.features().runtime_features(),
-            &budget,
-            false, // Accept legacy ELFs already deployed on the base chain.
-            false,
-        )
-        .map_err(|e| e.to_string())?;
-        let envs = ProgramRuntimeEnvironments::new(runtime_env);
+    pub(crate) fn new(state: &Keeper, cache: Arc<ProgramCache>) -> Self {
+        let features = state.features();
+        let envs = Self::environments(&features);
         let block = state.blocks().latest();
         let env = TransactionProcessingEnvironment {
             blockhash: block.hash,
-            feature_set: state.features().runtime_features(),
+            feature_set: features.runtime_features(),
             program_runtime_environments_for_execution: envs,
-            rent: state.rent().clone(),
+            rent: state.rent(),
             blockhash_lamports_per_signature: 0,
             epoch_total_stake: 0,
         };
@@ -73,16 +64,45 @@ impl SvmContext {
             log_messages_bytes_limit: None,
             recording_config: ExecutionRecordingConfig::new_single_setting(true),
         };
-        Ok(Self { processor, env, config })
+        Self { processor, env, config, features }
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "Static syscall registry collisions are a programming error"
+    )]
+    fn environments(features: &FeatureSet) -> ProgramRuntimeEnvironments {
+        let budget = Default::default();
+        let runtime_env = agave_syscalls::create_program_runtime_environment(
+            &features.runtime_features(),
+            &budget,
+            false, // Accept legacy ELFs already deployed on the base chain.
+            false,
+        )
+        .expect("static syscall registry must not contain symbol hash collisions");
+        ProgramRuntimeEnvironments::new(runtime_env)
     }
 
     /// Loads and executes a single transaction through the SVM.
     pub(crate) fn execute<const LOAD_OWNED: bool>(
-        &self,
+        &mut self,
         loader: AccountLoader<'_>,
         txn: &ResolvedTransaction,
-        features: &FeatureSet,
+        state: &Keeper,
     ) -> LoadAndExecuteSanitizedTransactionOutput {
+        let load = LoadCallback::<LOAD_OWNED> { loader };
+        let rent = state.rent();
+        if self.env.rent != rent {
+            self.processor.sysvar_cache_mut().set_rent(&rent);
+            self.env.rent = rent;
+        }
+        let features = state.features();
+        if !Arc::ptr_eq(&self.features, &features) {
+            self.env.program_runtime_environments_for_execution = Self::environments(&features);
+            self.env.feature_set = features.runtime_features();
+            self.features = features;
+        }
+        let features = &self.features;
         let details = match Self::parse_details(txn, features) {
             Ok(d) => d,
             Err(e) => {
@@ -92,7 +112,6 @@ impl SvmContext {
                 };
             }
         };
-        let load = LoadCallback::<LOAD_OWNED> { loader };
         let invoke = InvokeCallback { featureset: features };
         self.processor.load_and_execute_sanitized_transaction(
             load,

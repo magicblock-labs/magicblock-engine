@@ -108,16 +108,10 @@ impl VolatileStore {
         self.programs.read_sync(owner, |_, s| s.clone()).unwrap_or_default()
     }
 
-    /// Drops chain-mirrored accounts while retaining internal system accounts.
+    /// Drops rebuildable base-chain state and its ownership indexes.
     pub(crate) fn reset(&self) {
+        self.accounts.clear_sync();
         self.programs.clear_sync();
-        self.accounts.retain_sync(|k, a| {
-            if !a.is(AccountMode::Runtime) {
-                return false;
-            }
-            let mut set = self.programs.entry_sync(a.owner()).or_default();
-            BTreeSet::insert(&mut set, *k)
-        });
     }
 
     /// Removes the cached account and drops its owner mapping.
