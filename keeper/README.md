@@ -9,8 +9,9 @@ to interpret their state.
 ## Startup and recovery
 
 Startup validates account storage against ledger progress, restores a retained
-snapshot when necessary, and seeds programs, features, and sysvars only on genesis.
-Later startups preserve those account images and restore runtime configuration from them.
+snapshot when necessary, and seeds features and sysvars only on genesis.
+Programs and caller-supplied account seeds are inserted whenever absent; existing
+images are preserved. Runtime configuration is restored from persisted account state.
 [Engine](../engine/README.md#startup-and-recovery) replays the remaining history.
 Recovery can fail rather than open inconsistent state and depends on valid retained
 snapshots and history.

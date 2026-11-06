@@ -8,7 +8,7 @@ use nucleus::{
     ledger::Reset,
     testkit::{V42_ID, block, signed_view},
 };
-use solana_account::{AccountMode, ReadableAccount, testkit::delegated_account};
+use solana_account::{AccountBuilder, AccountMode, ReadableAccount, testkit::delegated_account};
 use solana_instruction::Instruction;
 use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
@@ -118,11 +118,14 @@ async fn seeds_features_programs_and_sysvars() {
     }
 }
 
-/// Startup preserves persisted programs and accounts while seeding missing accounts.
+/// Startup preserves existing programs and accounts while persisting missing SBF,
+/// native program, and caller-supplied account seeds on an initialized database.
 #[tokio::test]
 async fn preserves_seeded_accounts_on_reopen() {
     let existing = Pubkey::new_unique();
     let added = Pubkey::new_unique();
+    let added_program = Pubkey::new_unique();
+    let native = solana_sdk_ids::secp256k1_program::ID;
     let dirs = Dirs::default();
     let mut builder = keeper_builder(&dirs);
     builder.possibly_missing_accounts.insert(
@@ -136,10 +139,16 @@ async fn preserves_seeded_accounts_on_reopen() {
     let marker_owner = Pubkey::new_unique();
     let marker_data = vec![7, 7, 7];
     let marker = delegated_account(2, marker_data.clone(), marker_owner);
-    keeper.accounts().store(&[(existing, marker.build())]).unwrap();
+    // Reopening must restore a missing native program, not just retain an existing image.
+    let closed = AccountBuilder::default().mode(AccountMode::Closed).build();
+    keeper
+        .accounts()
+        .store(&[(existing, marker.build()), (native, closed)])
+        .unwrap();
     let dirs = keeper.close().await;
 
     builder.programs.insert(V42_ID, vec![9]);
+    builder.programs.insert(added_program, vec![1, 2, 3]);
     builder.blockstore.superblock = 3;
     builder.possibly_missing_accounts.insert(
         added,
@@ -159,6 +168,18 @@ async fn preserves_seeded_accounts_on_reopen() {
             Some(program),
             "startup must not replace persisted program bytes"
         );
+        for (id, owner, data) in [
+            (added_program, loader_v4::ID, vec![1, 2, 3]),
+            (native, solana_sdk_ids::native_loader::ID, vec![]),
+        ] {
+            let account = loader
+                .read(&id, Clone::clone)
+                .unwrap()
+                .expect("missing programs are seeded on an initialized database");
+            assert!(account.is(AccountMode::Runtime) && account.executable());
+            assert_eq!(account.owner(), &owner);
+            assert_eq!(account.data(), data);
+        }
         assert_eq!(
             loader.read(&existing, |account| account.lamports()).unwrap(),
             Some(2)
