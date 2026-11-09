@@ -113,6 +113,26 @@ fn s3fifo_removal_churn_keeps_queues_bounded() {
     assert_eq!(cache.len(), 8);
 }
 
+/// Proves an admission over capacity still evicts a live key when more stale
+/// entries than the probe budget sit ahead of it in the queue.
+#[test]
+fn s3fifo_stale_backlog_does_not_block_eviction() {
+    const CAPACITY: usize = 1_024;
+    let cache = S3Fifo::with_shard_count(CAPACITY, 1);
+    let capacity = u64::try_from(CAPACITY).unwrap();
+    for key in 0..capacity {
+        assert!(cache.admit(key).inserted);
+        assert!(cache.remove(&key));
+    }
+    admit_all(&cache, capacity..2 * capacity);
+    assert_eq!(cache.len(), CAPACITY);
+
+    let admission = cache.admit(2 * capacity);
+
+    assert_eq!(admission.evicted.len(), 1, "one live key is displaced");
+    assert_eq!(cache.len(), CAPACITY, "residency stays within capacity");
+}
+
 /// Proves concurrent admissions, hits, and removals keep the resident count,
 /// the indexes, and the reported evictions consistent and within bounds, for
 /// both a single shard and a sharded cache.

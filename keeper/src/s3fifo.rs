@@ -45,10 +45,11 @@ const MAX_FREQ: u8 = 3;
 const SMALL_PERCENT: usize = 10;
 /// Queue occupancy bound, including stale entries, as a multiple of capacity.
 const QUEUE_BOUND_FACTOR: usize = 2;
-/// Maximum queue entries one eviction examines before evicting the current
-/// candidate regardless of its hit counter. Without concurrent hits, an
-/// eviction ends within `MAX_FREQ` passes over main; this bounds the work when
-/// concurrent hits keep re-warming entries.
+/// Maximum live queue entries one eviction examines before evicting the
+/// current candidate regardless of its hit counter. Stale entries are dropped
+/// when popped and do not count, since they are never requeued. Without
+/// concurrent hits, an eviction ends within `MAX_FREQ` passes over main; this
+/// bounds the work when concurrent hits keep re-warming entries.
 const EVICTION_PROBES: usize = 512;
 /// Smallest shard capacity; smaller caches use fewer shards so per-shard
 /// queues stay large enough for the small/main split to be meaningful.
@@ -82,7 +83,14 @@ where
     pub(crate) fn new(capacity: usize) -> Self {
         let capacity = capacity.max(1);
         let cpus = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
-        let count = cpus.saturating_mul(SHARDS_PER_CPU).min(capacity / MIN_SHARD_CAPACITY).max(1);
+        let count = cpus.saturating_mul(SHARDS_PER_CPU).min(capacity / MIN_SHARD_CAPACITY);
+        Self::with_shards(capacity, count)
+    }
+
+    /// Creates an empty cache splitting `capacity` over `count` shards.
+    fn with_shards(capacity: usize, count: usize) -> Self {
+        let capacity = capacity.max(1);
+        let count = count.clamp(1, capacity);
         let (base, extra) = (capacity / count, capacity % count);
         let shards =
             (0..count).map(|shard| Shard::new(base + usize::from(shard < extra))).collect();
@@ -150,6 +158,12 @@ where
     #[cfg(test)]
     pub(crate) fn indexed(&self) -> usize {
         self.shards.iter().map(|shard| shard.index.len()).sum()
+    }
+
+    /// Creates a cache with an explicit shard count.
+    #[cfg(test)]
+    pub(crate) fn with_shard_count(capacity: usize, count: usize) -> Self {
+        Self::with_shards(capacity, count)
     }
 
     /// Number of shards.
@@ -287,16 +301,16 @@ where
         true
     }
 
-    /// Evicts one resident key, examining at most [`EVICTION_PROBES`] entries.
+    /// Evicts one resident key, examining at most [`EVICTION_PROBES`] live
+    /// entries. Ends early if both queues run out.
     fn evict_one(&self, hasher: &RandomState, evicted: &mut Evicted<K>) {
-        for probe in 1..=EVICTION_PROBES {
-            let Some((node, source)) = self.pop_candidate() else {
-                return;
-            };
+        let mut probes = 0;
+        while let Some((node, source)) = self.pop_candidate() {
             if node.is_removed() {
                 continue;
             }
-            let force = probe == EVICTION_PROBES;
+            probes += 1;
+            let force = probes >= EVICTION_PROBES;
             match source {
                 Source::Small if !force && node.is_warm() => self.push_main(node, evicted),
                 Source::Small => {
