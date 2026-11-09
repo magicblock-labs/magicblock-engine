@@ -42,11 +42,11 @@ impl<K: Into<Arc<Keypair>>> From<K> for Authority {
 pub struct AccountsDBParams {
     /// Accounts database root directory.
     pub directory: PathBuf,
-    /// Requested maximum number of resolved account pubkeys retained for
-    /// recency tracking and eviction notifications.
+    /// Maximum number of resolved non-authoritative account pubkeys retained
+    /// for recency tracking and eviction notifications (minimum one).
     ///
-    /// The cache uses at least 256 slots, rounds larger capacities up to a
-    /// power of two, and may evict earlier under bucket pressure.
+    /// Eviction follows S3-FIFO: accounts hit while resident are retained over
+    /// accounts seen once. Concurrent admissions may briefly exceed the bound.
     pub lru_capacity: usize,
 }
 

@@ -62,6 +62,7 @@ pub mod builder;
 mod cache;
 pub mod error;
 mod metrics;
+mod s3fifo;
 mod subscriptions;
 mod util;
 

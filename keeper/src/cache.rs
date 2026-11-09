@@ -10,13 +10,14 @@ use ledger::{
 };
 use nucleus::{Slot, ledger::Block, notifier::EventNotifier};
 use parking_lot::Mutex;
-use scc::{HashCache, HashMap, hash_cache::Entry as CacheEntry, hash_map::Entry};
+use scc::{HashMap, hash_map::Entry};
 use solana_account::AccountMode;
 use solana_hash::Hash as SolanaHash;
 use solana_pubkey::Pubkey;
 
 use crate::{
     metrics,
+    s3fifo::{Evicted, S3Fifo},
     subscriptions::{Subscription, Unicast},
 };
 
@@ -68,8 +69,8 @@ impl Caches {
 
 /// Account access cache along with per-account mutation reservations.
 pub(crate) struct AccountCache {
-    /// Accounts that do not require persistence, ordered by recent access.
-    pub(crate) lru: HashCache<Pubkey, (), RandomState>,
+    /// Resident accounts that do not require persistence, under S3-FIFO eviction.
+    pub(crate) recency: S3Fifo<Pubkey>,
     /// In-flight account mutations keyed by account pubkey.
     pub(crate) reservations: HashMap<Pubkey, Arc<EventNotifier>, RandomState>,
     /// Pubkeys evicted when a materialization displaces a cold account.
@@ -79,9 +80,8 @@ pub(crate) struct AccountCache {
 impl AccountCache {
     /// Creates mutation coordination with the requested recency capacity.
     pub(crate) fn new(capacity: usize) -> Self {
-        let lru = HashCache::with_capacity_and_hasher(capacity, capacity, Default::default());
         Self {
-            lru,
+            recency: S3Fifo::new(capacity),
             reservations: Default::default(),
             evictions: Unicast::new(Subscription::Evictions),
         }
@@ -137,7 +137,7 @@ impl AccountLease {
 
     /// Updates recency after materializing the account in `mode`.
     pub fn materialized(&mut self, mode: AccountMode) {
-        if let Some(pubkey) = self.cache.track(self.pubkey, mode) {
+        for pubkey in self.cache.track(self.pubkey, mode) {
             self.cache.evictions.send(|| pubkey);
         }
     }
@@ -150,7 +150,7 @@ impl AccountLease {
     /// Returns whether an earlier recency eviction still applies to the
     /// observed account and cache entry.
     pub fn cached_eviction_applies(&self) -> bool {
-        self.evictable() && !self.cache.lru.contains_sync(&self.pubkey)
+        self.evictable() && !self.cache.recency.contains(&self.pubkey)
     }
 }
 
@@ -163,40 +163,32 @@ impl Drop for AccountLease {
 }
 
 impl AccountCache {
-    /// Tracks a materialized account and returns one displaced from recency.
-    fn track(&self, pubkey: Pubkey, mode: AccountMode) -> Option<Pubkey> {
+    /// Tracks a materialized account and returns the accounts it displaced.
+    fn track(&self, pubkey: Pubkey, mode: AccountMode) -> Evicted<Pubkey> {
         if !mode.requires_persistence() {
             return self.admit_recency(pubkey);
         }
         self.remove_recency(&pubkey);
-        None
+        Evicted::new()
     }
 
-    /// Promotes an existing entry or admits `pubkey`, returning any displaced
-    /// account.
-    fn admit_recency(&self, pubkey: Pubkey) -> Option<Pubkey> {
-        let entry = match self.lru.entry_sync(pubkey) {
-            CacheEntry::Occupied(entry) => {
-                // Entry access does not promote recency; release its lock and
-                // use the cache access API for that operation.
-                drop(entry);
-                self.lru.get_sync(&pubkey);
-                return None;
-            }
-            CacheEntry::Vacant(entry) => entry,
-        };
-        let (evicted, _) = entry.put_entry(());
-        if evicted.is_some() {
-            metrics::account_cache_eviction();
-        } else {
+    /// Counts a hit on a resident entry or admits `pubkey`, returning any
+    /// displaced accounts.
+    fn admit_recency(&self, pubkey: Pubkey) -> Evicted<Pubkey> {
+        let admission = self.recency.admit(pubkey);
+        if admission.inserted {
             metrics::account_cache_insert();
         }
-        evicted.map(|entry| entry.0)
+        for _ in &admission.evicted {
+            metrics::account_cache_eviction();
+            metrics::account_cache_remove();
+        }
+        admission.evicted
     }
 
     /// Removes `pubkey` from recency and records an actual removal.
     fn remove_recency(&self, pubkey: &Pubkey) {
-        if self.lru.remove_sync(pubkey).is_some() {
+        if self.recency.remove(pubkey) {
             metrics::account_cache_remove();
         }
     }

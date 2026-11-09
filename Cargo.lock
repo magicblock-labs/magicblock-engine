@@ -2401,6 +2401,7 @@ dependencies = [
  "agave-feature-set",
  "ahash",
  "arc-swap",
+ "crossbeam-queue",
  "derive_more",
  "flume",
  "magicblock-accountsdb",

@@ -24,6 +24,7 @@ nucleus = { workspace = true, features = ["config", "notifier", "runtime"] }
 
 ahash = { workspace = true }
 arc-swap = { workspace = true }
+crossbeam-queue = { workspace = true }
 derive_more = { workspace = true, features = ["from"] }
 flume = { workspace = true }
 oneshot = { workspace = true }

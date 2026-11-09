@@ -6,6 +6,7 @@
 
 mod caches;
 mod recovery;
+mod s3fifo;
 mod subscriptions;
 
 use crate::testkit::{TestKeeper, signed_tx};

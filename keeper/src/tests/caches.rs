@@ -135,7 +135,7 @@ async fn account_lease_coordinates_recency_and_waiters() {
         drop(lease);
         drop(waiter.await);
 
-        assert_eq!(cache.lru.get_sync(&pk).is_some(), tracked, "{mode:?}");
+        assert_eq!(cache.recency.contains(&pk), tracked, "{mode:?}");
     }
 
     let cache = Arc::new(AccountCache::new(256));
@@ -143,7 +143,7 @@ async fn account_lease_coordinates_recency_and_waiters() {
     let mut lease = cache.lock(pk).await;
     lease.materialized(AccountMode::Mirrored);
     drop(lease);
-    assert!(cache.lru.get_sync(&pk).is_some(), "mirror is admitted");
+    assert!(cache.recency.contains(&pk), "mirror is admitted");
     let mut eviction = cache.lock(pk).await;
     eviction.observed = Some((AccountMode::Mirrored, 0));
     assert!(
@@ -152,17 +152,14 @@ async fn account_lease_coordinates_recency_and_waiters() {
     );
     drop(eviction);
     assert!(
-        cache.lru.get_sync(&pk).is_some(),
+        cache.recency.contains(&pk),
         "rejecting stale eviction leaves recency unchanged"
     );
 
     let mut lease = cache.lock(pk).await;
     lease.materialized(AccountMode::Delegated);
     drop(lease);
-    assert!(
-        cache.lru.get_sync(&pk).is_none(),
-        "delegation removes recency"
-    );
+    assert!(!cache.recency.contains(&pk), "delegation removes recency");
 
     let mut lease = cache.lock(pk).await;
     lease.observed = Some((AccountMode::Mirrored, 0));
@@ -173,8 +170,5 @@ async fn account_lease_coordinates_recency_and_waiters() {
     lease.materialized(AccountMode::Mirrored);
     lease.deleted();
     drop(lease);
-    assert!(
-        cache.lru.get_sync(&pk).is_none(),
-        "deletion removes recency"
-    );
+    assert!(!cache.recency.contains(&pk), "deletion removes recency");
 }

@@ -47,9 +47,12 @@ pub struct AccountsAccessor<'a> {
 }
 
 impl<'a> AccountsAccessor<'a> {
-    /// Promotes an existing recency entry without loading or pinning the account.
+    /// Records a read hit on a resident recency entry without acquiring a
+    /// lease or loading the account. Lock-free; absent accounts are ignored.
+    ///
+    /// Frequently touched accounts are retained over accounts read once.
     pub fn touch(&self, pubkey: &Pubkey) {
-        self.keeper.caches.accounts.lru.get_sync(pubkey);
+        self.keeper.caches.accounts.recency.touch(pubkey);
     }
 
     /// Waits for exclusive mutation ownership of `pubkey` and records the
