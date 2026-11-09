@@ -20,7 +20,7 @@ use tracing::{error, info, warn};
 
 pub use tokio_util::sync::CancellationToken;
 
-const TIMEOUT: Duration = Duration::from_secs(4);
+const TIMEOUT: Duration = Duration::from_secs(8);
 
 type HandleFuture = BoxFuture<'static, (Service, ShutdownTier, ShutdownReason)>;
 
