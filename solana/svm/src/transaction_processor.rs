@@ -184,7 +184,7 @@ impl TransactionBatchProcessor {
     ///
     /// The owned loading callback is dropped as soon as account loading finishes.
     /// Invocation then uses the separate borrowed callback.
-    pub fn load_and_execute_sanitized_transaction(
+    pub fn load_and_execute_sanitized_transaction<const SIMULATION: bool>(
         &self,
         load: impl TransactionProcessingCallback,
         invoke: &impl InvokeContextCallback,
@@ -231,7 +231,8 @@ impl TransactionBatchProcessor {
                     config,
                 );
                 balance_collector.collect_post_balances(&executed_tx.loaded_transaction.accounts);
-                if executed_tx.access_is_valid(tx) {
+                // Simulation discards account changes, so program changes must stay local too.
+                if executed_tx.access_is_valid(tx) && !SIMULATION {
                     let cache = program_cache_for_tx_batch.drain_modified_entries();
                     self.program_cache.merge(&cache);
                 }

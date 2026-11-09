@@ -12,16 +12,15 @@ use accountsdb::AccountLoader;
 
 /// Bridges SVM transaction loading to keeper-backed accounts.
 ///
-/// When `LOAD_OWNED` is set, loaded accounts are copied to owned data; this is
-/// used by simulation, which must always operate on owned account copies.
-pub(crate) struct LoadCallback<'a, const LOAD_OWNED: bool> {
+/// Simulation always loads owned account copies.
+pub(crate) struct LoadCallback<'a, const SIMULATION: bool> {
     /// Reads accounts from the engine's accounts store.
     pub(crate) loader: AccountLoader<'a>,
 }
 
-impl<const LOAD_OWNED: bool> TransactionProcessingCallback for LoadCallback<'_, LOAD_OWNED> {
+impl<const SIMULATION: bool> TransactionProcessingCallback for LoadCallback<'_, SIMULATION> {
     fn get_account_shared_data(&self, pubkey: &Pubkey) -> Option<(AccountSharedData, Slot)> {
-        let account = if LOAD_OWNED {
+        let account = if SIMULATION {
             self.loader.read(pubkey, Clone::clone)
         } else {
             // SAFETY: execution owns the account until commit/fanout and is

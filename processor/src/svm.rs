@@ -84,13 +84,13 @@ impl SvmContext {
     }
 
     /// Loads and executes a single transaction through the SVM.
-    pub(crate) fn execute<const LOAD_OWNED: bool>(
+    pub(crate) fn execute<const SIMULATION: bool>(
         &mut self,
         loader: AccountLoader<'_>,
         txn: &ResolvedTransaction,
         state: &Keeper,
     ) -> LoadAndExecuteSanitizedTransactionOutput {
-        let load = LoadCallback::<LOAD_OWNED> { loader };
+        let load = LoadCallback::<SIMULATION> { loader };
         let rent = state.rent();
         if self.env.rent != rent {
             self.processor.sysvar_cache_mut().set_rent(&rent);
@@ -113,7 +113,7 @@ impl SvmContext {
             }
         };
         let invoke = InvokeCallback { featureset: features };
-        self.processor.load_and_execute_sanitized_transaction(
+        self.processor.load_and_execute_sanitized_transaction::<SIMULATION>(
             load,
             &invoke,
             txn,
