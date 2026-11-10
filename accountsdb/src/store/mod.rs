@@ -69,7 +69,7 @@ impl PersistedStore {
     ) -> Result<Option<BorrowedAccount>> {
         let txn = read_txn(self.index.env(), txn)?;
         let offset = self.index.offset(pubkey, txn)?;
-        offset.is_some().then(|| self.storage.stats().read());
+        metrics::persistent_read(offset.is_some());
         // SAFETY: offsets come from the persisted index and point into the map.
         Ok(offset.map(|o| unsafe { BorrowedAccount::init(self.storage.at(o)) }))
     }
@@ -292,7 +292,7 @@ impl<'a> Iterator for PersistedProgramIter<'a> {
         // The image prefix stores the full pubkey, so iteration can recover it
         // without consulting LMDB again.
         // SAFETY: the iterator yields offsets stored in the same mapped database.
-        self.mmap.stats().read();
+        metrics::persistent_read(true);
         let pubkey = unsafe { BorrowedAccount::pubkey(ptr) };
         let account = unsafe { BorrowedAccount::init(ptr).into() };
         Some((pubkey, account))

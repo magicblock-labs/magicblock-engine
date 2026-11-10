@@ -67,8 +67,6 @@ pub(crate) struct MappedStorage {
 #[derive(Default)]
 /// Runtime counters for the persisted backend.
 pub(crate) struct Stats {
-    /// Persisted image loads.
-    pub(crate) reads: AtomicU64,
     /// `BorrowedAccount::commit` calls.
     pub(crate) commits: AtomicU64,
     /// Fresh allocations on backing storage.
@@ -84,12 +82,6 @@ pub(crate) struct Stats {
 }
 
 impl Stats {
-    /// Counts one persisted read.
-    pub(crate) fn read(&self) {
-        self.reads.fetch_add(1, Relaxed);
-        metrics::read();
-    }
-
     /// Counts one borrowed account commit.
     pub(crate) fn commit(&self) {
         self.commits.fetch_add(1, Relaxed);

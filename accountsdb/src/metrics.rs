@@ -10,10 +10,10 @@ use crate::{AccountsDB, store::Stats};
 /// Process-wide accountsdb metrics registered in the default Prometheus registry.
 static METRICS: OnceLock<Metrics> = OnceLock::new();
 
-/// Persisted account image load counter.
+/// Account backend lookup outcomes.
 const READS: MetricSpec = MetricSpec {
-    name: "accountsdb_persisted_reads",
-    help: "Persisted account image loads.",
+    name: "accountsdb_reads",
+    help: "Account backend reads by storage and lookup outcome; excludes existence checks and errors.",
 };
 /// Borrowed account commit counter.
 const COMMITS: MetricSpec = MetricSpec {
@@ -85,9 +85,20 @@ pub(crate) fn init(db: &AccountsDB) {
     METRICS.get_or_init(|| Metrics::new(db.persisted.storage.stats()));
 }
 
-/// Records one persisted account image load.
-pub(crate) fn read() {
-    metric::with_metrics(&METRICS, |m| m.reads.inc());
+/// Records one persisted backend lookup outcome.
+pub(crate) fn persistent_read(hit: bool) {
+    metric::with_metrics(&METRICS, |m| {
+        let counter = if hit { &m.reads.persistent_hits } else { &m.reads.persistent_misses };
+        counter.inc();
+    });
+}
+
+/// Records one volatile backend lookup outcome.
+pub(crate) fn volatile_read(hit: bool) {
+    metric::with_metrics(&METRICS, |m| {
+        let counter = if hit { &m.reads.volatile_hits } else { &m.reads.volatile_misses };
+        counter.inc();
+    });
 }
 
 /// Records one borrowed account commit into persisted storage.
@@ -125,10 +136,35 @@ pub(crate) fn time(op: Operation) -> metric::OperationTimer<'static> {
     op.time(METRICS.get().map(|m| &m.operations))
 }
 
+/// Pre-resolved account read counters sharing one labeled collector.
+struct Reads {
+    /// Persisted lookups that found an account.
+    persistent_hits: IntCounter,
+    /// Persisted lookups that found no account.
+    persistent_misses: IntCounter,
+    /// Volatile lookups that found an account.
+    volatile_hits: IntCounter,
+    /// Volatile lookups that found no account.
+    volatile_misses: IntCounter,
+}
+
+impl Reads {
+    /// Resolves label combinations once with process-local counts starting at zero.
+    fn new() -> Self {
+        let reads = metric::counter_vec(READS, &["storage", "result"]);
+        Self {
+            persistent_hits: reads.with_label_values(&["persistent", "hit"]),
+            persistent_misses: reads.with_label_values(&["persistent", "miss"]),
+            volatile_hits: reads.with_label_values(&["volatile", "hit"]),
+            volatile_misses: reads.with_label_values(&["volatile", "miss"]),
+        }
+    }
+}
+
 /// Owns all Prometheus collectors registered by accountsdb.
 struct Metrics {
-    /// Durable persisted account image load counter.
-    reads: IntCounter,
+    /// Account backend lookup outcomes.
+    reads: Reads,
     /// Durable borrowed account commit counter.
     commits: IntCounter,
     /// Durable fresh allocation counter.
@@ -149,7 +185,7 @@ impl Metrics {
     /// Builds collectors and seeds durable counters from persisted mmap stats.
     fn new(stats: &Stats) -> Self {
         Self {
-            reads: metric::counter(READS, stats.reads.load(Relaxed)),
+            reads: Reads::new(),
             commits: metric::counter(COMMITS, stats.commits.load(Relaxed)),
             allocs: metric::counter(ALLOCS, stats.allocs.load(Relaxed)),
             reallocs: metric::counter(REALLOCS, stats.reallocs.load(Relaxed)),
