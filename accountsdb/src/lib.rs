@@ -14,6 +14,7 @@ use solana_pubkey::Pubkey;
 use tracing::{info, warn};
 
 use crate::{
+    metrics::Read,
     readers::{ReadGuard, Readers},
     store::{DatabaseVersion, PersistedProgramIter, PersistedStore, index::RoTxnTls},
     volatile::VolatileStore,
@@ -302,6 +303,7 @@ impl<'a> AccountLoader<'a> {
     /// Mutating borrowed results additionally requires exclusive account access.
     pub unsafe fn load(&self, pubkey: &Pubkey) -> Result<Option<AccountSharedData>> {
         if let Some(account) = self.db.volatile.load(pubkey) {
+            Read::Volatile.record();
             return Ok(Some(account.into()));
         }
         self.persisted(pubkey)
@@ -312,6 +314,8 @@ impl<'a> AccountLoader<'a> {
     fn persisted(&self, pubkey: &Pubkey) -> Result<Option<AccountSharedData>> {
         let txn = &mut self.txn.borrow_mut();
         let account = self.db.persisted.load(txn, pubkey)?;
+        let outcome = if account.is_some() { Read::Persistent } else { Read::Miss };
+        outcome.record();
         Ok(account.map(Into::into))
     }
 
@@ -335,6 +339,7 @@ impl<'a> AccountLoader<'a> {
     /// persisted reads retry if a concurrent publish changes the image.
     pub fn lifecycle(&self, pubkey: &Pubkey) -> Result<Option<(AccountMode, Slot)>> {
         if let Some(lifecycle) = self.db.volatile.lifecycle(pubkey) {
+            Read::Volatile.record();
             return Ok(Some(lifecycle));
         }
         Ok(self.persisted(pubkey)?.map(|account| {
@@ -368,17 +373,18 @@ impl<'a> Iterator for ProgramIter<'a> {
     type Item = AccountEntry;
     /// Yields persisted accounts first, then volatile ones.
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(persisted) = &mut self.persisted {
-            // Yield persisted entries first.
-            if let Some(item) = persisted.next() {
-                return Some(item);
-            }
+        if let Some(persisted) = &mut self.persisted
+            && let Some(item) = persisted.next()
+        {
+            Read::Persistent.record();
+            return Some(item);
         }
         // Release the persisted read txn before draining volatile entries.
-        let _ = self.persisted.take();
+        self.persisted = None;
         // Then drain the volatile accounts.
         while let Some(pubkey) = self.volatile.pop_first() {
             if let Some(account) = self.db.volatile.load(&pubkey) {
+                Read::Volatile.record();
                 return Some((pubkey, account.into()));
             }
             warn!(%pubkey, "volatile program set references a missing account; skipping");

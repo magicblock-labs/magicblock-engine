@@ -10,10 +10,10 @@ use crate::{AccountsDB, store::Stats};
 /// Process-wide accountsdb metrics registered in the default Prometheus registry.
 static METRICS: OnceLock<Metrics> = OnceLock::new();
 
-/// Account backend lookup outcomes.
+/// Account read outcomes.
 const READS: MetricSpec = MetricSpec {
     name: "accountsdb_reads",
-    help: "Account backend reads by storage and lookup outcome; excludes existence checks and errors.",
+    help: "Account reads resolved from volatile or persistent storage, or missing from both; excludes existence checks and errors.",
 };
 /// Borrowed account commit counter.
 const COMMITS: MetricSpec = MetricSpec {
@@ -85,20 +85,28 @@ pub(crate) fn init(db: &AccountsDB) {
     METRICS.get_or_init(|| Metrics::new(db.persisted.storage.stats()));
 }
 
-/// Records one persisted backend lookup outcome.
-pub(crate) fn persistent_read(hit: bool) {
-    metric::with_metrics(&METRICS, |m| {
-        let counter = if hit { &m.reads.persistent_hits } else { &m.reads.persistent_misses };
-        counter.inc();
-    });
+/// Final account read outcome after storage fallback.
+pub(crate) enum Read {
+    /// Found in volatile storage.
+    Volatile,
+    /// Found in persistent storage.
+    Persistent,
+    /// Absent from both stores.
+    Miss,
 }
 
-/// Records one volatile backend lookup outcome.
-pub(crate) fn volatile_read(hit: bool) {
-    metric::with_metrics(&METRICS, |m| {
-        let counter = if hit { &m.reads.volatile_hits } else { &m.reads.volatile_misses };
-        counter.inc();
-    });
+impl Read {
+    /// Records one resolved account read, not individual backend probes.
+    pub(crate) fn record(self) {
+        metric::with_metrics(&METRICS, |m| {
+            let counter = match self {
+                Self::Volatile => &m.reads.volatile,
+                Self::Persistent => &m.reads.persistent,
+                Self::Miss => &m.reads.miss,
+            };
+            counter.inc();
+        });
+    }
 }
 
 /// Records one borrowed account commit into persisted storage.
@@ -138,32 +146,29 @@ pub(crate) fn time(op: Operation) -> metric::OperationTimer<'static> {
 
 /// Pre-resolved account read counters sharing one labeled collector.
 struct Reads {
-    /// Persisted lookups that found an account.
-    persistent_hits: IntCounter,
-    /// Persisted lookups that found no account.
-    persistent_misses: IntCounter,
-    /// Volatile lookups that found an account.
-    volatile_hits: IntCounter,
-    /// Volatile lookups that found no account.
-    volatile_misses: IntCounter,
+    /// Reads served by persistent storage.
+    persistent: IntCounter,
+    /// Reads served by volatile storage.
+    volatile: IntCounter,
+    /// Reads missing from both stores.
+    miss: IntCounter,
 }
 
 impl Reads {
     /// Resolves label combinations once with process-local counts starting at zero.
     fn new() -> Self {
-        let reads = metric::counter_vec(READS, &["storage", "result"]);
+        let reads = metric::counter_vec(READS, &["result"]);
         Self {
-            persistent_hits: reads.with_label_values(&["persistent", "hit"]),
-            persistent_misses: reads.with_label_values(&["persistent", "miss"]),
-            volatile_hits: reads.with_label_values(&["volatile", "hit"]),
-            volatile_misses: reads.with_label_values(&["volatile", "miss"]),
+            persistent: reads.with_label_values(&["persistent"]),
+            volatile: reads.with_label_values(&["volatile"]),
+            miss: reads.with_label_values(&["miss"]),
         }
     }
 }
 
 /// Owns all Prometheus collectors registered by accountsdb.
 struct Metrics {
-    /// Account backend lookup outcomes.
+    /// Account read outcomes.
     reads: Reads,
     /// Durable borrowed account commit counter.
     commits: IntCounter,

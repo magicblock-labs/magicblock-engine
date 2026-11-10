@@ -14,7 +14,7 @@ use solana_account::{AccountMode, AccountSharedData, OwnedAccount, ReadableAccou
 use solana_pubkey::Pubkey;
 use tracing::info;
 
-use crate::{Result, metrics, snapshot::VOLATILE_DB_FILE};
+use crate::{Result, snapshot::VOLATILE_DB_FILE};
 
 /// Owned accounts keyed by account pubkey.
 type AccountsMap = HashMap<Pubkey, OwnedAccount, RandomState>;
@@ -90,17 +90,12 @@ impl VolatileStore {
 
     /// Returns the owned account currently cached for `pubkey`.
     pub(crate) fn load(&self, pubkey: &Pubkey) -> Option<OwnedAccount> {
-        let account = self.accounts.read_sync(pubkey, |_, account| account.clone());
-        metrics::volatile_read(account.is_some());
-        account
+        self.accounts.read_sync(pubkey, |_, account| account.clone())
     }
 
     /// Reads mode and slot from one guarded image without cloning account data.
     pub(crate) fn lifecycle(&self, pubkey: &Pubkey) -> Option<(AccountMode, Slot)> {
-        let lifecycle =
-            self.accounts.read_sync(pubkey, |_, account| (account.mode(), account.slot()));
-        metrics::volatile_read(lifecycle.is_some());
-        lifecycle
+        self.accounts.read_sync(pubkey, |_, account| (account.mode(), account.slot()))
     }
 
     /// Returns whether a volatile account exists for `pubkey`.
