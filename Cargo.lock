@@ -2483,6 +2483,7 @@ dependencies = [
  "solana-precompile-error",
  "solana-program-runtime",
  "solana-pubkey",
+ "solana-sbpf",
  "solana-sdk-ids",
  "solana-signature",
  "solana-signer",

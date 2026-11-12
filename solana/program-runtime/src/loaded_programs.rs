@@ -22,6 +22,12 @@ impl ProgramRuntimeEnvironment {
         Self(Arc::new(program))
     }
 
+    /// Returns the loader only while this environment is uniquely owned.
+    /// Register syscall overrides before cloning the environment or loading programs.
+    pub fn get_mut(&mut self) -> Option<&mut BuiltinProgram<InvokeContext<'static, 'static>>> {
+        Arc::get_mut(&mut self.0)
+    }
+
     /// Converts a loader reference into its transparent runtime-environment wrapper.
     ///
     /// # Safety
