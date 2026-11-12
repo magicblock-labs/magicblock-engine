@@ -18,6 +18,7 @@ use solana_program_runtime::{
     },
     loaded_programs::{ProgramCache, ProgramRuntimeEnvironments},
 };
+use solana_sbpf::program::BuiltinFunctionDefinition;
 use solana_svm::{
     account_loader::CheckedTransactionDetails,
     transaction_processor::{
@@ -28,7 +29,10 @@ use solana_svm::{
 use solana_sysvar::clock::Clock;
 use solana_transaction_error::TransactionResult;
 
-use crate::callback::{InvokeCallback, LoadCallback};
+use crate::{
+    callback::{InvokeCallback, LoadCallback},
+    syscalls::Memcpy,
+};
 
 /// SVM batch processor together with its per-block environment and recording
 /// config, shared verbatim by the executor and simulator workers.
@@ -73,13 +77,19 @@ impl SvmContext {
     )]
     fn environments(features: &FeatureSet) -> ProgramRuntimeEnvironments {
         let budget = Default::default();
-        let runtime_env = agave_syscalls::create_program_runtime_environment(
+        let mut runtime_env = agave_syscalls::create_program_runtime_environment(
             &features.runtime_features(),
             &budget,
             false, // Accept legacy ELFs already deployed on the base chain.
             false,
         )
         .expect("static syscall registry must not contain symbol hash collisions");
+        let registry =
+            runtime_env.get_mut().expect("new runtime environment must be uniquely owned");
+        // Execution and simulation must use the same no-op copy semantics.
+        registry.unregister_function("sol_memcpy_");
+        Memcpy::register(registry, "sol_memcpy_")
+            .expect("static syscall registry must not contain symbol hash collisions");
         ProgramRuntimeEnvironments::new(runtime_env)
     }
 

@@ -35,6 +35,7 @@ solana-compute-budget-instruction = { workspace = true, features = ["agave-unsta
 solana-hash = { workspace = true }
 solana-precompile-error = { workspace = true }
 solana-program-runtime = { workspace = true }
+solana-sbpf = { workspace = true }
 solana-pubkey = { workspace = true }
 solana-signature = { workspace = true }
 solana-svm = { workspace = true }

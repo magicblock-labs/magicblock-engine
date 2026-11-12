@@ -33,6 +33,11 @@ const FAILED_TRANSACTIONS: MetricSpec = MetricSpec {
     name: "processor_failed_transactions",
     help: "Transactions dropped by the sequencer or failed during execution.",
 };
+/// Accepted no-op copies into frozen undelegating account data.
+const MEMCPY_FALLBACKS: MetricSpec = MetricSpec {
+    name: "processor_memcpy_fallbacks",
+    help: "Accepted identical-byte memcpy fallbacks for undelegating accounts, including simulations.",
+};
 
 /// Fixed failure kinds used to select pre-resolved counter handles.
 #[derive(Clone, Copy)]
@@ -101,6 +106,11 @@ pub(crate) fn failed_transaction(kind: FailureKind) {
     metric::with_metrics(&METRICS, |m| m.failed_transactions[kind as usize].inc());
 }
 
+/// Counts accepted syscall fallbacks, even if the surrounding transaction later fails.
+pub(crate) fn memcpy_fallback() {
+    metric::with_metrics(&METRICS, |m| m.memcpy_fallbacks.inc());
+}
+
 /// Owns all Prometheus collectors registered by processor.
 struct Metrics {
     /// Runtime operation duration and completion counters.
@@ -113,6 +123,8 @@ struct Metrics {
     ordering_dependencies: IntCounter,
     /// Per-kind failed transaction counters resolved during initialization.
     failed_transactions: [IntCounter; 2],
+    /// Accepted no-op memcpy fallbacks across execution and simulation.
+    memcpy_fallbacks: IntCounter,
 }
 
 impl Default for Metrics {
@@ -129,6 +141,7 @@ impl Default for Metrics {
             blocked_transactions: metric::gauge(BLOCKED_TRANSACTIONS, 0),
             ordering_dependencies: metric::counter(ORDERING_DEPENDENCIES, 0),
             failed_transactions,
+            memcpy_fallbacks: metric::counter(MEMCPY_FALLBACKS, 0),
         }
     }
 }

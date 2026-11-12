@@ -7,6 +7,7 @@ mod metrics;
 pub mod sequencer;
 pub mod simulator;
 mod svm;
+mod syscalls;
 
 #[cfg(test)]
 mod tests;
