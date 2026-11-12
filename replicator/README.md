@@ -32,9 +32,11 @@ boundary. Peers must agree on record formats and execution semantics.
 
 ## Follower recovery
 
-Fresh followers must connect after the source has completed its first snapshot.
-They install the newest available snapshot before streaming: replay from the first
-segment alone cannot reconstruct migrated or startup-seeded initial accounts.
+Fresh followers install the newest available snapshot before streaming. If no
+snapshot is available, they replay retained history from the first segment and
+must start with the same initial account state as the source. Followers of migrated
+sources must wait externally until the first snapshot is available: replay alone
+cannot reconstruct imported initial accounts.
 
 Reconnect resumes after already applied work while preserving stream order. A
 synchronized ledger position is sufficient while the source retains the required
