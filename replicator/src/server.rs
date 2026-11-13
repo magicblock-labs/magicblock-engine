@@ -3,7 +3,6 @@ use std::{
     io::Write,
     net::{SocketAddr, TcpStream},
     sync::Arc,
-    thread,
 };
 
 use derive_more::Deref;
@@ -19,6 +18,7 @@ use tokio::{
     net::{TcpListener, TcpStream as AsyncTcpStream},
     runtime,
     sync::broadcast,
+    task::JoinSet,
 };
 use tracing::{error, info, warn};
 
@@ -38,7 +38,9 @@ pub struct ReplicationDispatcher {
     engine: Engine,
     /// List of follower identities permitted to replicate.
     allowed: Arc<HashMap<Pubkey, Arc<()>>>,
-    /// Cancels the accept loop and supplies child cancellation tokens to connection workers.
+    /// Connection workers retained until they have released their resources.
+    workers: JoinSet<()>,
+    /// Cancels acceptance and reports termination after all workers finish.
     shutdown: ShutdownHandle,
 }
 
@@ -96,6 +98,7 @@ impl ReplicationDispatcher {
             listener,
             engine,
             allowed,
+            workers: JoinSet::new(),
             shutdown,
         };
         tokio::spawn(service.run());
@@ -103,73 +106,70 @@ impl ReplicationDispatcher {
         Ok(())
     }
 
-    /// Accepts until cancellation or a listener failure; connection failures stay isolated.
+    /// Accepts until cancellation, reaping completed workers as connections finish.
     async fn run(mut self) {
-        let reason = loop {
+        loop {
             tokio::select! {
                 biased;
-                _ = self.shutdown.signalled() => break ShutdownReason::Signalled,
+                _ = self.shutdown.signalled() => break,
+                Some(result) = self.workers.join_next(), if !self.workers.is_empty() => {
+                    if let Err(error) = result {
+                        warn!(?error, "replication worker failed");
+                    }
+                }
                 result = self.listener.accept() => match result {
                     Ok((stream, peer)) => {
                         if let Err(error) = self.dispatch(stream, peer) {
                             warn!(%peer, ?error, "failed to dispatch replication connection");
                         }
                     }
-                    Err(error) => break ShutdownReason::Error(Box::new(error)),
+                    Err(error) => warn!(?error, "failed to accept replication connection"),
                 }
             }
-        };
+        }
         // Release owned resources before reporting service termination.
         drop(self.listener);
+        while let Some(result) = self.workers.join_next().await {
+            if let Err(error) = result {
+                warn!(?error, "replication worker failed");
+            }
+        }
         drop(self.engine);
-        self.shutdown.terminate(reason);
+        self.shutdown.terminate(ShutdownReason::Signalled);
     }
 
     /// Converts the accepted async socket into a blocking, timeout-bounded stream
-    /// and hands it to a dedicated blocking server worker.
-    fn dispatch(&self, stream: AsyncTcpStream, peer: SocketAddr) -> Result<()> {
-        let stream = stream.into_std()?;
-        stream.set_nonblocking(false)?;
-        stream.set_read_timeout(Some(IO_TIMEOUT))?;
-        stream.set_write_timeout(Some(IO_TIMEOUT))?;
+    /// and tracks its blocking transfer worker until completion.
+    fn dispatch(&mut self, stream: AsyncTcpStream, peer: SocketAddr) -> Result<()> {
+        let connection = stream.into_std()?;
+        connection.set_nonblocking(false)?;
+        connection.set_read_timeout(Some(IO_TIMEOUT))?;
+        connection.set_write_timeout(Some(IO_TIMEOUT))?;
         let engine = self.engine.clone();
-        let cancellation = self.shutdown.child();
-        let allowed = self.allowed.clone();
-        ReplicationServer::spawn(stream, peer, engine, allowed, cancellation)
-    }
-}
-
-impl ReplicationServer {
-    /// Starts a blocking worker without blocking the async dispatcher.
-    fn spawn(
-        connection: TcpStream,
-        peer: SocketAddr,
-        engine: Engine,
-        allowed: Arc<HashMap<Pubkey, Arc<()>>>,
-        cancellation: CancellationToken,
-    ) -> Result<()> {
         // Subscribe before sampling so racing cursor updates remain queued.
         let stream = engine.ledger().position.subscribe();
         let current = engine.ledger().position();
         let blockstore = blockstore(&engine, current.superblock)?;
         let position = ReplicationPosition { stream, current, blockstore };
-        let server = Self {
+        let server = ReplicationServer {
             connection,
             position,
             engine,
-            allowed,
-            cancellation,
+            allowed: self.allowed.clone(),
+            cancellation: self.shutdown.child(),
         };
         let runtime = runtime::Builder::new_current_thread().build()?;
-        thread::Builder::new().name("replication-server".into()).spawn(move || {
+        self.workers.spawn_blocking(move || {
             let _connection = metrics::server_connection();
-            runtime
-                .block_on(server.run())
-                .inspect_err(|error| warn!(%peer, %error, "replication connection failed"))
-        })?;
+            if let Err(error) = runtime.block_on(server.run()) {
+                warn!(%peer, %error, "replication connection failed");
+            }
+        });
         Ok(())
     }
+}
 
+impl ReplicationServer {
     /// Negotiates an initial transfer, catches up immediately, then follows durable cursors.
     async fn run(mut self) -> Result<()> {
         // Cursor updates arrive at every block and write new durable bytes. Those writes

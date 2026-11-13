@@ -88,7 +88,7 @@ enum ControlExit {
     /// Normal shutdown reached and flushed a validated block boundary.
     Boundary(BlockstorePosition),
     /// The decoder ended; its join result determines whether to reconnect or fail.
-    HandoffClosed,
+    HandoffClosed { draining: bool },
 }
 
 /// Decodes one connection and opportunistically verifies bounded transaction batches.
@@ -154,8 +154,15 @@ impl ReplicationClient {
     /// Owns connection recovery and returns success only at a validated block boundary.
     async fn run(mut self, shutdown: &ShutdownHandle) -> Result<BlockstorePosition> {
         let (mut barrier, mut position) = self.resume().await?;
+        let mut draining = false;
         loop {
-            let stream = self.reconnect(position).await?;
+            let stream = tokio::select! {
+                biased;
+                // Offline shutdown can release the resume barrier immediately.
+                // A connected drain must still reach its next block boundary.
+                _ = shutdown.signalled(), if !draining => return Ok(position),
+                stream = self.reconnect(position) => stream?,
+            };
             let connected = metrics::client_connection();
             drop(barrier);
 
@@ -165,16 +172,16 @@ impl ReplicationClient {
             let ingest = ingest.join().map_err(|_| ReplicationError::IngestPanicked)?;
             drop(connected);
 
-            match control {
-                Ok(ControlExit::Boundary(position)) => return Ok(position),
-                Err(error) => return Err(error),
-                Ok(ControlExit::HandoffClosed) => match ingest? {
-                    IngestExit::Disconnected(error) => {
-                        warn!(%error, "replication stream disconnected");
-                        (barrier, position) = self.resume().await?;
-                    }
-                    IngestExit::Stopped => return Err(ReplicationError::IngestStopped),
-                },
+            draining = match control? {
+                ControlExit::Boundary(position) => return Ok(position),
+                ControlExit::HandoffClosed { draining } => draining,
+            };
+            match ingest? {
+                IngestExit::Disconnected(error) => {
+                    warn!(%error, "replication stream disconnected");
+                    (barrier, position) = self.resume().await?;
+                }
+                IngestExit::Stopped => return Err(ReplicationError::IngestStopped),
             }
         }
     }
@@ -192,7 +199,7 @@ impl ReplicationClient {
                 biased;
                 message = rx.recv_async() => match message {
                     Ok(message) => message,
-                    Err(_) => return Ok(ControlExit::HandoffClosed),
+                    Err(_) => return Ok(ControlExit::HandoffClosed { draining }),
                 },
                 _ = shutdown.signalled(), if !draining => {
                     draining = true;
