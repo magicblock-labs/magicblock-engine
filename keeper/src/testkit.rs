@@ -261,7 +261,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = ()>,
 {
-    let mut rx = keeper.accounts().subscribe_snapshots();
+    let mut rx = keeper.accounts().subscribe_snapshots().await;
     seal().await;
     let archive = time::timeout(Duration::from_secs(8), rx.recv())
         .await

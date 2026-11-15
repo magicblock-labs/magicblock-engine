@@ -91,8 +91,8 @@ Subscribe to account changes, transaction results, logs, and blocks. Retained
 history supports queries and replay alongside those live streams:
 
 ```rust
-let mut account_updates = engine.accounts().subscribe(key);
-let mut blocks = engine.blocks().subscribe();
+let mut account_updates = engine.accounts().subscribe(key).await;
+let mut blocks = engine.blocks().subscribe().await;
 
 let update = account_updates.recv().await;
 let block = blocks.recv().await;

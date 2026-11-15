@@ -69,13 +69,13 @@ impl<'a> AccountsAccessor<'a> {
     }
 
     /// Subscribes to updates for one account pubkey.
-    pub fn subscribe(&self, account: Pubkey) -> Receiver<AccountSharedData> {
-        self.keeper.subscriptions.accounts.subscribe(account)
+    pub async fn subscribe(&self, account: Pubkey) -> Receiver<AccountSharedData> {
+        self.keeper.subscriptions.accounts.subscribe(account).await
     }
 
     /// Subscribes to account updates for accounts owned by `program`.
-    pub fn subscribe_program(&self, program: Pubkey) -> Receiver<AccountEntry> {
-        self.keeper.subscriptions.programs.subscribe(program)
+    pub async fn subscribe_program(&self, program: Pubkey) -> Receiver<AccountEntry> {
+        self.keeper.subscriptions.programs.subscribe(program).await
     }
 
     /// Subscribes as the sole receiver of account pubkeys evicted from the recency cache.
@@ -87,8 +87,8 @@ impl<'a> AccountsAccessor<'a> {
     }
 
     /// Subscribes to completed accountsdb snapshot archives.
-    pub fn subscribe_snapshots(&self) -> Receiver<PathBuf> {
-        self.keeper.subscriptions.snapshots.subscribe(())
+    pub async fn subscribe_snapshots(&self) -> Receiver<PathBuf> {
+        self.keeper.subscriptions.snapshots.subscribe(()).await
     }
 
     /// Updates stored `SlotHashes` and `Clock` sysvar accounts from `block`.
@@ -152,8 +152,8 @@ impl<'a> TransactionsAccessor<'a> {
     /// Each receiver buffers 32 transactions without blocking execution. Overflow
     /// disconnects that receiver; after draining, closure signals lost continuity.
     /// Resubscription observes future failures only, with no replay of missed events.
-    pub fn subscribe_failures(&self) -> Receiver<Arc<FullTransaction>> {
-        self.keeper.subscriptions.failures.subscribe(())
+    pub async fn subscribe_failures(&self) -> Receiver<Arc<FullTransaction>> {
+        self.keeper.subscriptions.failures.subscribe(()).await
     }
 
     /// Subscribes to one execution result, including an already retained result.
@@ -163,18 +163,18 @@ impl<'a> TransactionsAccessor<'a> {
         signature: Signature,
     ) -> Result<oneshot::Receiver<TransactionStatus>> {
         let subscriptions = &self.keeper.subscriptions.signatures;
-        let rx = subscriptions.subscribe(signature);
+        let rx = subscriptions.subscribe(signature).await;
         // Register before reading: commit caches its result before fanout, so
         // racing publication is observed through either the channel or status.
         if let Some(status) = self.status(signature).await? {
-            subscriptions.send(&signature, &status);
+            subscriptions.send_async(&signature, &status).await;
         }
         Ok(rx)
     }
 
     /// Subscribes to executed transactions mentioning `account`, including failures and their logs.
     pub async fn subscribe_logs(&self, account: Pubkey) -> Receiver<Arc<FullTransaction>> {
-        self.keeper.subscriptions.logs.subscribe(account)
+        self.keeper.subscriptions.logs.subscribe(account).await
     }
 
     /// Subscribes as the sole receiver of encoded service messages.
@@ -336,8 +336,8 @@ impl<'a> BlocksAccessor<'a> {
     }
 
     /// Subscribes to newly committed slots.
-    pub fn subscribe(&self) -> Receiver<Block> {
-        self.keeper.subscriptions.blocks.subscribe(())
+    pub async fn subscribe(&self) -> Receiver<Block> {
+        self.keeper.subscriptions.blocks.subscribe(()).await
     }
 
     /// Publishes a completed block and advances block-derived account state.

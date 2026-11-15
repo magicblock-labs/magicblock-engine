@@ -239,7 +239,7 @@ async fn failed_execution_surfaces_error_result() {
 async fn schedule_is_fire_and_forget() {
     let te = TestEngine::new().await;
     let output = store_v42(&te, 0, AccountMode::Magic);
-    let mut updates = te.accounts().subscribe(output);
+    let mut updates = te.accounts().subscribe(output).await;
     let (signature, transaction) =
         signed_view(&te, None, (E::acc(0) + E::lit(7)).compose(output, &[]));
     let first = te.transactions().subscribe_signature(signature).await.unwrap();
