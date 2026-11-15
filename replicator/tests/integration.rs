@@ -440,7 +440,7 @@ async fn internally_paced_replication_persists_across_restart() {
     let leader = engine(leader_authority, &seed, Pacing::Internal).await;
     let mut follower = engine(follower_authority, &seed, Pacing::External).await;
 
-    let mut snapshots = leader.accounts().subscribe_snapshots();
+    let mut snapshots = leader.accounts().subscribe_snapshots().await;
     if !leader
         .ledger()
         .iter()
@@ -815,7 +815,7 @@ async fn cascades_replication_through_a_follower() {
 
     // Subscribe before the boundary because this seal is driven by replication,
     // outside the testkit's race-free seal-and-archive helper.
-    let mut archives = middle.accounts().subscribe_snapshots();
+    let mut archives = middle.accounts().subscribe_snapshots().await;
 
     // Cross the seal live rather than during handshake catch-up.
     increment(&leader, state).await;

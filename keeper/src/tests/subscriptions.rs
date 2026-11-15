@@ -31,8 +31,8 @@ async fn subscribers_send_semantics() {
     let multicast = Multicast::new(1, Subscription::Accounts);
     multicast.send(&1, &9);
     assert!(multicast.is_empty());
-    let mut first = multicast.subscribe(1);
-    let mut second = multicast.subscribe(1);
+    let mut first = multicast.subscribe(1).await;
+    let mut second = multicast.subscribe(1).await;
     multicast.send(&1, &10);
     assert_eq!(first.recv().await, Some(10));
     assert_eq!(second.recv().await, Some(10));
@@ -45,8 +45,8 @@ async fn subscribers_send_semantics() {
 
     // Overflow removed the last receivers. Registration must reopen
     // delivery, and pruning a different key must not hide the remaining one.
-    let mut live = multicast.subscribe(2);
-    let closed = multicast.subscribe(3);
+    let mut live = multicast.subscribe(2).await;
+    let closed = multicast.subscribe(3).await;
     drop(closed);
     multicast.send(&3, &0);
     assert!(!multicast.is_empty());
@@ -59,26 +59,26 @@ async fn subscribers_send_semantics() {
     let signatures = Signatures::default();
     let signature = Signature::from([1; 64]);
     signatures.send(&signature, &TransactionStatus { slot: 19, result: Ok(()) });
-    let first = signatures.subscribe(signature);
-    let closed = signatures.subscribe(signature);
+    let first = signatures.subscribe(signature).await;
+    let closed = signatures.subscribe(signature).await;
     drop(closed);
     signatures.cleanup().await;
     assert!(matches!(
         first.try_recv(),
         Err(oneshot::TryRecvError::Empty)
     ));
-    let second = signatures.subscribe(signature);
+    let second = signatures.subscribe(signature).await;
     signatures.send(&signature, &TransactionStatus { slot: 20, result: Ok(()) });
     assert_eq!(first.await.unwrap().slot, 20);
     assert_eq!(second.await.unwrap().slot, 20);
-    let third = signatures.subscribe(signature);
+    let third = signatures.subscribe(signature).await;
     signatures.send(&signature, &TransactionStatus { slot: 21, result: Ok(()) });
     assert_eq!(third.await.unwrap().slot, 21);
-    let closed = signatures.subscribe(signature);
+    let closed = signatures.subscribe(signature).await;
     drop(closed);
     signatures.cleanup().await;
     signatures.cleanup().await;
-    let reopened = signatures.subscribe(signature);
+    let reopened = signatures.subscribe(signature).await;
     signatures.send(&signature, &TransactionStatus { slot: 22, result: Ok(()) });
     assert_eq!(reopened.await.unwrap().slot, 22);
 }

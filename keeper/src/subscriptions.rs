@@ -39,7 +39,8 @@ type Senders<S> = SmallVec<[S; 1]>;
 
 /// Keyed receivers with a constant-time, conservative empty check.
 pub(crate) struct Subscribers<K, S> {
-    /// Nonempty sender lists protected by SCC's bucket locks.
+    /// Nonempty sender lists protected by SCC's bucket locks. Async callers
+    /// await acquisition; synchronous access is reserved for producer threads.
     entries: HashMap<K, Senders<S>, RandomState>,
     /// Registered keys, including closed receivers until pruning. Detached lists
     /// remain counted until removal finishes, so zero never hides a live key.
@@ -62,9 +63,9 @@ impl<K: Eq + Hash, S> Subscribers<K, S> {
         self.keys.load(Ordering::Acquire) == 0
     }
 
-    /// Registers under the bucket lock without waiting for channel capacity.
-    fn insert(&self, key: K, sender: S) {
-        let mut entry = self.entries.entry_sync(key).or_default();
+    /// Awaits the bucket lock, then registers without waiting for channel capacity.
+    async fn insert(&self, key: K, sender: S) {
+        let mut entry = self.entries.entry_async(key).await.or_default();
         if entry.is_empty() {
             self.keys.fetch_add(1, Ordering::Release);
         }
@@ -80,7 +81,7 @@ impl<K: Eq + Hash, S> Subscribers<K, S> {
     }
 
     /// Prunes all keys, yielding between contended buckets.
-    async fn cleanup(&self, mut keep: impl FnMut(&S) -> bool) {
+    async fn retain_all(&self, mut keep: impl FnMut(&S) -> bool) {
         if !self.is_empty() {
             self.entries.retain_async(|_, senders| self.prune(senders, &mut keep)).await;
         }
@@ -95,17 +96,6 @@ impl<K: Eq + Hash, S> Subscribers<K, S> {
             return false;
         }
         true
-    }
-
-    /// Detaches one key for delivery without holding a map guard.
-    fn remove(&self, key: &K) -> Option<Senders<S>> {
-        if self.is_empty() {
-            return None;
-        }
-        let (_, senders) = self.entries.remove_sync(key)?;
-        // A concurrent registration counts its own key; subtract only ours.
-        self.keys.fetch_sub(1, Ordering::Release);
-        Some(senders)
     }
 }
 
@@ -278,15 +268,15 @@ impl<K: Eq + Hash, V> Multicast<K, V> {
     }
 
     /// Adds a receiver for `key` with its own bounded queue.
-    pub(crate) fn subscribe(&self, key: K) -> mpsc::Receiver<V> {
+    pub(crate) async fn subscribe(&self, key: K) -> mpsc::Receiver<V> {
         let (tx, rx) = mpsc::channel(self.capacity);
-        self.insert(key, tx);
+        self.insert(key, tx).await;
         rx
     }
 
     /// Drops closed receivers while preserving every live queue.
     async fn cleanup(&self) {
-        self.senders.cleanup(|sender| !sender.is_closed()).await;
+        self.senders.retain_all(|sender| !sender.is_closed()).await;
     }
 
     /// Fans out without blocking, disconnecting receivers whose queues are full.
@@ -317,31 +307,50 @@ impl<K: Eq + Hash, V> Multicast<K, V> {
 }
 
 /// Terminal execution-result fanout keyed by signature.
-#[derive(Default)]
-pub(crate) struct Signatures {
-    /// One terminal channel per observer, grouped by signature.
-    senders: Subscribers<Signature, oneshot::Sender<TransactionStatus>>,
-}
+pub(crate) type Signatures = Subscribers<Signature, oneshot::Sender<TransactionStatus>>;
 
 impl Signatures {
     /// Registers before the caller checks retained status; publication caches
     /// status before fanout, closing the registration/publication race.
-    pub(crate) fn subscribe(&self, signature: Signature) -> oneshot::Receiver<TransactionStatus> {
+    pub(crate) async fn subscribe(
+        &self,
+        signature: Signature,
+    ) -> oneshot::Receiver<TransactionStatus> {
         let (tx, rx) = oneshot::channel();
-        self.senders.insert(signature, tx);
+        self.insert(signature, tx).await;
         rx
     }
 
     /// Drops abandoned senders and keys with no remaining observers.
     pub(crate) async fn cleanup(&self) {
-        self.senders.cleanup(|sender| !sender.is_closed()).await;
+        self.retain_all(|sender| !sender.is_closed()).await;
     }
 
     /// Removes current waiters before delivery, so sending holds no map guard.
     pub(crate) fn send(&self, signature: &Signature, status: &TransactionStatus) {
-        let Some(senders) = self.senders.remove(signature) else {
+        if !self.is_empty() {
+            self.notify(self.entries.remove_sync(signature), status);
+        }
+    }
+
+    /// Delivers retained status without blocking an async subscriber on the map.
+    pub(crate) async fn send_async(&self, signature: &Signature, status: &TransactionStatus) {
+        if !self.is_empty() {
+            self.notify(self.entries.remove_async(signature).await, status);
+        }
+    }
+
+    /// Accounts for a detached key and completes its observers without a map guard.
+    fn notify(
+        &self,
+        entry: Option<(Signature, Senders<oneshot::Sender<TransactionStatus>>)>,
+        status: &TransactionStatus,
+    ) {
+        let Some((_, senders)) = entry else {
             return;
         };
+        // A concurrent registration counts its own key; subtract only ours.
+        self.keys.fetch_sub(1, Ordering::Release);
         for sender in senders {
             let _ = sender.send(status.clone());
         }
