@@ -156,8 +156,8 @@ impl Subscriptions {
     /// Builds subscription channels and starts cleanup for idle keyed entries.
     pub(crate) fn new(shutdown: &mut ShutdownManager) -> Arc<Self> {
         let subscriptions = Arc::new(Self {
-            accounts: Multicast::new(8, Subscription::Accounts),
-            programs: Multicast::new(16, Subscription::Programs),
+            accounts: Multicast::new(64, Subscription::Accounts),
+            programs: Multicast::new(64, Subscription::Programs),
             signatures: Default::default(),
             logs: Multicast::new(8, Subscription::Logs),
             blocks: Multicast::new(32, Subscription::Blocks),
