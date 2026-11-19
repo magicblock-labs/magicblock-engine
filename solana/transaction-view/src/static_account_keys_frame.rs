@@ -1,18 +1,12 @@
 use {
     crate::{
-        bytes::{advance_offset_for_array, read_byte, try_u32_offset},
+        bytes::{advance_offset_for_array, read_compressed_u16, try_u32_offset},
         result::{Result, TransactionViewError},
     },
-    solana_packet::PACKET_DATA_SIZE,
     solana_pubkey::Pubkey,
 };
 
-// A legacy/v0 packet has a maximum length of 1232 bytes.
-// This means the maximum number of 32 byte keys is 38.
-// 38 as an min-sized encoded u16 is 1 byte.
-// We can simply read this byte, if it's >38 we can return None.
-const LEGACY_OR_V0_MAX_STATIC_ACCOUNTS_PER_PACKET: u8 =
-    (PACKET_DATA_SIZE / core::mem::size_of::<Pubkey>()) as u8;
+pub(crate) const MAX_LEGACY_OR_V0_ACCOUNT_KEYS: u16 = u8::MAX as u16;
 
 /// Contains metadata about the static account keys in a transaction packet.
 #[derive(Debug, Default)]
@@ -26,22 +20,16 @@ pub(crate) struct StaticAccountKeysFrame {
 impl StaticAccountKeysFrame {
     #[inline(always)]
     pub(crate) fn try_new(bytes: &[u8], offset: &mut usize) -> Result<Self> {
-        // Max size must not have the MSB set so that it is size 1.
-        const _: () = assert!(LEGACY_OR_V0_MAX_STATIC_ACCOUNTS_PER_PACKET & 0b1000_0000 == 0);
-
-        let num_static_accounts = read_byte(bytes, offset)?;
-        if num_static_accounts == 0
-            || num_static_accounts > LEGACY_OR_V0_MAX_STATIC_ACCOUNTS_PER_PACKET
-        {
+        let num_static_accounts = read_compressed_u16(bytes, offset)?;
+        if num_static_accounts == 0 || num_static_accounts > MAX_LEGACY_OR_V0_ACCOUNT_KEYS {
             return Err(TransactionViewError::ParseError);
         }
 
         let static_accounts_offset = try_u32_offset(*offset)?;
-        // Update offset for array of static accounts.
-        advance_offset_for_array::<Pubkey>(bytes, offset, u16::from(num_static_accounts))?;
+        advance_offset_for_array::<Pubkey>(bytes, offset, num_static_accounts)?;
 
         Ok(Self {
-            num_static_accounts,
+            num_static_accounts: num_static_accounts as u8,
             offset: static_accounts_offset,
         })
     }
@@ -70,21 +58,19 @@ mod tests {
 
     #[test]
     fn test_max_accounts() {
-        let signatures =
-            vec![Pubkey::default(); usize::from(LEGACY_OR_V0_MAX_STATIC_ACCOUNTS_PER_PACKET)];
-        let bytes = bincode::serialize(&ShortVec(signatures)).unwrap();
+        let accounts = vec![Pubkey::default(); 255];
+        let bytes = bincode::serialize(&ShortVec(accounts)).unwrap();
         let mut offset = 0;
         let frame = StaticAccountKeysFrame::try_new(&bytes, &mut offset).unwrap();
-        assert_eq!(frame.num_static_accounts, 38);
-        assert_eq!(frame.offset, 1);
-        assert_eq!(offset, 1 + 38 * core::mem::size_of::<Pubkey>());
+        assert_eq!(frame.num_static_accounts, 255);
+        assert_eq!(frame.offset, 2);
+        assert_eq!(offset, bytes.len());
     }
 
     #[test]
     fn test_too_many_accounts() {
-        let signatures =
-            vec![Pubkey::default(); usize::from(LEGACY_OR_V0_MAX_STATIC_ACCOUNTS_PER_PACKET) + 1];
-        let bytes = bincode::serialize(&ShortVec(signatures)).unwrap();
+        let accounts = vec![Pubkey::default(); 256];
+        let bytes = bincode::serialize(&ShortVec(accounts)).unwrap();
         let mut offset = 0;
         assert!(StaticAccountKeysFrame::try_new(&bytes, &mut offset).is_err());
     }

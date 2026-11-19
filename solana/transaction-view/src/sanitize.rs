@@ -2,6 +2,7 @@ use {
     crate::{
         result::{Result, TransactionViewError},
         signature_frame::MAX_SIGNATURES_PER_PACKET,
+        static_account_keys_frame::MAX_LEGACY_OR_V0_ACCOUNT_KEYS,
         transaction_data::TransactionData,
         transaction_version::TransactionVersion,
         transaction_view::UnsanitizedTransactionView,
@@ -126,11 +127,11 @@ fn sanitize_signatures(view: &UnsanitizedTransactionView<impl TransactionData>) 
 /// Accounts (aka Addresses) Constraints:
 /// * for v1: 1 <= NumAddresses <= 64
 /// * for Magicblock: 1 <= NumAddresses <= 255
-/// * legacy/v0 uses current limits of: num_accounts <= 256 (u8 bound)
+/// * for legacy/v0: 1 <= NumAddresses <= 255
 /// * No duplicate addresses
 fn sanitize_account_access(view: &UnsanitizedTransactionView<impl TransactionData>) -> Result<()> {
     let addresses_limit = match view.version() {
-        TransactionVersion::Legacy | TransactionVersion::V0 => 256,
+        TransactionVersion::Legacy | TransactionVersion::V0 => MAX_LEGACY_OR_V0_ACCOUNT_KEYS,
         TransactionVersion::V1 => 64,
         TransactionVersion::Magicblock => MAX_MAGICBLOCK_ACCOUNT_LOCKS as u16,
     };
@@ -180,8 +181,7 @@ fn sanitize_instructions(
 
     // already verified there is at least one static account.
     let max_program_id_index = view.num_static_account_keys().wrapping_sub(1);
-    // Magicblock and V1 are bounded by their encoded address counts; standard
-    // formats may use all 256 u8 account indices.
+    // Account access checks bound the total count before narrowing the index.
     let max_account_index = total_number_of_accounts(view).wrapping_sub(1) as u8;
 
     for instruction in view.instructions_iter() {
