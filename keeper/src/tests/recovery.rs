@@ -349,7 +349,7 @@ async fn restores_blockhash_history_from_ledger_and_snapshot() {
         keeper.blocks().is_valid(&ledger_hash),
         "follower restores history beyond SlotHashes from the blockstore"
     );
-    let status = keeper.transactions().subscribe_signature(signature).await.unwrap();
+    let status = keeper.transactions().subscribe_signature(signature).await;
     assert_eq!(
         keeper.transactions().append(&transaction).await.unwrap(),
         Err(TransactionError::AlreadyProcessed)

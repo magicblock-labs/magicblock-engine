@@ -133,10 +133,15 @@ impl<'a> TransactionsAccessor<'a> {
 
     /// Loads the retained execution status for `signature`.
     pub async fn status(&self, signature: Signature) -> Result<Option<TransactionStatus>> {
-        if let Some(status) = self.keeper.caches.signatures.get(&signature_prefix(&signature)) {
+        if let Some(status) = self.cached_status(&signature) {
             return Ok(status);
         }
         Ok(request(self.keeper, signature, ReadRequest::TransactionStatus).await??)
+    }
+
+    /// An admitted or reserved signature can be cached without an execution result.
+    fn cached_status(&self, signature: &Signature) -> Option<Option<TransactionStatus>> {
+        self.keeper.caches.signatures.get(&signature_prefix(signature))
     }
 
     /// Subscribes as the sole receiver of all processed transactions, including failures.
@@ -156,20 +161,21 @@ impl<'a> TransactionsAccessor<'a> {
         self.keeper.subscriptions.failures.subscribe(()).await
     }
 
-    /// Subscribes to one execution result, including an already retained result.
+    /// Subscribes to one execution result, including a result still in the recent-status cache.
+    /// Does not read the ledger; use [`Self::status`] to look up older results.
     /// Admission rejections are request-specific and do not notify observers.
     pub async fn subscribe_signature(
         &self,
         signature: Signature,
-    ) -> Result<oneshot::Receiver<TransactionStatus>> {
+    ) -> oneshot::Receiver<TransactionStatus> {
         let subscriptions = &self.keeper.subscriptions.signatures;
         let rx = subscriptions.subscribe(signature).await;
         // Register before reading: commit caches its result before fanout, so
         // racing publication is observed through either the channel or status.
-        if let Some(status) = self.status(signature).await? {
+        if let Some(Some(status)) = self.cached_status(&signature) {
             subscriptions.send_async(&signature, &status).await;
         }
-        Ok(rx)
+        rx
     }
 
     /// Subscribes to executed transactions mentioning `account`, including failures and their logs.
