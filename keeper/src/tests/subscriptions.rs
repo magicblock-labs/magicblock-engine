@@ -89,14 +89,14 @@ async fn subscribers_send_semantics() {
 async fn append_dedup_and_status_sentinel() {
     let keeper = TestKeeper::new().await;
     let (signature, txn) = signed_tx();
-    let original = keeper.transactions().subscribe_signature(signature).await.unwrap();
+    let original = keeper.transactions().subscribe_signature(signature).await;
 
     // First append writes to the ledger; the duplicate is dropped.
     assert!(
         keeper.transactions().append(&txn).await.unwrap().is_ok(),
         "first append is accepted"
     );
-    let duplicate = keeper.transactions().subscribe_signature(signature).await.unwrap();
+    let duplicate = keeper.transactions().subscribe_signature(signature).await;
     assert_eq!(
         keeper.transactions().append(&txn).await.unwrap(),
         Err(TransactionError::AlreadyProcessed)
@@ -121,7 +121,7 @@ async fn append_dedup_and_status_sentinel() {
     );
     let txn =
         ResolvedTransaction::try_new(view, Some(Default::default()), &Default::default()).unwrap();
-    let rejected = keeper.transactions().subscribe_signature(signature).await.unwrap();
+    let rejected = keeper.transactions().subscribe_signature(signature).await;
     assert_eq!(
         keeper.transactions().append(&txn).await.unwrap(),
         Err(TransactionError::BlockhashNotFound)

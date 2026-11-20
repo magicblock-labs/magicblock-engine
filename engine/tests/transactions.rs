@@ -211,11 +211,11 @@ async fn failed_execution_surfaces_error_result() {
     // MIN - 1 overflows the program's checked_sub before any write.
     let ixs = [(E::lit(i64::MIN) - E::lit(1)).compose(output, &[])];
     let (signature, transaction) = signed_view(&te, None, ixs[0].clone());
-    let observer = te.transactions().subscribe_signature(signature).await.unwrap();
+    let observer = te.transactions().subscribe_signature(signature).await;
 
     let error = te.execute(transaction).await.expect_err("overflow yields an error result");
     assert_eq!(observer.await.unwrap().result, Err(error.clone()));
-    let late = te.transactions().subscribe_signature(signature).await.unwrap();
+    let late = te.transactions().subscribe_signature(signature).await;
     assert_eq!(late.await.unwrap().result, Err(error.clone()));
     // CalcError::Arithmetic = 6; its discriminants are stable for tests.
     assert_eq!(
@@ -242,7 +242,7 @@ async fn schedule_is_fire_and_forget() {
     let mut updates = te.accounts().subscribe(output).await;
     let (signature, transaction) =
         signed_view(&te, None, (E::acc(0) + E::lit(7)).compose(output, &[]));
-    let first = te.transactions().subscribe_signature(signature).await.unwrap();
+    let first = te.transactions().subscribe_signature(signature).await;
     let barrier = te.barrier().await.unwrap();
     {
         let simulation = te
@@ -260,7 +260,7 @@ async fn schedule_is_fire_and_forget() {
             .await
             .unwrap();
     }
-    let second = te.transactions().subscribe_signature(signature).await.unwrap();
+    let second = te.transactions().subscribe_signature(signature).await;
     te.transaction(transaction.inner_data().as_ref().clone())
         .unwrap()
         .schedule()
@@ -281,7 +281,7 @@ async fn schedule_is_fire_and_forget() {
         te.transaction(transaction).unwrap().execute().await.unwrap(),
         Err(TransactionError::AlreadyProcessed)
     );
-    let late = te.transactions().subscribe_signature(signature).await.unwrap();
+    let late = te.transactions().subscribe_signature(signature).await;
     assert_eq!(late.await.unwrap().result, Ok(()));
 
     let account = updates.recv().await.expect("scheduled write reaches the subscriber");
