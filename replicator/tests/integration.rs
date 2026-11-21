@@ -685,17 +685,18 @@ async fn resumes_after_leader_restart() {
 }
 
 /// Proves shutdown drains through the next block, leaving its trailing checkpoint
-/// for reconnect, and reopens from that exact durable cursor.
+/// for reconnect, and resumes from that exact durable cursor even when a newer snapshot exists.
 #[tokio::test(flavor = "multi_thread")]
 async fn graceful_shutdown_drains_to_next_block_and_reopens() {
-    let (mut leader, mut follower) = engines(&[], &[]).await;
+    let state = Pubkey::new_unique();
+    let seed = [(state, 0, AccountMode::Delegated)];
+    let (mut leader, mut follower) = engines(&seed, &[]).await;
     let addr = loopback_addr();
     let follower_identity = follower.signer().pubkey();
     let mut first_dispatcher = dispatcher(addr, &leader, &[follower_identity]).await;
     let mut positions = stream(addr, &mut follower);
-    leader.advance(1).await;
-    let expected = leader.sync().await;
-    await_position(&mut positions, expected).await;
+    let expected = commit_increment(&mut leader, state).await;
+    await_replication(&mut positions, &follower, expected, state, 1).await;
 
     let mut shutdown = Box::pin(follower.shutdown().terminate());
     assert!(
@@ -707,10 +708,10 @@ async fn graceful_shutdown_drains_to_next_block_and_reopens() {
     let mut second_dispatcher = dispatcher(addr, &leader, &[follower_identity]).await;
     let mut leader_positions = leader.ledger().position.subscribe();
     leader.advance(1).await;
-    let expected = time::timeout(TIMEOUT, leader_positions.recv()).await.unwrap().unwrap();
+    let resume = time::timeout(TIMEOUT, leader_positions.recv()).await.unwrap().unwrap();
     let checkpoint = leader.sync().await;
     // The first publication ends at the block; the checkpoint follows it.
-    assert!(expected < checkpoint);
+    assert!(resume < checkpoint);
     // The next operational heartbeat lets Ingest observe the closed handoff
     // without out-of-band socket interruption.
     leader.advance(1).await;
@@ -719,16 +720,29 @@ async fn graceful_shutdown_drains_to_next_block_and_reopens() {
         .await
         .expect("shutdown completes after the next leader block");
     drop(shutdown);
-    assert_eq!(follower.superblocks().position(), expected);
+    assert_eq!(follower.superblocks().position(), resume);
 
     let (dirs, authority) = follower.close().await;
     let mut follower = TestEngine::with(dirs, authority).await;
-    assert_eq!(follower.superblocks().position(), expected);
+    assert_eq!(follower.superblocks().position(), resume);
+    assert_eq!(load_v42_data(&follower, state), Some(1));
+
+    // Keep the old cursor streamable after staging a newer snapshot. Resuming
+    // must use the retained cursor, not the cold-follower snapshot path.
+    leader.seal_and_archive().await;
+    assert!(leader.sync().await.superblock > resume.superblock);
+    assert!(
+        resume.superblock > 1
+            && leader
+                .ledger()
+                .cursor(resume.superblock)
+                .is_some_and(|end| resume.offset <= end),
+        "the reopened follower must have a retained post-genesis cursor: {resume:?}"
+    );
+    let expected = commit_increment(&mut leader, state).await;
 
     let mut positions = stream(addr, &mut follower);
-    leader.advance(1).await;
-    let expected = leader.sync().await;
-    await_position(&mut positions, expected).await;
+    await_replication(&mut positions, &follower, expected, state, 2).await;
 
     close_follower(follower, &mut leader).await;
     second_dispatcher.terminate().await;
@@ -836,12 +850,22 @@ async fn cascades_replication_through_a_follower() {
     let expected = commit_increment(&mut leader, state).await;
     await_replication(&mut middle_positions, &middle, expected, state, 2).await;
 
-    // The successor archive must become the only answer to the tail's cursor.
+    // Use a previously installed, non-genesis cursor so the snapshot cannot
+    // have been selected by the cold-follower preference.
+    let resume = tail.superblocks().position();
+    assert!(
+        resume.superblock > 1
+            && middle
+                .ledger()
+                .cursor(resume.superblock)
+                .is_some_and(|end| resume.offset <= end),
+        "tail must have a retained post-genesis cursor before pruning: {resume:?}"
+    );
     truncate(middle.ledger()); // initial segment
     truncate(middle.ledger()); // tail's installed snapshot segment
     assert!(
-        middle.ledger().cursor(tail.superblocks().position().superblock).is_none(),
-        "tail cursor was retained away"
+        middle.ledger().cursor(resume.superblock).is_none(),
+        "the exact tail cursor must be pruned before reconnecting: {resume:?}"
     );
 
     let mut tail = restart_from_snapshot(middle_addr, tail).await;
