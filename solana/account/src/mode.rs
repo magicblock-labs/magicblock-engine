@@ -178,6 +178,7 @@ impl AccountMode {
             | (Mirrored, Delegated | Magic | Closed)
             | (Delegated, Undelegating)
             | (Magic, Delegated | Closed)
+            | (Closed, Magic)
             | (Undelegating, Missing | Mirrored | Closed) => to_slot >= from_slot,
             _ => return Err(AccountPatchError::InvalidModeTransition { from: self, to }),
         };

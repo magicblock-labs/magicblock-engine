@@ -203,7 +203,7 @@ fn test_lifecycle_matrix() {
         (Mode::Delegated, [0, 0, 0, 0, 1, 0, 0]),
         (Mode::Magic, [0, 0, 1, 0, 0, 1, 0]),
         (Mode::Undelegating, [1, 1, 2, 0, 0, 1, 0]),
-        (Mode::Closed, [0, 0, 0, 0, 0, 0, 0]),
+        (Mode::Closed, [0, 0, 0, 1, 0, 0, 0]),
         (Mode::Runtime, [0, 0, 0, 0, 0, 0, 2]),
     ];
     let modes = cases.map(|(mode, _)| mode);

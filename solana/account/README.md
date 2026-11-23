@@ -39,7 +39,7 @@ transaction mutations aren't replacements and don't follow that restriction.
 | Delegated | Undelegating | — |
 | Magic | Delegated, Closed | — |
 | Undelegating | Mirrored, Missing, Closed | Delegated |
-| Closed | — | — |
+| Closed | Magic | — |
 
 Unlisted transitions and slot regressions fail without changing state or dirty
 markers. Replacing Magic state with Delegated state requires application-specific
