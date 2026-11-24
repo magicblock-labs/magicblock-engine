@@ -139,6 +139,7 @@ solana-sysvar = "4.0.0"
 solana-sysvar-id = "3.1.0"
 solana-transaction = ">=4.1.4,<4.2.0"
 solana-transaction-error = "=3.3.1"
+solana-zk-elgamal-proof-program = "=4.2.2"
 
 [patch.crates-io]
 agave-transaction-view = { path = "solana/transaction-view" }

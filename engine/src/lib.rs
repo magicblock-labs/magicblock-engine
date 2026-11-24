@@ -17,13 +17,16 @@ use nucleus::{
     shutdown::{Service, ShutdownManager, ShutdownReason},
 };
 use processor::{SequencerMessage, sequencer::Sequencer};
-use solana_compute_budget_program::Entrypoint as ComputeBudgetEntrypoint;
+use solana_compute_budget_program::Entrypoint as ComputeBudget;
 use solana_program_runtime::{
+    invoke_context::BuiltinFunctionWithContext,
     loaded_programs::{ProgramCache, ProgramCacheEntry},
     solana_sbpf::program::BuiltinFunctionDefinition,
 };
 use solana_pubkey::Pubkey;
-use solana_system_program::system_processor::Entrypoint as SystemProgramEntrypoint;
+use solana_sdk_ids::{compute_budget, system_program, zk_elgamal_proof_program};
+use solana_system_program::system_processor::Entrypoint as SystemProgram;
+use solana_zk_elgamal_proof_program::Entrypoint as ZkElGamalProof;
 use tracing::{error, info};
 
 mod accessor;
@@ -68,24 +71,25 @@ impl Engine {
         let cache = Arc::new(ProgramCache::default());
         let cpus = (num_cpus::get().saturating_sub(2)).max(2);
 
-        builder.builtins.insert(
-            magic_root_interface::ID,
-            (MagicRootEntrypoint::vm, MagicRootEntrypoint::codegen),
-        );
-        builder.builtins.insert(
-            solana_system_program::id(),
+        let builtins: [(_, BuiltinFunctionWithContext); _] = [
             (
-                SystemProgramEntrypoint::vm,
-                SystemProgramEntrypoint::codegen,
+                magic_root_interface::ID,
+                (MagicRootEntrypoint::vm, MagicRootEntrypoint::codegen),
             ),
-        );
-        builder.builtins.insert(
-            solana_sdk_ids::compute_budget::id(),
             (
-                ComputeBudgetEntrypoint::vm,
-                ComputeBudgetEntrypoint::codegen,
+                system_program::ID,
+                (SystemProgram::vm, SystemProgram::codegen),
             ),
-        );
+            (
+                compute_budget::ID,
+                (ComputeBudget::vm, ComputeBudget::codegen),
+            ),
+            (
+                zk_elgamal_proof_program::ID,
+                (ZkElGamalProof::vm, ZkElGamalProof::codegen),
+            ),
+        ];
+        builder.builtins.extend(builtins);
 
         for (&id, builtin) in &builder.builtins {
             let entry = ProgramCacheEntry::new_builtin(*builtin);

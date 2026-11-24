@@ -9,7 +9,7 @@ use std::{
 use accountsdb::{
     AccountEntry, AccountLoader, AccountsDB, AccountsDBError, BackupOp, SnapshotError,
 };
-use agave_feature_set::FeatureSet;
+use agave_feature_set::{self as feature, FeatureSet};
 use arc_swap::ArcSwap;
 use ledger::{
     Ledger, LedgerHandle,
@@ -118,7 +118,7 @@ impl KeeperBuilder {
     fn prepopulate(&mut self, accountsdb: &AccountsDB) -> Result<()> {
         let mut accounts = Vec::new();
         if accountsdb.is_new() {
-            for id in DEFAULT_FEATURES {
+            for &id in DEFAULT_FEATURES {
                 accounts.push((id, feature_account()));
             }
             self.seed_sysvars(&mut accounts);
@@ -351,17 +351,24 @@ fn persisted_latest(slothashes: &SlotHashes, clock: &Clock) -> Block {
 }
 
 /// Engine-selected features published by a leader at startup.
-pub(crate) const DEFAULT_FEATURES: [Pubkey; 10] = [
-    agave_feature_set::curve25519_syscall_enabled::ID,
-    agave_feature_set::curve25519_restrict_msm_length::ID,
-    agave_feature_set::enable_poseidon_syscall::ID,
-    agave_feature_set::enable_sbpf_v3_deployment_and_execution::ID,
-    agave_feature_set::virtual_address_space_adjustments::ID,
-    agave_feature_set::syscall_parameter_address_restrictions::ID,
-    agave_feature_set::get_sysvar_syscall_enabled::ID,
-    agave_feature_set::ed25519_program_enabled::ID,
-    agave_feature_set::secp256k1_program_enabled::ID,
-    agave_feature_set::enable_secp256r1_precompile::ID,
+pub(crate) const DEFAULT_FEATURES: &[Pubkey] = &[
+    feature::curve25519_syscall_enabled::ID,
+    feature::curve25519_restrict_msm_length::ID,
+    feature::abort_on_invalid_curve::ID,
+    feature::enable_poseidon_syscall::ID,
+    feature::poseidon_enforce_padding::ID,
+    feature::enable_alt_bn128_syscall::ID,
+    feature::enable_alt_bn128_compression_syscall::ID,
+    feature::alt_bn128_little_endian::ID,
+    feature::enable_alt_bn128_g2_syscalls::ID,
+    feature::enable_bls12_381_syscall::ID,
+    feature::enable_sbpf_v3_deployment_and_execution::ID,
+    feature::virtual_address_space_adjustments::ID,
+    feature::syscall_parameter_address_restrictions::ID,
+    feature::get_sysvar_syscall_enabled::ID,
+    feature::ed25519_program_enabled::ID,
+    feature::secp256k1_program_enabled::ID,
+    feature::enable_secp256r1_precompile::ID,
 ];
 
 fn load_sysvar<S: DeserializeOwned + SysvarId>(loader: &AccountLoader<'_>) -> Result<S> {
