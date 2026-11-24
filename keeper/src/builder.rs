@@ -275,7 +275,7 @@ impl KeeperBuilder {
         caches
     }
 
-    /// Opens accountsdb, restoring the newest archived snapshot after corruption.
+    /// Opens accountsdb, restoring the newest archived snapshot on inconsistency.
     ///
     /// A restored store trails the ledger tip — snapshots are archived at sealed
     /// superblocks, not at the tip — so the returned accountsdb is only
@@ -285,17 +285,18 @@ impl KeeperBuilder {
         let mut backup = None;
         loop {
             let mut accountsdb = AccountsDB::new(&self.accountsdb.directory)?;
-            // Seal N opens ledger head N+1, so accountsdb is current at head-1.
+            // An export can flush its marker before the ledger seals. Only
+            // the ledger's seal makes that superblock authoritative.
             let expected = ledger.head().saturating_sub(1);
             let restored = backup.is_some();
-            let lagging = accountsdb.superblock() < expected;
+            let superblock = accountsdb.superblock();
             let count_lagging = accountsdb.transactions() < ledger.transactions();
             match accountsdb.validate() {
-                Ok(()) if restored || (!lagging && !count_lagging) => {
+                Ok(()) if restored || (superblock == expected && !count_lagging) => {
                     let reclaimed = accountsdb.compact()?;
                     info!(
-                        lagging,
-                        count_lagging, reclaimed, "accountsdb validation succeeded"
+                        superblock,
+                        expected, count_lagging, reclaimed, "accountsdb validation succeeded"
                     );
                     backup.map(fs::remove_dir_all).transpose()?;
                     return Ok(accountsdb);
@@ -308,7 +309,7 @@ impl KeeperBuilder {
                     }
                     warn!(
                         ?validation,
-                        lagging, count_lagging, "state inconsistency detected"
+                        superblock, expected, count_lagging, "state inconsistency detected"
                     );
                     backup.replace(accountsdb.backup(BackupOp::Save)?);
                     if let Err(error) = self.unarchive(ledger) {
