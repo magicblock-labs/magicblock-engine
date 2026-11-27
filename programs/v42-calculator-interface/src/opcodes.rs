@@ -13,6 +13,9 @@ pub const PUSH_LIT: u8 = 0x00;
 pub const PUSH_ACC: u8 = 0x01;
 /// Push the current clock unix timestamp.
 pub const PUSH_CLOCK: u8 = 0x03;
+/// Fail unless the instruction account at the 1-byte index that follows
+/// signed. No stack effect.
+pub const REQUIRE_SIGNER: u8 = 0x04;
 
 /// Pop `b`, pop `a`, push `a + b` (checked).
 pub const ADD: u8 = 0x10;

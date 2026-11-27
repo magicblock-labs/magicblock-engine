@@ -12,6 +12,8 @@ Clock values. Subexpressions can execute through self-CPI. Top-level evaluation
 writes to the output account; nested evaluation returns data to its caller. Tests
 can therefore exercise account mutation and nested invocation with the same fixture.
 Malformed expressions and checked-arithmetic failures return program errors.
+An expression can require a given account to have signed, so tests can check
+signatures granted through CPI, such as PDA signers.
 
 The transfer instruction changes lamports and stored calculator values on two
 distinct program-owned writable accounts. It deliberately uses wrapping arithmetic

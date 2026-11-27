@@ -568,6 +568,38 @@ async fn failed_execution_records_an_error_status() {
     harness.close().await;
 }
 
+// `REQUIRE_SIGNER` lets the fixture stand in for programs that trust a signer:
+// the expression commits only when the named account actually signed.
+#[tokio::test(flavor = "current_thread")]
+async fn require_signer_accepts_signers_and_rejects_others() {
+    let harness = Harness::new(false).await;
+    let output = store_v42(&harness, 5, AccountMode::Delegated);
+    let unsigned = store_v42(&harness, 0, AccountMode::Delegated);
+    let signer = Keypair::new();
+    let expr = (E::acc(0) + E::lit(1)).require_signer(1);
+
+    let (signature, tx) = signed_view(
+        &harness,
+        Some(&signer),
+        expr.compose_signed(output, &[signer.pubkey()], signer.pubkey()),
+    );
+    harness.execute(tx).await;
+    harness.barrier().await;
+    assert!(harness.status(signature).await.result.is_ok());
+    assert_eq!(load_v42_data(&harness, output), Some(6));
+
+    let (signature, tx) = signed_view(&harness, Some(&signer), expr.compose(output, &[unsigned]));
+    harness.execute(tx).await;
+    harness.barrier().await;
+    assert!(harness.status(signature).await.result.is_err());
+    assert_eq!(
+        load_v42_data(&harness, output),
+        Some(6),
+        "failed check commits no writes"
+    );
+    harness.close().await;
+}
+
 // A backlog of writes to one account must keep making progress even when every
 // transaction initially contends for the same lock.
 #[tokio::test(flavor = "current_thread")]

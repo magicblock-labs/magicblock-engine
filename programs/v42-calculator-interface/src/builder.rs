@@ -62,6 +62,15 @@ impl Expr {
         Self(vec![PUSH_CLOCK])
     }
 
+    /// Require instruction account `index` to have signed before this
+    /// expression's value is used; evaluation fails otherwise. The result is
+    /// unchanged. Mark that account's meta as a signer, e.g. with
+    /// [`Expr::compose_signed`].
+    pub fn require_signer(mut self, index: u8) -> Self {
+        self.0.extend_from_slice(&[REQUIRE_SIGNER, index]);
+        self
+    }
+
     /// Evaluate this subexpression through a recursive self-CPI rather than
     /// inline. All instruction accounts are forwarded to the callee, so
     /// [`Expr::acc`] indices are unchanged at any depth.
@@ -91,6 +100,21 @@ impl Expr {
             accounts,
             data: self.0.clone(),
         }
+    }
+
+    /// [`Expr::compose`], with the operand `signer` marked as a signer. Pair
+    /// with [`Expr::require_signer`] at that operand's index.
+    pub fn compose_signed(
+        &self,
+        output: Pubkey,
+        operands: &[Pubkey],
+        signer: Pubkey,
+    ) -> Instruction {
+        let mut instruction = self.compose(output, operands);
+        for meta in &mut instruction.accounts[1..=operands.len()] {
+            meta.is_signer |= meta.pubkey == signer;
+        }
+        instruction
     }
 
     fn binary(mut self, rhs: Expr, op: u8) -> Self {
