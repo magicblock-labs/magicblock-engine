@@ -42,6 +42,7 @@ fn eval(accounts: &[AccountInfo], data: &[u8]) -> Result<i64, ProgramError> {
             PUSH_LIT => stack.push(cursor.i64()?)?,
             PUSH_ACC => stack.push(account_i64(accounts, cursor.u8()?)?)?,
             PUSH_CLOCK => stack.push(clock_ts()?)?,
+            REQUIRE_SIGNER => require_signer(accounts, cursor.u8()?)?,
             op @ (ADD | SUB | MUL | DIV) => {
                 let b = stack.pop()?;
                 let a = stack.pop()?;
@@ -95,6 +96,18 @@ fn read_head_i64(bytes: &[u8], short: CalcError) -> Result<i64, CalcError> {
 fn account_i64(accounts: &[AccountInfo], index: u8) -> Result<i64, ProgramError> {
     let account = accounts.get(index as usize).ok_or(CalcError::BadAccountIndex)?;
     read_account_value(&account.try_borrow_data()?)
+}
+
+/// Fails unless instruction account `index` signed, for callers that grant a
+/// signature through CPI, such as a PDA signer.
+fn require_signer(accounts: &[AccountInfo], index: u8) -> ProgramResult {
+    let account = accounts.get(index as usize).ok_or(CalcError::BadAccountIndex)?;
+    if !account.is_signer {
+        msg!("v42: account {} did not sign", account.key);
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    msg!("v42: signer {}", account.key);
+    Ok(())
 }
 
 fn clock_ts() -> Result<i64, ProgramError> {
